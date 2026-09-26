@@ -1022,9 +1022,10 @@ def _turn(values: NDArray, rotation: int) -> NDArray:
 
 
 def _canvas(size: tuple[int, int], rng: np.random.Generator) -> torch.Tensor:
-    """A plain surface: a grey-ish tone, smooth shading and fine grain, as (3, H, W) uint8."""
-    tone = rng.uniform(70, 190) + rng.uniform(-15, 15, size=3)
-    shading = torch.from_numpy(rng.uniform(-25, 25, size=(1, 3, 3, 4)))
+    """A plain surface: a grey tone with a slight tint, smooth shading shared by the
+    channels and fine grain, as (3, H, W) uint8."""
+    tone = rng.uniform(70, 190) + rng.uniform(-12, 12, size=3)
+    shading = torch.from_numpy(rng.uniform(-25, 25, size=(1, 1, 3, 4)))
     shading = F.interpolate(shading, size=size, mode="bicubic", align_corners=True)[0]
     grain = torch.from_numpy(rng.normal(0, 4, size=(3, *size)))
     values = torch.from_numpy(tone).view(3, 1, 1) + shading + grain
