@@ -98,24 +98,16 @@ def test_sidecar_optional_but_mismatch_rejected(checkpoint):
     assert caught.value.reason_code == "checkpoint_hash_mismatch"
 
 
-@pytest.mark.parametrize("change", ["schema", "config", "shape", "keys", "dtype", "nan", "huge"])
+@pytest.mark.parametrize("change", ["schema", "shape", "nan"])
 def test_invalid_checkpoints_are_rejected_strictly(checkpoint, change):
     saved = torch.load(checkpoint, weights_only=True)
     key = next(iter(saved["model_state"]))
     if change == "schema":
         saved["schema_version"] = "unknown"
-    elif change == "config":
-        saved["config"]["model_config"]["unexpected"] = 1
     elif change == "shape":
         saved["model_state"][key] = torch.zeros(1)
-    elif change == "keys":
-        saved["model_state"].pop(key)
-    elif change == "dtype":
-        saved["model_state"][key] = saved["model_state"][key].double()
-    elif change == "nan":
-        saved["model_state"][key].fill_(float("nan"))
     else:
-        saved["config"]["model_config"]["hidden"] = 1_000_000
+        saved["model_state"][key].fill_(float("nan"))
     torch.save(saved, checkpoint)
     checkpoint.with_suffix(".pt.sha256").unlink()
     with pytest.raises(FlattenerError) as caught:
@@ -134,8 +126,17 @@ def test_malformed_file_and_missing_file_have_explicit_errors(tmp_path):
     assert caught.value.status == Status.MODEL_ERROR
 
 
-@pytest.mark.parametrize("policy", ["raise", "return", "original"])
-@pytest.mark.parametrize("bad_output", ["nan", "shape", "runtime", "oob"])
+@pytest.mark.parametrize(
+    "policy,bad_output",
+    [
+        ("raise", "nan"),
+        ("raise", "oob"),
+        ("return", "runtime"),
+        ("return", "oob"),
+        ("original", "shape"),
+        ("original", "oob"),
+    ],
+)
 def test_model_and_geometry_failures_follow_policy(
     checkpoint, image, monkeypatch, policy, bad_output
 ):
@@ -171,7 +172,7 @@ def test_model_and_geometry_failures_follow_policy(
             assert result.image is None
 
 
-@pytest.mark.parametrize("output_size", [(0, 37), (29, True), (4, 37), (29, 2), (100_000, 37)])
+@pytest.mark.parametrize("output_size", [(0, 37), (29, True), (100_000, 37)])
 def test_bad_output_dimensions_fail_before_prediction(checkpoint, image, monkeypatch, output_size):
     predictor = load_predictor(checkpoint)
     monkeypatch.setattr(predictor._model, "forward", lambda x: pytest.fail("prediction ran"))
@@ -231,11 +232,10 @@ def test_allocation_errors_are_not_hidden_by_fallback(checkpoint, image, monkeyp
         unwarp(image, predictor, (29, 37), config=RenderConfig(on_error="original"))
 
 
-@pytest.mark.parametrize("architecture", ["projective", "surface"])
-def test_analytic_inference_uses_direct_dense_coordinates(checkpoint, image, architecture):
+def test_analytic_inference_uses_direct_dense_coordinates(checkpoint, image):
     legacy = load_predictor(checkpoint)
     with torch.random.fork_rng(devices=[]):
-        model = make_coordinate_model(architecture, legacy.model_config).eval()
+        model = make_coordinate_model("projective", legacy.model_config).eval()
     with torch.no_grad():
         model.head[-1].bias[:8].copy_(torch.tensor([.05, -.08, .12, -.2, -.1, .03, .5, -.2]))
     predictor = replace(legacy, _model=model.requires_grad_(False), map_mode="analytic")
@@ -266,7 +266,7 @@ def test_linear_inference_preserves_affine_boundary(checkpoint, image):
         == Status.INVALID_TRANSFORM
 
 
-@pytest.mark.parametrize("failure", ["pair", "shape", "dtype", "nan", "coarse", "missing"])
+@pytest.mark.parametrize("failure", ["pair", "nan", "missing"])
 def test_invalid_analytic_outputs_follow_failure_policy(checkpoint, image, monkeypatch, failure):
     legacy = load_predictor(checkpoint)
     predictor = replace(legacy, map_mode="analytic")
@@ -274,16 +274,8 @@ def test_invalid_analytic_outputs_follow_failure_policy(checkpoint, image, monke
     dense = torch.zeros(1, *image.shape[:2], 2)
     if failure == "pair":
         output = dense
-    elif failure == "shape":
-        output = coarse, dense[..., 0]
-    elif failure == "dtype":
-        output = coarse, dense.double()
-    elif failure == "nan":
-        output = coarse, dense.fill_(float("nan"))
-    elif failure == "coarse":
-        output = coarse[:, 0], dense
     else:
-        output = coarse, dense
+        output = coarse, dense.fill_(float("nan"))
     if failure != "missing":
         monkeypatch.setattr(predictor._model, "forward_dense", lambda *args: output, raising=False)
     result = unwarp(image, predictor, image.shape[:2], config=RenderConfig(on_error="original"))

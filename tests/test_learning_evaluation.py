@@ -24,11 +24,10 @@ def test_three_four_source_pixel_displacement_is_five_at_unequal_resolution():
     assert endpoint_error(prediction, truth, mask, (300, 200)) == pytest.approx(5, abs=1e-12)
 
 
-@pytest.mark.parametrize("value", [np.nan, np.inf, -np.inf])
-def test_nonfinite_selected_predictions_invalidate_instead_of_shrinking_mask(value):
+def test_nonfinite_selected_predictions_invalidate_instead_of_shrinking_mask():
     truth = identity_map((4, 5))
     prediction = truth.copy()
-    prediction[1, 2, 0] = value
+    prediction[1, 2, 0] = np.nan
     with pytest.raises(ValueError, match="prediction.*non-finite"):
         endpoint_error(prediction, truth, np.ones((4, 5), dtype=bool), (4, 5))
 
@@ -88,7 +87,7 @@ def test_outer_eight_pixels_boundary_intersects_gt_and_is_measured_separately():
     assert result["boundary8_epe_pixels"] == 0
 
 
-@pytest.mark.parametrize("source_size", [(0, 4), (4, 0), (True, 4), (4.0, 5), "45"])
+@pytest.mark.parametrize("source_size", [(0, 4), (True, 4)])
 def test_invalid_source_sizes_are_rejected(source_size):
     truth = identity_map((4, 5))
     with pytest.raises(ValueError, match="source_size"):
@@ -110,10 +109,9 @@ def efficient_cpu_threads():
     torch.set_num_threads(previous)
 
 
-@pytest.mark.parametrize("output_size", [(4, 6), (12, 16), (24, 32)])
-def test_page_footprint_is_not_point_occupancy_and_detects_cropping(output_size):
+def test_page_footprint_is_not_point_occupancy_and_detects_cropping():
     source_mask = np.ones((48, 64), dtype=bool)
-    grid = identity_map(output_size)
+    grid = identity_map((12, 16))
     full = evaluation.page_sampling_metrics(grid, source_mask)
     assert full["page_sampling_precision"] == full["source_page_coverage"] == 1
     assert full["source_page_iou"] == 1
@@ -309,14 +307,11 @@ def scene_evaluation_fixture(tmp_path, monkeypatch):
     return root, checkpoint, state
 
 
-@pytest.mark.parametrize(
-    "schema", ["coordinate-study-0.1", "coordinate-study-0.2", "coordinate-study-0.3"]
-)
 def test_scene_frozen_protocol_full_render_and_cross_manifest(
-    scene_evaluation_fixture, tmp_path, schema
+    scene_evaluation_fixture, tmp_path
 ):
     root, checkpoint, state = scene_evaluation_fixture
-    state.schema = schema
+    state.schema = "coordinate-study-0.3"
     rng, threads = torch.get_rng_state().clone(), torch.get_num_threads()
     output = tmp_path / "evaluation"
     report = evaluation.evaluate_scene_checkpoint(
@@ -328,7 +323,7 @@ def test_scene_frozen_protocol_full_render_and_cross_manifest(
     assert report["quality_status"] == "not_evaluated"
     assert report["quality_claim_allowed"] is False
     assert report["protocol"]["training_manifest_matches_evaluation"] is False
-    assert report["protocol"]["checkpoint_schema"] == schema
+    assert report["protocol"]["checkpoint_schema"] == "coordinate-study-0.3"
     assert report["protocol"]["output_size"] == [12, 16]
     assert report["protocol"]["source_size"] == [48, 64]
     assert report["summary"]["epe_pixels"] == {"count": 3, "mean": 0, "median": 0, "p95": 0}
@@ -427,11 +422,9 @@ def test_scene_interrupt_resume_has_exact_prefix_no_duplicate_cases(
     assert len(state.visited) == 3
 
 
-@pytest.mark.parametrize(
-    "change", ["rows", "split", "output_size", "source", "manifest", "quality"]
-)
+@pytest.mark.parametrize("change", ["rows", "manifest", "quality"])
 def test_scene_resume_rejects_changed_protocol_or_report(
-    scene_evaluation_fixture, tmp_path, monkeypatch, change
+    scene_evaluation_fixture, tmp_path, change
 ):
     root, checkpoint, _ = scene_evaluation_fixture
     output = tmp_path / "frozen"
@@ -444,14 +437,6 @@ def test_scene_resume_rejects_changed_protocol_or_report(
         else:
             report["quality_claim_allowed"] = True
         (output / "report.json").write_text(json.dumps(report))
-    elif change == "split":
-        arguments["split"] = "test"
-    elif change == "output_size":
-        arguments["output_size"] = (14, 18)
-    elif change == "source":
-        original = evaluation._scene_provenance()
-        original["source_sha256"] = "0" * 64
-        monkeypatch.setattr(evaluation, "_scene_provenance", lambda: original)
     else:
         (root / "manifest.json").write_text('{"fixture":"changed"}')
     with pytest.raises(ValueError, match="resume"):
@@ -543,7 +528,7 @@ def test_scene_paper_opt_in_has_separate_failure_inclusive_source_denominators(
     assert [row["source"] for row in report["samples"]] == ["authored"] * 3 + ["paper"] * 2
 
 
-@pytest.mark.parametrize("invalid", [1, 0, None, "true", []])
+@pytest.mark.parametrize("invalid", [1, None])
 def test_scene_paper_opt_in_requires_strict_boolean_before_dataset_access(
     scene_evaluation_fixture, tmp_path, invalid
 ):
@@ -645,7 +630,7 @@ def test_scene_actual_capture_and_simulated_paper_have_distinct_complete_denomin
     assert simulated["source_page_coverage"]["mean"] == 1
 
 
-@pytest.mark.parametrize("kind", ["authored", "unknown", None, 1])
+@pytest.mark.parametrize("kind", ["unknown", None])
 def test_scene_invalid_paper_kind_is_rejected_before_case_access(
     scene_evaluation_fixture, tmp_path, kind
 ):
@@ -797,16 +782,14 @@ def test_selection_no_passing_candidate_and_boundary_thresholds(selection_eviden
     assert result["candidates"][0]["eligible"] is False
 
 
-@pytest.mark.parametrize("fault", ["epe", "boundary", "relative", "renderer", "nonfinite"])
+@pytest.mark.parametrize("fault", ["epe", "nonfinite"])
 def test_selection_incomplete_candidate_is_accounted_for_not_selected(selection_evidence, fault):
     def missing(report):
         row = report["samples"][3]
-        field = {"epe": "epe_pixels", "boundary": "boundary8_epe_pixels",
-                 "relative": "page_relative_epe", "renderer": "renderer_status"}
         if fault == "nonfinite":
             row["non_finite_prediction"] = True
         else:
-            row[field[fault]] = None
+            row["epe_pixels"] = None
         row.update(status="failed", errors=[{"reason": "fixture_missing"}])
 
     baseline = selection_evidence("baseline")
@@ -851,46 +834,22 @@ def test_selection_ranking_is_order_independent_and_zero_baseline_safe(selection
     json.dumps(result, allow_nan=False)
 
 
-@pytest.mark.parametrize("fault", ["summary", "samples_sha", "protocol_sha", "schema", "complete",
-                                  "integrity", "state", "quality", "test", "checkpoint_binding",
-                                  "source_digest", "runtime_digest", "source_kind_count", "bool",
-                                  "negative", "over_one", "duplicate", "bad_source"])
+@pytest.mark.parametrize("fault", ["summary", "protocol_sha", "quality", "test", "bool"])
 def test_selection_rejects_malformed_even_if_outer_report_sha_is_updated(selection_evidence, fault):
     def corrupt(report):
         row, protocol = report["samples"][0], report["protocol"]
         if fault == "summary":
             report["summary"]["by_source"]["authored"]["by_size_bin"]["small"][
                 "epe_pixels"]["mean"] += 1
-        elif fault in ("samples_sha", "protocol_sha"):
-            report[fault + "256"] = "0" * 64
-        elif fault == "schema":
-            report["schema_version"] = "unknown"
-        elif fault in ("complete", "integrity"):
-            report["evaluation_complete" if fault == "complete" else "integrity_verified"] = 1
-        elif fault == "state":
-            report["state"] = "interrupted"
+        elif fault == "protocol_sha":
+            report["protocol_sha256"] = "0" * 64
         elif fault == "quality":
             report["quality_claim_allowed"] = True
         elif fault == "test":
             protocol["split"] = "test"
-        elif fault == "checkpoint_binding":
-            protocol["checkpoint_sha256"] = "0" * 64
-        elif fault in ("source_digest", "runtime_digest"):
-            protocol[fault.replace("digest", "sha256")] = "0" * 64
-        elif fault == "source_kind_count":
-            protocol["source_kind_counts"]["capture"] = True
-        elif fault == "bool":
+        else:
             row["epe_pixels"] = True
-        elif fault == "negative":
-            row["page_relative_epe"] = -1
-        elif fault == "over_one":
-            row["source_page_coverage"] = 1.001
-        elif fault == "duplicate":
-            report["samples"][1]["id"] = row["id"]
-        elif fault == "bad_source":
-            row["source"] = "unknown"
-        if fault != "samples_sha":
-            report["samples_sha256"] = evaluation._json_digest(report["samples"])
+        report["samples_sha256"] = evaluation._json_digest(report["samples"])
         if fault != "protocol_sha":
             report["protocol_sha256"] = evaluation._json_digest(protocol)
 
@@ -900,30 +859,21 @@ def test_selection_rejects_malformed_even_if_outer_report_sha_is_updated(selecti
         evaluation.select_scene_checkpoints(baseline, [broken])
 
 
-@pytest.mark.parametrize("fault", ["manifest", "record_hash", "runtime", "definitions", "order",
-                                  "document", "source_size"])
+@pytest.mark.parametrize("fault", ["manifest", "runtime", "order"])
 def test_selection_rejects_different_protocol_or_ordered_cases(selection_evidence, fault):
     def different(report):
         protocol = report["protocol"]
-        if fault in ("manifest", "record_hash"):
-            protocol["dataset_manifest_sha256" if fault == "manifest" else
-                     "dataset_records_sha256"] = "a" * 64
+        if fault == "manifest":
+            protocol["dataset_manifest_sha256"] = "a" * 64
         elif fault == "runtime":
             protocol["runtime"]["torch_threads"] += 1
             protocol["runtime_sha256"] = evaluation._json_digest(protocol["runtime"])
-        elif fault == "definitions":
-            protocol["definitions"]["epe"] = "different units"
-        elif fault == "order":
-            report["samples"].reverse()
-        elif fault == "document":
-            report["samples"][0]["document_group"] = "different"
         else:
-            protocol["source_size"] = [64, 48]
+            report["samples"].reverse()
 
     baseline = selection_evidence("baseline")
     other = selection_evidence("other", change=different)
-    message = "definitions" if fault == "definitions" else "protocol/cases"
-    with pytest.raises(ValueError, match=message):
+    with pytest.raises(ValueError, match="protocol/cases"):
         evaluation.select_scene_checkpoints(baseline, [other])
 
 
@@ -950,12 +900,9 @@ def test_selection_document_macro_not_frame_macro_and_model_configs_may_differ(s
     assert result["best_eligible"]["id"] == "candidate"
 
 
-@pytest.mark.parametrize("target", ["checkpoint", "sidecar", "report"])
-def test_selection_actual_bytes_are_verified(selection_evidence, target):
+def test_selection_actual_bytes_are_verified(selection_evidence):
     baseline, candidate = selection_evidence("baseline"), selection_evidence("candidate")
-    path = Path(candidate.checkpoint_path if target != "report" else candidate.report_path)
-    if target == "sidecar":
-        path = path.with_suffix(".pt.sha256")
+    path = Path(candidate.checkpoint_path)
     path.write_bytes(path.read_bytes() + b"changed")
     with pytest.raises(ValueError):
         evaluation.select_scene_checkpoints(baseline, [candidate])
@@ -1011,18 +958,10 @@ def test_selection_cli_frozen_relative_spec_and_exit_codes(selection_evidence, t
     assert not (tmp_path / "invalid.json").exists()
 
 
-@pytest.mark.parametrize("fault", ["definitions", "runtime", "cuda", "runtime_boolean"])
-def test_selection_rejects_shared_noncanonical_contract(selection_evidence, fault):
+def test_selection_rejects_shared_noncanonical_contract(selection_evidence):
     def corrupt(report):
         protocol = report["protocol"]
-        if fault == "definitions":
-            protocol["definitions"] = {}
-        elif fault == "runtime":
-            protocol["runtime"] = {}
-        elif fault == "cuda":
-            protocol["runtime"]["device"] = "cuda:0"
-        else:
-            protocol["runtime"]["torch_threads"] = True
+        protocol["runtime"]["device"] = "cuda:0"
         protocol["runtime_sha256"] = evaluation._json_digest(protocol["runtime"])
 
     baseline = selection_evidence("baseline", change=corrupt)

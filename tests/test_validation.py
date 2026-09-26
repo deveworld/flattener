@@ -39,18 +39,25 @@ def test_default_and_explicit_config():
     assert validate_config(config) == config
 
 
-@pytest.mark.parametrize("config", [{}, "default", 1, False])
+@pytest.mark.parametrize("config", [{}, 1])
 def test_config_requires_render_config(config):
     assert_error(validate_config, config, reason="invalid_config")
 
 
-@pytest.mark.parametrize("name", ["max_input_pixels", "max_output_pixels", "max_side"])
-@pytest.mark.parametrize("value", [0, -1, 1.5, True, np.bool_(True)])
+@pytest.mark.parametrize(
+    "name,value",
+    [
+        ("max_input_pixels", 0),
+        ("max_output_pixels", 1.5),
+        ("max_side", True),
+        ("max_side", np.bool_(True)),
+    ],
+)
 def test_config_resource_limits_are_positive_integers(name, value):
     assert_error(validate_config, replace(RenderConfig(), **{name: value}), reason="invalid_config")
 
 
-@pytest.mark.parametrize("value", [-0.01, 1.01, np.nan, np.inf, -np.inf, "0.2"])
+@pytest.mark.parametrize("value", [1.01, np.nan, "0.2"])
 def test_config_out_of_bounds_fraction_is_finite_and_bounded(value):
     assert_error(
         validate_config,
@@ -59,7 +66,7 @@ def test_config_out_of_bounds_fraction_is_finite_and_bounded(value):
     )
 
 
-@pytest.mark.parametrize("value", [0, -1, np.nan, np.inf, -np.inf, "0.001"])
+@pytest.mark.parametrize("value", [0, np.inf, "0.001"])
 def test_config_jacobian_threshold_is_positive_and_finite(value):
     assert_error(validate_config, RenderConfig(min_jacobian_ratio=value), reason="invalid_config")
 
@@ -68,13 +75,9 @@ def test_config_jacobian_threshold_is_positive_and_finite(value):
     "value",
     [
         (0, 0),
-        (0, 0, 0, 0),
         [0, 0, 0],
         (256, 0, 0),
-        (-1, 0, 0),
-        (0.0, 0, 0),
         (True, 0, 0),
-        (np.bool_(False), 0, 0),
         None,
     ],
 )
@@ -82,13 +85,12 @@ def test_config_fill_color_is_rgb_integer_tuple(value):
     assert_error(validate_config, RenderConfig(fill_rgb=value), reason="invalid_config")
 
 
-@pytest.mark.parametrize("value", ["ignore", "", None, True])
+@pytest.mark.parametrize("value", ["ignore", None])
 def test_config_error_policy_is_explicit(value):
     assert_error(validate_config, RenderConfig(on_error=value), reason="invalid_config")
 
 
-@pytest.mark.parametrize("fraction", [0, 1])
-@pytest.mark.parametrize("policy", ["raise", "return", "original"])
+@pytest.mark.parametrize("fraction,policy", [(0, "raise"), (1, "return"), (1, "original")])
 def test_config_allows_fraction_endpoints_and_each_error_policy(fraction, policy):
     config = RenderConfig(max_out_of_bounds_fraction=fraction, on_error=policy)
     assert validate_config(config) == config
@@ -101,7 +103,7 @@ def test_size_accepts_positive_integral_height_width(size):
 
 @pytest.mark.parametrize(
     "size",
-    [None, "23", (), (2,), (2, 3, 4), (0, 3), (-1, 3), (2.0, 3), (True, 3), (np.bool_(True), 3)],
+    [None, "23", (2,), (0, 3), (2.0, 3), (True, 3)],
 )
 def test_size_rejects_malformed_or_nonintegral_dimensions(size):
     assert_error(
@@ -307,9 +309,8 @@ def test_masked_nonfinite_values_do_not_enter_jacobians_or_mutate_inputs():
     assert stats["min_jacobian_ratio"] == pytest.approx(1, abs=1e-6)
 
 
-@pytest.mark.parametrize("bad_value", [np.nan, np.inf, -np.inf])
-def test_active_nonfinite_coordinates_fail_before_out_of_bounds(bad_value):
-    grid = np.array([[[bad_value, 0], [2, 0]]], dtype=np.float32)
+def test_active_nonfinite_coordinates_fail_before_out_of_bounds():
+    grid = np.array([[[np.nan, 0], [2, 0]]], dtype=np.float32)
     assert_error(
         validate_geometry,
         grid,

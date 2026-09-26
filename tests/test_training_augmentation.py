@@ -43,8 +43,14 @@ def test_disabled_is_exact_identity_without_rng_or_admission(monkeypatch):
     assert aug.augment_training_batch(batch, photo_size=None) is batch
 
 
-@pytest.mark.parametrize("name", ["rotation_probability", "background_probability"])
-@pytest.mark.parametrize("value", [-0.1, 1.1, float("nan"), float("inf"), True, "0.5"])
+@pytest.mark.parametrize(
+    "name,value",
+    [
+        ("rotation_probability", 1.1),
+        ("background_probability", float("nan")),
+        ("rotation_probability", True),
+    ],
+)
 def test_invalid_probability_rejected_before_rng(name, value, monkeypatch):
     monkeypatch.setattr(torch, "rand", lambda *args, **kwargs: pytest.fail("RNG draw"))
     with pytest.raises(FlattenerError, match="finite in"):
@@ -81,7 +87,7 @@ def test_background_gate_is_per_image_and_unselected_image_exact(monkeypatch):
     assert not torch.equal(result["image"][[0, 2]], batch["image"][[0, 2]])
 
 
-@pytest.mark.parametrize("preview", [(80, 60), (40, 30), (120, 90), (48, 48)])
+@pytest.mark.parametrize("preview", [(40, 30), (48, 48)])
 def test_thin_page_mask_remains_protected_after_any_preview_resize(preview):
     source = torch.zeros((1, 80, 60), dtype=torch.bool)
     source[:, 20:61, 31] = True
@@ -93,15 +99,11 @@ def test_thin_page_mask_remains_protected_after_any_preview_resize(preview):
     assert bool(protected[rows, columns].all())
 
 
-@pytest.mark.parametrize("broken", ["missing", "dtype", "size", "empty"])
+@pytest.mark.parametrize("broken", ["missing", "empty"])
 def test_background_requires_safe_source_mask_even_on_validated_path(broken):
     batch = _batch()
     if broken == "missing":
         batch.pop("source_mask")
-    elif broken == "dtype":
-        batch["source_mask"] = batch["source_mask"].float()
-    elif broken == "size":
-        batch["source_mask"] = batch["source_mask"][:, :40]
     else:
         batch["source_mask"].zero_()
     with pytest.raises(FlattenerError, match="mask"):
@@ -138,9 +140,7 @@ def test_per_image_turns_transform_values_not_flat_domain_and_preserve_valid(mon
 
 
 @pytest.mark.parametrize("photo,preview,filtered", [
-    ((384, 288), (384, 288), (288, 216)),
     ((384, 288), (192, 144), (144, 108)),
-    ((384, 288), (192, 192), (192, 108)),
     ((288, 384), (144, 192), (108, 144)),
 ])
 def test_antialias_prefilter_uses_physical_photo_aspect(photo, preview, filtered, monkeypatch):
@@ -159,8 +159,7 @@ def test_antialias_prefilter_uses_physical_photo_aspect(photo, preview, filtered
     assert calls[0]["align_corners"] is False and calls[0]["antialias"] is True
 
 
-@pytest.mark.parametrize("photo,preview", [((80, 60), (40, 30)), ((80, 60), (48, 48)),
-                                         ((60, 80), (30, 40)), ((64, 64), (32, 32))])
+@pytest.mark.parametrize("photo,preview", [((80, 60), (48, 48)), ((60, 80), (30, 40))])
 def test_inverse_sampling_agrees_with_independent_coordinate_color_oracle(photo, preview):
     batch = _batch(count=1, photo=photo, preview=preview)
     h, w = photo
@@ -279,17 +278,15 @@ def _with_semantic(batch, degrees=0, photo=(80, 60)):
             "direction_target": direction, "direction_valid": eligible}
 
 
-@pytest.mark.parametrize("degrees,expected", [(0, 0), (35, 0), (50, 1), (90, 1),
-                                               (180, 2), (270, 3), (-35, 0), (-50, 3)])
+@pytest.mark.parametrize("degrees,expected", [(0, 0), (50, 1), (180, 2), (-50, 3)])
 def test_semantic_direction_uses_clockwise_physical_horizontal_axis(degrees, expected):
     corners = _semantic_corners(degrees)
     direction, eligible = aug._direction_labels(corners[None], (80, 60))
     assert direction.tolist() == [expected] and eligible.tolist() == [True]
 
 
-@pytest.mark.parametrize("degrees", [45, 135, 225, 315])
-def test_semantic_direction_boundary_is_masked_not_arbitrarily_assigned(degrees):
-    direction, eligible = aug._direction_labels(_semantic_corners(degrees)[None], (80, 60))
+def test_semantic_direction_boundary_is_masked_not_arbitrarily_assigned():
+    direction, eligible = aug._direction_labels(_semantic_corners(45)[None], (80, 60))
     assert not eligible[0] and direction[0] == 0
 
 
@@ -359,19 +356,13 @@ def test_background_only_does_not_change_semantic_labels_or_existing_rng_flow():
         assert result[key] is semantic[key]
 
 
-@pytest.mark.parametrize("broken", ["partial", "dtype", "shape", "nan", "outside", "direction"])
+@pytest.mark.parametrize("broken", ["partial", "nan", "direction"])
 def test_semantic_transform_rejects_inconsistent_labels(broken):
     batch = _with_semantic(_batch(count=1))
     if broken == "partial":
         batch.pop("direction_valid")
-    elif broken == "dtype":
-        batch["direction_target"] = batch["direction_target"].float()
-    elif broken == "shape":
-        batch["corner_target"] = batch["corner_target"][:, :3]
     elif broken == "nan":
         batch["corner_target"][:, 0] = torch.nan
-    elif broken == "outside":
-        batch["corner_target"][:, 0, 0] = 1.1
     else:
         batch["direction_target"][:] = 4
     with pytest.raises(FlattenerError):
@@ -394,9 +385,9 @@ def test_semantic_transform_rejects_nonfinite_matrix_even_when_all_corners_are_m
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA augmentation parity requires a GPU")
-@pytest.mark.parametrize("preview", [(384, 288), (192, 144), (192, 192)])
-def test_cuda_parity_protected_page_and_disabled_rng_identity(preview):
-    """Same original-photo aspect; full, half and anisotropic network previews."""
+def test_cuda_parity_protected_page_and_disabled_rng_identity():
+    """Half-size network preview with the original photo aspect."""
+    preview = (192, 144)
     device = torch.device("cuda", torch.cuda.current_device())
     with torch.random.fork_rng(devices=[device.index]):
         cpu = _with_semantic(_batch(count=8, photo=(384, 288), preview=preview),

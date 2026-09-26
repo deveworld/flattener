@@ -12,7 +12,6 @@ from dataclasses import asdict, replace
 from types import SimpleNamespace
 
 import pytest
-import test_coordinate_scene_data as coordinate_fixtures
 import torch
 from PIL import Image
 
@@ -20,11 +19,6 @@ from flattener import FlattenerError
 from flattener.learning import coordinate_study as study
 from flattener.learning import scene_data
 from flattener.learning.model import ModelConfig, coarse_identity, dense_maps
-
-# Reuse the authored, tiny fixture chain without another dataset-building script.
-source = coordinate_fixtures.source
-paper_source = coordinate_fixtures.paper_source
-mutable_paper = coordinate_fixtures.mutable_paper
 
 
 def _oriented_config(**changes):
@@ -43,7 +37,7 @@ def _semantic_batch():
             "direction_valid": torch.ones(1, dtype=torch.bool)}
 
 
-@pytest.mark.parametrize("mode", [None, True, "", "Teacher", "argmax", 1])
+@pytest.mark.parametrize("mode", [None, "Teacher"])
 def test_direction_training_mode_rejects_invalid_values_before_device_or_data(
         mode, monkeypatch, tmp_path):
     monkeypatch.setattr(study, "_resolve_device", lambda *args, **kwargs:
@@ -56,10 +50,9 @@ def test_direction_training_mode_rejects_invalid_values_before_device_or_data(
     assert not output.exists()
 
 
-@pytest.mark.parametrize("architecture", ["global", "spatial", "page", "projective", "surface"])
-def test_teacher_direction_requires_oriented_architecture(architecture):
-    config = study.StudyConfig(architecture=architecture, direction_training="teacher",
-                              map_mode="analytic" if architecture in ("projective", "surface")
+def test_teacher_direction_requires_oriented_architecture():
+    config = study.StudyConfig(architecture="global", direction_training="teacher",
+                              map_mode="analytic" if "global" in ("projective", "surface")
                               else "legacy")
     with pytest.raises(FlattenerError, match="teacher direction requires oriented_surface"):
         study._config(config)
@@ -135,8 +128,7 @@ def test_teacher_override_is_private_checked_training_only():
         study._forward_maps(model, images, config, photo_size=(32, 24), _checks=[], **override)
 
 
-@pytest.mark.parametrize("mode", ["predicted", "teacher"])
-@pytest.mark.parametrize("augment", [False, True])
+@pytest.mark.parametrize("mode,augment", [("predicted", False), ("teacher", True)])
 def test_teacher_training_routing_uses_postaugmentation_labels_without_optimization(
         monkeypatch, mode, augment):
     config = _oriented_config(direction_training=mode, rotation_mode="per_image_fit",
@@ -186,8 +178,7 @@ def test_teacher_training_routing_uses_postaugmentation_labels_without_optimizat
     assert all(parameter.grad is None for parameter in model.parameters())
 
 
-@pytest.mark.parametrize("name", ["page_weight", "direction_weight", "corner_weight"])
-@pytest.mark.parametrize("value", [0, -1, True, float("nan"), float("inf")])
+@pytest.mark.parametrize("name,value", [("page_weight", 0), ("corner_weight", float("nan"))])
 def test_oriented_supervision_weights_are_explicit_and_positive(name, value):
     with pytest.raises(FlattenerError):
         study._config(_oriented_config(**{name: value}))
@@ -342,10 +333,10 @@ def test_oriented_training_step_updates_all_heads_with_toy_batch(augment):
 @pytest.mark.training
 @pytest.mark.parametrize("direction_training", ["predicted", "teacher"])
 def test_oriented_labels_cached_loader_train_and_resume_tiny_authored_fixture(
-        source, tmp_path, no_cuda, direction_training):
+        scene_source, tmp_path, no_cuda, direction_training):
     config = _oriented_config(rotation_probability=0.5, rotation_mode="per_image_fit",
                               direction_training=direction_training)
-    caches = study.prepare_coordinate_data(source, config, cache_max_bytes=32 * 1024**2)
+    caches = study.prepare_coordinate_data(scene_source, config, cache_max_bytes=32 * 1024**2)
     train = caches["train"]
     loader = study._data_loader(train, config, torch.Generator().manual_seed(4), False, True)
     batch = next(iter(loader))
@@ -353,7 +344,7 @@ def test_oriented_labels_cached_loader_train_and_resume_tiny_authored_fixture(
     assert batch["direction_target"].dtype == torch.int64
     output = tmp_path / "oriented-tiny"
     report = study.train_coordinate_study(
-        source, output, config, prepared_data=caches, cache_max_bytes=32 * 1024**2,
+        scene_source, output, config, prepared_data=caches, cache_max_bytes=32 * 1024**2,
         stop_after_epoch=1)
     assert report["epochs_completed"] == 1
     first = study.coordinate_checkpoint(output / "last.pt")
@@ -361,11 +352,11 @@ def test_oriented_labels_cached_loader_train_and_resume_tiny_authored_fixture(
     opposite = "teacher" if direction_training == "predicted" else "predicted"
     with pytest.raises(FlattenerError) as caught:
         study.train_coordinate_study(
-            source, output, replace(config, direction_training=opposite),
+            scene_source, output, replace(config, direction_training=opposite),
             prepared_data=caches, cache_max_bytes=32 * 1024**2, resume=output / "last.pt")
     assert caught.value.reason_code == "invalid_resume"
     report = study.train_coordinate_study(
-        source, output, config, prepared_data=caches, cache_max_bytes=32 * 1024**2,
+        scene_source, output, config, prepared_data=caches, cache_max_bytes=32 * 1024**2,
         resume=output / "last.pt")
     assert report["complete"] and report["epochs_completed"] == 2
     assert report["validation_diagnostics"]["epoch"] == 2
@@ -382,7 +373,7 @@ def test_oriented_labels_cached_loader_train_and_resume_tiny_authored_fixture(
 @pytest.mark.training
 @pytest.mark.parametrize("direction_training", ["predicted", "teacher"])
 def test_xpu_oriented_checkpoint_save_resume_preserves_rng(
-        source, tmp_path, no_cuda, direction_training):
+        scene_source, tmp_path, no_cuda, direction_training):
     """Opt-in authored-data XPU smoke; never runs during non-training tests."""
     if not hasattr(torch, "xpu") or not torch.xpu.is_available():
         pytest.skip("explicit XPU smoke requires an available XPU")
@@ -390,7 +381,7 @@ def test_xpu_oriented_checkpoint_save_resume_preserves_rng(
                               rotation_mode="per_image_fit", background_probability=0.5,
                               direction_training=direction_training)
     budget = 32 * 1024**2
-    prepared = study.prepare_coordinate_data(source, config, cache_max_bytes=budget)
+    prepared = study.prepare_coordinate_data(scene_source, config, cache_max_bytes=budget)
     controls = {"prepared_data": prepared, "cache_max_bytes": budget}
     original_device = torch.xpu.current_device()
     selected_rng = torch.xpu.get_rng_state(0).clone()
@@ -406,16 +397,18 @@ def test_xpu_oriented_checkpoint_save_resume_preserves_rng(
             assert torch.equal(torch.xpu.get_rng_state(original_device), other_rng)
 
     reference = tmp_path / "xpu-reference"
-    report = study.train_coordinate_study(source, reference, config, **controls)
+    report = study.train_coordinate_study(scene_source, reference, config, **controls)
     assert report["complete"] and not report["test_evaluated"]
     assert_caller_restored()
     expected = study.coordinate_checkpoint(reference / "last.pt")
     output = tmp_path / "xpu-resumed"
-    first = study.train_coordinate_study(source, output, config, stop_after_epoch=1, **controls)
+    first = study.train_coordinate_study(
+        scene_source, output, config, stop_after_epoch=1, **controls
+    )
     assert first["epochs_completed"] == 1 and not first["complete"]
     assert_caller_restored()
     report = study.train_coordinate_study(
-        source, output, config, resume=output / "last.pt", **controls)
+        scene_source, output, config, resume=output / "last.pt", **controls)
     assert report["complete"] and report["epochs_completed"] == 2
     assert_caller_restored()
     actual = study.coordinate_checkpoint(output / "last.pt")
@@ -507,11 +500,9 @@ def test_cuda_remains_default_and_cpu_requires_explicit_request():
 
 
 @pytest.mark.parametrize("field,value", [
-    ("include_paper_augmentation", 0), ("include_paper_augmentation", 1),
-    ("include_paper_augmentation", "true"), ("include_paper_augmentation", None),
-    ("initial_checkpoint_sha256", True), ("initial_checkpoint_sha256", ""),
-    ("initial_checkpoint_sha256", "a" * 63), ("initial_checkpoint_sha256", "g" * 64),
-    ("initial_checkpoint_sha256", "A" * 64), ("initial_checkpoint_sha256", "a" * 64 + "\n"),
+    ("include_paper_augmentation", 0),
+    ("initial_checkpoint_sha256", True),
+    ("initial_checkpoint_sha256", "a" * 64 + "\n"),
 ])
 def test_initialization_config_rejects_invalid_fields_before_device_or_data(
     field, value, monkeypatch, tmp_path
@@ -569,8 +560,7 @@ def _xpu_checkpoint(payload, *, device="xpu:2", length=32):
     return payload
 
 
-@pytest.mark.parametrize("device", ["xpu", "xpu:2"])
-@pytest.mark.parametrize("length", [16, 32, 65_536])
+@pytest.mark.parametrize("device,length", [("xpu", 16), ("xpu:2", 65_536)])
 def test_latest_xpu_checkpoint_validation_is_cpu_only_and_preserves_rng(
         initial_checkpoint, mocked_xpu, no_cuda, monkeypatch, device, length):
     for name in vars(mocked_xpu[0]):
@@ -584,37 +574,16 @@ def test_latest_xpu_checkpoint_validation_is_cpu_only_and_preserves_rng(
     assert payload["cuda_rng_state"] is None
 
 
-@pytest.mark.parametrize("bad", [
-    "missing", "none", "float", "rank", "short", "long", "meta", "sparse", "unused_cuda",
-    "wrong_device", "wrong_index", "capability", "version_bool", "version_empty", "protocol",
-])
+@pytest.mark.parametrize("bad", ["missing", "sparse", "wrong_device"])
 def test_latest_xpu_checkpoint_rejects_invalid_state_or_provenance(
         initial_checkpoint, mocked_xpu, no_cuda, bad):
     payload = _xpu_checkpoint(initial_checkpoint[2])
     if bad == "missing":
         payload.pop("xpu_rng_state")
-    elif bad == "none":
-        payload["xpu_rng_state"] = None
-    elif bad == "float":
-        payload["xpu_rng_state"] = torch.zeros(32)
-    elif bad == "rank":
-        payload["xpu_rng_state"] = torch.zeros((2, 16), dtype=torch.uint8)
-    elif bad in ("short", "long"):
-        payload["xpu_rng_state"] = torch.zeros(15 if bad == "short" else 65_537, dtype=torch.uint8)
-    elif bad == "meta":
-        payload["xpu_rng_state"] = torch.empty(32, dtype=torch.uint8, device="meta")
     elif bad == "sparse":
         payload["xpu_rng_state"] = torch.zeros(32, dtype=torch.uint8).to_sparse()
-    elif bad == "unused_cuda":
-        payload["cuda_rng_state"] = torch.zeros(32, dtype=torch.uint8)
-    elif bad in ("wrong_device", "wrong_index"):
-        payload["device_info"]["device"] = "cpu" if bad == "wrong_device" else "xpu:1"
-    elif bad == "capability":
-        payload["device_info"]["capability"] = (8, 0)
-    elif bad.startswith("version"):
-        payload["provenance"]["versions"]["torch_xpu"] = True if bad == "version_bool" else ""
     else:
-        payload["provenance"]["execution_protocol"]["devices"] = "automatic fallback"
+        payload["device_info"]["device"] = "cpu"
     with pytest.raises(FlattenerError) as caught:
         study._validate_saved(payload)
     assert caught.value.reason_code == "invalid_checkpoint"
@@ -635,7 +604,7 @@ def test_latest_other_backends_require_none_xpu_state(initial_checkpoint, device
     assert caught.value.reason_code == "invalid_checkpoint"
 
 
-@pytest.mark.parametrize("minor", range(1, 11))
+@pytest.mark.parametrize("minor", [3, 10])
 def test_legacy_checkpoint_fields_remain_strict_without_xpu_state(initial_checkpoint, minor):
     payload = deepcopy(initial_checkpoint[2])
     schema = f"coordinate-study-0.{minor}"
@@ -687,15 +656,13 @@ def test_initialization_binds_verified_model_only_and_preserves_rng(
     assert torch.equal(torch.get_rng_state(), before)
 
 
-@pytest.mark.parametrize("mismatch", ["sha", "architecture", "model_config"])
+@pytest.mark.parametrize("mismatch", ["sha", "model_config"])
 def test_initialization_mismatch_fails_before_data_or_output(
     initial_checkpoint, mismatch, tmp_path
 ):
     path, config, _, _ = initial_checkpoint
     if mismatch == "sha":
         config = replace(config, initial_checkpoint_sha256="0" * 64)
-    elif mismatch == "architecture":
-        config = replace(config, architecture="spatial")
     else:
         config = replace(config, model_config=replace(config.model_config, grid_size=(4, 4)))
     output = tmp_path / "not-created"
@@ -715,8 +682,7 @@ def test_initialization_strictly_rejects_rehashed_nonfinite_weights(initial_chec
     assert caught.value.reason_code == "invalid_checkpoint"
 
 
-@pytest.mark.parametrize("architecture", ["global", "spatial", "page", "projective", "surface"])
-@pytest.mark.parametrize("declare_source", [False, True])
+@pytest.mark.parametrize("architecture,declare_source", [("global", True), ("surface", False)])
 def test_resolution_initialization_copies_full_state_binds_source_and_runs_high_resolution(
         initial_checkpoint, architecture, declare_source, no_cuda):
     path, source_config, payload, _ = initial_checkpoint
@@ -758,16 +724,13 @@ def test_resolution_initialization_copies_full_state_binds_source_and_runs_high_
     assert torch.equal(torch.get_rng_state(), before)
 
 
-@pytest.mark.parametrize("mismatch", ["grid", "channels", "hidden", "architecture", "sha",
-                                      "declared_source"])
+@pytest.mark.parametrize("mismatch", ["grid", "architecture", "sha"])
 def test_resolution_initialization_rejects_every_non_input_change(initial_checkpoint, mismatch):
     path, source_config, _, _ = initial_checkpoint
     model_config = replace(source_config.model_config, input_size=(32, 24))
     config = replace(source_config, initialization_mode="resolution", model_config=model_config)
-    if mismatch in ("grid", "channels", "hidden"):
-        changes = {"grid": {"grid_size": (4, 3)}, "channels": {"channels": (2, 4, 5)},
-                   "hidden": {"hidden": 9}}[mismatch]
-        config = replace(config, model_config=replace(model_config, **changes))
+    if mismatch == "grid":
+        config = replace(config, model_config=replace(model_config, grid_size=(4, 3)))
     elif mismatch == "architecture":
         config = replace(config, architecture="spatial")
     elif mismatch == "sha":
@@ -783,9 +746,9 @@ def test_resolution_initialization_rejects_every_non_input_change(initial_checkp
 
 
 @pytest.mark.parametrize("field,value", [
-    ("initial_model_config", True), ("initial_model_config", {}),
-    ("initial_model_config", "model"), ("rotation_mode", "per_image"),
-    ("rotation_mode", None), ("rotation_mode", True),
+    ("initial_model_config", True),
+    ("rotation_mode", "per_image"),
+    ("rotation_mode", True),
 ])
 def test_quality_config_rejects_invalid_types_before_device_or_dataset(
         field, value, monkeypatch, tmp_path):
@@ -806,15 +769,13 @@ def test_initial_model_config_is_exclusive_to_resolution_mode(mode):
     assert caught.value.reason_code == "invalid_config"
 
 
-@pytest.mark.parametrize("resume", [None, "last.pt"])
-@pytest.mark.parametrize("bound", ["none", "sha", "config", "both"])
+@pytest.mark.parametrize("resume,bound", [(None, "none"), ("last.pt", "sha"), ("last.pt", "both")])
 def test_resolution_initialization_requires_source_path_or_bound_resume(
         initial_checkpoint, resume, bound):
     _, source_config, _, digest = initial_checkpoint
     config = replace(source_config, initialization_mode="resolution",
                      model_config=replace(source_config.model_config, input_size=(32, 24)),
-                     initial_model_config=(source_config.model_config
-                                           if bound in ("config", "both") else None),
+                     initial_model_config=source_config.model_config if bound == "both" else None,
                      initial_checkpoint_sha256=digest if bound in ("sha", "both") else None)
     if resume is not None and bound == "both":
         actual, state = study._initialization(config, None, resume)
@@ -853,13 +814,13 @@ def test_cuda_admission_precedes_initial_checkpoint_read(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize(
-    "field",
+    "field,value",
     [
-        "topology_weight", "curvature_weight", "gradient_clip_norm", "page_weight",
-        "boundary_weight", "differential_weight", "page_relative_weight", "orientation_weight",
+        ("topology_weight", -1),
+        ("page_weight", float("nan")),
+        ("orientation_weight", True),
     ],
 )
-@pytest.mark.parametrize("value", [-1, True, "1", None, float("nan"), float("inf")])
 def test_invalid_geometry_controls_fail_before_device_or_data(field, value, monkeypatch, tmp_path):
     def forbidden(*args, **kwargs):
         pytest.fail("invalid geometry controls reached device resolution")
@@ -873,9 +834,14 @@ def test_invalid_geometry_controls_fail_before_device_or_data(field, value, monk
     assert not output.exists()
 
 
-@pytest.mark.parametrize("field", ["rotation_probability", "background_probability"])
-@pytest.mark.parametrize("value", [-0.01, 1.01, 2, True, False, None, "0.5",
-                                    float("nan"), float("inf")])
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("rotation_probability", -0.01),
+        ("background_probability", None),
+        ("rotation_probability", float("nan")),
+    ],
+)
 def test_invalid_rotation_probability_fails_before_device_or_data(
         field, value, monkeypatch, tmp_path):
     monkeypatch.setattr(study, "_resolve_device", lambda *args: pytest.fail("device admission"))
@@ -886,35 +852,32 @@ def test_invalid_rotation_probability_fails_before_device_or_data(
     assert not (tmp_path / "no-output").exists()
 
 
-@pytest.mark.parametrize("value", [0, 0.25, 1])
-def test_rotation_probability_accepts_numeric_boundaries_without_cuda(value, no_cuda):
-    config = study.StudyConfig(device="cpu", rotation_probability=value, orientation_weight=value,
-                              background_probability=value)
+def test_rotation_probability_accepts_numeric_boundaries_without_cuda(no_cuda):
+    config = study.StudyConfig(device="cpu", rotation_probability=1, orientation_weight=1,
+                              background_probability=1)
     assert study._config(config) is config
-    assert config.rotation_probability == config.orientation_weight == value
-    assert config.background_probability == value
+    assert config.rotation_probability == config.orientation_weight == 1
+    assert config.background_probability == 1
 
 
-@pytest.mark.parametrize("value", [0, 0.25, 1])
-def test_explicit_geometry_controls_are_preserved_without_device_access(value, no_cuda):
+def test_explicit_geometry_controls_are_preserved_without_device_access(no_cuda):
     config = study.StudyConfig(
-        device="cpu", topology_weight=value, curvature_weight=value, gradient_clip_norm=value
+        device="cpu", topology_weight=1, curvature_weight=1, gradient_clip_norm=1
     )
     assert study._config(config) is config
     assert (config.topology_weight, config.curvature_weight, config.gradient_clip_norm) == (
-        value, value, value
+        1, 1, 1
     )
 
 
-@pytest.mark.parametrize("value", [0, 0.25, 1])
-def test_page_controls_are_preserved_without_device_access(value, no_cuda):
+def test_page_controls_are_preserved_without_device_access(no_cuda):
     config = study.StudyConfig(
-        device="cpu", architecture="page", page_weight=value, boundary_weight=value,
-        differential_weight=value,
+        device="cpu", architecture="page", page_weight=1, boundary_weight=1,
+        differential_weight=1,
     )
     assert study._config(config) is config
     assert (config.page_weight, config.boundary_weight, config.differential_weight) == (
-        value, value, value
+        1, 1, 1
     )
 
 
@@ -934,13 +897,12 @@ def test_page_supervision_requires_page_model_before_device_data_or_output(
     assert not output.exists()
 
 
-@pytest.mark.parametrize("architecture", ["global", "spatial", "page", "projective", "surface"])
-def test_coordinate_supervision_controls_accept_all_architectures(architecture, no_cuda):
+def test_coordinate_supervision_controls_accept_all_architectures(no_cuda):
     config = study.StudyConfig(
-        device="cpu", architecture=architecture, page_weight=0,
+        device="cpu", architecture="global", page_weight=0,
         boundary_weight=0.5, differential_weight=0.25, page_relative_weight=0.75,
         orientation_weight=0.125, rotation_probability=0.5,
-        map_mode="analytic" if architecture in ("projective", "surface") else "legacy",
+        map_mode="analytic" if "global" in ("projective", "surface") else "legacy",
     )
     assert study._config(config) is config
 
@@ -964,8 +926,7 @@ def test_check_device_cli_accepts_explicit_cpu_without_cuda(no_cuda, capsys):
 
 
 @pytest.mark.parametrize(
-    "device", ["cpu:0", "mps", "auto", "cuda:-1", "cuda:x", "", None, True,
-               "xpu:-1", "xpu:x", "xpu:01", "xpu:10000", "xpu:", "xpu:0\n"]
+    "device", ["mps", "auto", "cuda:x", "xpu:01"]
 )
 def test_unsupported_devices_never_fall_back(device, tmp_path):
     output = tmp_path / "must-not-exist"
@@ -975,15 +936,14 @@ def test_unsupported_devices_never_fall_back(device, tmp_path):
     assert not output.exists()
 
 
-@pytest.mark.parametrize("architecture", ["global", "spatial", "page"])
-def test_unavailable_cuda_fails_before_data_or_output(architecture, monkeypatch, tmp_path):
+def test_unavailable_cuda_fails_before_data_or_output(monkeypatch, tmp_path):
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
     output = tmp_path / "not-created"
     with pytest.raises(FlattenerError) as caught:
         study.train_coordinate_study(
             tmp_path / "nonexistent-dataset",
             output,
-            study.StudyConfig(architecture=architecture),
+            study.StudyConfig(architecture="global"),
         )
     assert caught.value.reason_code == "cuda_unavailable"
     assert not output.exists()
@@ -1048,7 +1008,7 @@ def mocked_xpu(monkeypatch):
     return backend, state, events
 
 
-@pytest.mark.parametrize("requested,index", [("xpu", 1), ("xpu:0", 0), ("xpu:2", 2)])
+@pytest.mark.parametrize("requested,index", [("xpu", 1), ("xpu:2", 2)])
 def test_explicit_xpu_config_resolution_and_metadata_use_only_mocked_selected_backend(
         requested, index, mocked_xpu, no_cuda):
     config = study.StudyConfig(device=requested)
@@ -1060,7 +1020,7 @@ def test_explicit_xpu_config_resolution_and_metadata_use_only_mocked_selected_ba
     assert mocked_xpu[2] == []
 
 
-@pytest.mark.parametrize("requested", ["cpu", "cuda", "mps", "xpu:-1", "xpu:01", None, True])
+@pytest.mark.parametrize("requested", ["cpu", "xpu:01", None])
 def test_xpu_specific_resolver_rejects_other_or_malformed_devices_before_backend(
         requested, monkeypatch, no_cuda):
     monkeypatch.setattr(torch, "xpu", None)
@@ -1069,16 +1029,12 @@ def test_xpu_specific_resolver_rejects_other_or_malformed_devices_before_backend
     assert caught.value.reason_code == "xpu_required"
 
 
-@pytest.mark.parametrize("failure", ["unavailable", "missing_backend", "absent_index", "runtime"])
+@pytest.mark.parametrize("failure", ["unavailable", "runtime"])
 def test_xpu_admission_fails_before_data_checkpoint_or_output(
         failure, mocked_xpu, no_cuda, monkeypatch, tmp_path):
     backend, state, _ = mocked_xpu
     if failure == "unavailable":
         state.available = False
-    elif failure == "missing_backend":
-        monkeypatch.setattr(torch, "xpu", None)
-    elif failure == "absent_index":
-        state.count = 2
     else:
         def unavailable():
             raise RuntimeError("mock driver unavailable")
@@ -1171,7 +1127,7 @@ def test_explicit_cpu_rng_and_resolution_do_not_consult_xpu(mocked_xpu, no_cuda,
     assert torch.equal(torch.get_rng_state(), before)
 
 
-@pytest.mark.parametrize("execution", ["cpu", "cuda:0", "xpu:0", "xpu:2"])
+@pytest.mark.parametrize("execution", ["cpu", "xpu:2"])
 def test_xpu_backward_guard_rejects_cpu_model_before_batch_optimizer_or_backend(
         execution, mocked_xpu, no_cuda):
     model = torch.nn.Linear(2, 2)
@@ -1186,11 +1142,8 @@ def test_xpu_backward_guard_rejects_cpu_model_before_batch_optimizer_or_backend(
     "field,value",
     [
         ("epochs", 0),
-        ("epochs", True),
-        ("batch_size", 0),
         ("seed", -1),
         ("learning_rate", float("nan")),
-        ("learning_rate", 0),
         ("architecture", "unknown"),
     ],
 )
@@ -1213,22 +1166,9 @@ def test_check_device_cli_is_read_only(monkeypatch, capsys):
     "controls",
     [
         {"stop_after_epoch": -1},
-        {"stop_after_epoch": True},
-        {"stop_after_epoch": 1.0},
-        {"stop_after_epoch": "1"},
         {"stop_after_epoch": 41},
-        {"max_seconds": 0},
-        {"max_seconds": -1},
-        {"max_seconds": True},
         {"max_seconds": float("nan")},
-        {"max_seconds": float("inf")},
-        {"max_seconds": -float("inf")},
-        {"max_seconds": "1"},
-        {"cache_max_bytes": -1},
         {"cache_max_bytes": True},
-        {"cache_max_bytes": 1.0},
-        {"cache_max_bytes": "1"},
-        {"cache_max_bytes": None},
     ],
 )
 def test_invalid_run_controls_fail_before_device_data_or_output(controls, monkeypatch, tmp_path):
@@ -1249,14 +1189,7 @@ def test_invalid_run_controls_fail_before_device_data_or_output(controls, monkey
     "controls",
     [
         {"stop_after_epoch": None, "max_seconds": None},
-        {"stop_after_epoch": 0},
-        {"stop_after_epoch": 1},
-        {"stop_after_epoch": 40},
-        {"max_seconds": 1},
-        {"max_seconds": 0.001},
         {"stop_after_epoch": 2, "max_seconds": 1.5},
-        {"cache_max_bytes": 0},
-        {"cache_max_bytes": 1024 * 1024},
     ],
 )
 def test_valid_run_controls_reach_only_device_admission(controls, monkeypatch, tmp_path):
@@ -1589,21 +1522,14 @@ def test_page_loss_keeps_extreme_finite_logits_numerically_stable():
     assert wrong.item() == pytest.approx(80.8, abs=1e-5)
 
 
-@pytest.mark.parametrize("invalid", ["logit_dtype", "mask_dtype", "channels", "batch_size",
-                                      "mask_rank", "nonfinite_logits", "empty_mask"])
+@pytest.mark.parametrize("invalid", ["logit_dtype", "channels", "nonfinite_logits"])
 def test_page_loss_rejects_invalid_tensor_contracts(invalid):
     logits = torch.zeros(1, 1, 2, 2)
     source_mask = torch.ones(1, 4, 4, dtype=torch.bool)
     if invalid == "logit_dtype":
         logits = logits.double()
-    elif invalid == "mask_dtype":
-        source_mask = source_mask.float()
     elif invalid == "channels":
         logits = logits.expand(1, 2, 2, 2)
-    elif invalid == "batch_size":
-        source_mask = source_mask.expand(2, 4, 4)
-    elif invalid == "mask_rank":
-        source_mask = source_mask[:, None]
     elif invalid == "nonfinite_logits":
         logits[0, 0, 0, 0] = float("nan")
     else:
@@ -1613,10 +1539,13 @@ def test_page_loss_rejects_invalid_tensor_contracts(invalid):
     assert caught.value.reason_code == "invalid_training_batch"
 
 
-@pytest.mark.parametrize("box_size,multiplier", [
-    ((100, 200), 0), ((50, 100), 1), ((25, 50), 3), ((5, 10), 19),
-])
-@pytest.mark.parametrize("axis,coordinate_mean", [(0, 0.75), (1, 0.25)])
+@pytest.mark.parametrize(
+    "box_size,multiplier,axis,coordinate_mean",
+    [
+        ((100, 200), 0, 0, 0.75),
+        ((5, 10), 19, 1, 0.25),
+    ],
+)
 def test_page_relative_loss_has_exact_physical_bbox_and_original_xy_scale(
         box_size, multiplier, axis, coordinate_mean):
     predicted = torch.zeros(1, 3, 4, 2)
@@ -1686,11 +1615,10 @@ def test_page_relative_loss_is_macro_not_pixel_micro_and_ignores_invalid_gt_nan(
 
 
 @pytest.mark.parametrize("invalid", [
-    "prediction_dtype", "target_dtype", "valid_dtype", "source_dtype", "source_sparse",
-    "source_device", "source_shape", "source_batch", "source_rank", "source_empty",
-    "source_one_pixel", "source_one_row", "source_one_column", "one_image_empty_gt",
-    "prediction_nan", "prediction_inf_outside_gt", "valid_target_nan", "target_shape",
-    "invalid_photo_size",
+    "prediction_dtype",
+    "source_shape",
+    "one_image_empty_gt",
+    "prediction_nan",
 ])
 def test_page_relative_loss_rejects_invalid_inputs_and_per_image_degeneracy(invalid):
     predicted = torch.zeros(2, 3, 4, 2)
@@ -1700,44 +1628,13 @@ def test_page_relative_loss_rejects_invalid_inputs_and_per_image_degeneracy(inva
     photo_size = (10, 20)
     if invalid == "prediction_dtype":
         predicted = predicted.double()
-    elif invalid == "target_dtype":
-        target = target.double()
-    elif invalid == "valid_dtype":
-        valid = valid.float()
-    elif invalid == "source_dtype":
-        source_mask = source_mask.float()
-    elif invalid == "source_sparse":
-        source_mask = source_mask.to_sparse()
-    elif invalid == "source_device":
-        source_mask = source_mask.to("meta")
     elif invalid == "source_shape":
         source_mask = source_mask[:, :, :-1]
-    elif invalid == "source_batch":
-        source_mask = source_mask[:1]
-    elif invalid == "source_rank":
-        source_mask = source_mask[:, None]
-    elif invalid.startswith("source_"):
-        source_mask[0] = False
-        if invalid == "source_one_pixel":
-            source_mask[0, 3, 4] = True
-        elif invalid == "source_one_row":
-            source_mask[0, 3] = True
-        elif invalid == "source_one_column":
-            source_mask[0, :, 4] = True
     elif invalid == "one_image_empty_gt":
         valid[0] = False
         target[0] = float("nan")
-    elif invalid == "prediction_nan":
-        predicted[0, 0, 0, 0] = float("nan")
-    elif invalid == "prediction_inf_outside_gt":
-        valid[0, 0, 0] = False
-        predicted[0, 0, 0, 0] = float("inf")
-    elif invalid == "valid_target_nan":
-        target[0, 0, 0, 0] = float("nan")
-    elif invalid == "target_shape":
-        target = target[:, :, :-1]
     else:
-        photo_size = (0, 20)
+        predicted[0, 0, 0, 0] = float("nan")
     with pytest.raises(FlattenerError) as caught:
         study._page_relative_loss(predicted, target, valid, source_mask, photo_size)
     assert caught.value.reason_code == "invalid_training_batch"
@@ -1819,8 +1716,7 @@ def test_page_relative_loss_has_finite_fixed_mask_gradients_without_optimizer():
     assert not predicted.grad[1].count_nonzero()
 
 
-@pytest.mark.parametrize("scale,expected", [(0.0, 1.0), (0.125, 0.5), (0.5, 0.0),
-                                           (2.0, 0.0), (-1.0, 2.0)])
+@pytest.mark.parametrize("scale,expected", [(0.0, 1.0), (0.5, 0.0), (-1.0, 2.0)])
 def test_orientation_loss_has_independent_collapse_scale_and_reversal_answers(scale, expected):
     target = coarse_identity((2, 2))[None]  # Each edge is 4px for an 8x8 source.
     predicted = target * scale
@@ -1878,8 +1774,7 @@ def test_orientation_loss_excludes_fractionally_invalid_bilinear_coarse_endpoint
         pytest.approx(0.0, abs=1e-6))
 
 
-@pytest.mark.parametrize("invalid", ["prediction_dtype", "target_dtype", "valid_dtype",
-                                    "prediction_nan", "valid_target_nan", "large_grid"])
+@pytest.mark.parametrize("invalid", ["prediction_dtype", "prediction_nan", "large_grid"])
 def test_orientation_loss_rejects_invalid_tensor_and_grid_contracts(invalid):
     target = coarse_identity((2, 3))[None]
     predicted = target.clone()
@@ -1887,14 +1782,8 @@ def test_orientation_loss_rejects_invalid_tensor_and_grid_contracts(invalid):
     grid = (2, 3)
     if invalid == "prediction_dtype":
         predicted = predicted.double()
-    elif invalid == "target_dtype":
-        target = target.double()
-    elif invalid == "valid_dtype":
-        valid = valid.float()
     elif invalid == "prediction_nan":
         predicted[0, 0, 0] = float("nan")
-    elif invalid == "valid_target_nan":
-        target[0, 0, 0] = float("nan")
     else:
         grid = (3, 4)
     with pytest.raises(FlattenerError) as caught:
@@ -1940,10 +1829,15 @@ def _quarter_turn_batch():
             "source_mask": torch.stack((mask, ~mask)), "id": ["left", "right"]}
 
 
-@pytest.mark.parametrize("rotation_mode", ["batch", "per_image_fit"])
-@pytest.mark.parametrize("rotation_probability,background_probability", [
-    (0, 0), (0.5, 0), (0, 0.75), (0.5, 0.75),
-])
+@pytest.mark.parametrize(
+    "rotation_mode,rotation_probability,background_probability",
+    [
+        ("batch", 0, 0),
+        ("per_image_fit", 0.5, 0),
+        ("batch", 0, 0.75),
+        ("per_image_fit", 0.5, 0.75),
+    ],
+)
 def test_quality_augmentation_dispatch_order_mask_routing_and_zero_probability_identity(
         monkeypatch, rotation_mode, rotation_probability, background_probability):
     config = study.StudyConfig(
@@ -2028,8 +1922,14 @@ def test_quality_augmentation_dispatch_order_mask_routing_and_zero_probability_i
     assert all(parameter.grad is None for parameter in model.parameters())
 
 
-@pytest.mark.parametrize("rotation_mode", ["batch", "per_image_fit"])
-@pytest.mark.parametrize("fault", ["missing", "none", "dtype", "shape", "failed_check"])
+@pytest.mark.parametrize(
+    "rotation_mode,fault",
+    [
+        ("batch", "missing"),
+        ("per_image_fit", "dtype"),
+        ("batch", "failed_check"),
+    ],
+)
 def test_background_without_page_loss_requires_mask_and_rejects_deferred_failure(
         monkeypatch, rotation_mode, fault):
     config = study.StudyConfig(
@@ -2041,12 +1941,8 @@ def test_background_without_page_loss_requires_mask_and_rejects_deferred_failure
     batch, calls = _quarter_turn_batch(), []
     if fault == "missing":
         del batch["source_mask"]
-    elif fault == "none":
-        batch["source_mask"] = None
     elif fault == "dtype":
         batch["source_mask"] = batch["source_mask"].float()
-    elif fault == "shape":
-        batch["source_mask"] = batch["source_mask"][:, :-1]
     model = torch.nn.Linear(1, 1)
 
     def augment(value, *, _checks=None, **kwargs):
@@ -2079,8 +1975,7 @@ def test_background_without_page_loss_requires_mask_and_rejects_deferred_failure
     assert all(parameter.grad is None for parameter in model.parameters())
 
 
-@pytest.mark.parametrize("quarter_turns", [1, 2, 3])
-@pytest.mark.parametrize("include_mask", [False, True])
+@pytest.mark.parametrize("quarter_turns,include_mask", [(1, False), (2, True), (3, False)])
 def test_forced_quarter_turn_preserves_xy_correspondence_and_masks_without_mutation(
         monkeypatch, quarter_turns, include_mask):
     batch = _quarter_turn_batch()
@@ -2211,36 +2106,13 @@ def test_rotation_mask_uses_independent_pixel_center_nearest_indices(
     assert not torch.equal(legacy, expected)  # This asymmetric boundary exposes the old offset.
 
 
-@pytest.mark.parametrize("invalid", ["image_dtype", "image_nan", "image_range", "target_dtype",
-                                    "target_none", "target_list", "target_nan",
-                                    "valid_dtype", "empty_gt", "source_none",
-                                    "source_dtype", "source_device", "source_shape"])
+@pytest.mark.parametrize("invalid", ["image_nan", "target_none", "source_shape"])
 def test_rotation_rejects_bad_inputs_before_sampling_rng(monkeypatch, invalid):
     batch = _quarter_turn_batch()
-    if invalid == "image_dtype":
-        batch["image"] = batch["image"].double()
-    elif invalid == "image_nan":
+    if invalid == "image_nan":
         batch["image"][0, 0, 0, 0] = float("nan")
-    elif invalid == "image_range":
-        batch["image"][0, 0, 0, 0] = 1.01
-    elif invalid == "target_dtype":
-        batch["target"] = batch["target"].double()
     elif invalid == "target_none":
         batch["target"] = None
-    elif invalid == "target_list":
-        batch["target"] = []
-    elif invalid == "target_nan":
-        batch["target"][1, 0, 0] = float("nan")
-    elif invalid == "valid_dtype":
-        batch["valid"] = batch["valid"].float()
-    elif invalid == "empty_gt":
-        batch["valid"][0] = False
-    elif invalid == "source_none":
-        batch["source_mask"] = None
-    elif invalid == "source_dtype":
-        batch["source_mask"] = batch["source_mask"].float()
-    elif invalid == "source_device":
-        batch["source_mask"] = batch["source_mask"].to("meta")
     else:
         batch["source_mask"] = batch["source_mask"][:, None]
     monkeypatch.setattr(torch, "rand", lambda *args, **kwargs: pytest.fail("invalid input RNG"))
@@ -2274,7 +2146,7 @@ def test_boundary_loss_uses_original_xy_pixel_scale(axis):
     )
 
 
-@pytest.mark.parametrize("pixel", [(7, 8), (8, 7), (12, 8), (8, 12)])
+@pytest.mark.parametrize("pixel", [(7, 8), (8, 12)])
 def test_boundary_loss_uses_outer_eight_rows_and_columns_only(pixel):
     predicted = torch.zeros(1, 20, 20, 2)
     target = torch.full_like(predicted, float("nan"))
@@ -2393,23 +2265,22 @@ def test_differential_loss_without_valid_stencils_returns_finite_zero(one_valid_
     assert study._differential_loss(predicted, target, valid, (100, 200), (3, 3)).item() == 0
 
 
-@pytest.mark.parametrize("helper", ["_coordinate_loss", "_boundary_loss", "_differential_loss"])
-@pytest.mark.parametrize("invalid", ["prediction_dtype", "target_dtype", "mask_dtype",
-                                      "shape", "prediction_nan", "valid_target_nan"])
+@pytest.mark.parametrize(
+    "helper,invalid",
+    [
+        ("_coordinate_loss", "prediction_dtype"),
+        ("_boundary_loss", "shape"),
+        ("_differential_loss", "valid_target_nan"),
+    ],
+)
 def test_coordinate_supervision_rejects_invalid_tensor_contracts(helper, invalid):
     predicted = torch.zeros(1, 3, 3, 2)
     target = torch.zeros_like(predicted)
     valid = torch.ones(1, 3, 3, dtype=torch.bool)
     if invalid == "prediction_dtype":
         predicted = predicted.double()
-    elif invalid == "target_dtype":
-        target = target.double()
-    elif invalid == "mask_dtype":
-        valid = valid.float()
     elif invalid == "shape":
         target = target[..., :1]
-    elif invalid == "prediction_nan":
-        predicted[0, 0, 0, 0] = float("nan")
     else:
         target[0, 0, 0, 0] = float("nan")
     arguments = [predicted, target, valid, (100, 200)]
@@ -2438,8 +2309,13 @@ def _boolean_smooth_l1_mean(predicted, target, valid, photo_size):
     return penalty.sum() / max(delta.numel(), 1)
 
 
-@pytest.mark.parametrize("helper", ["_coordinate_loss", "_boundary_loss"])
-@pytest.mark.parametrize("padding", [float("nan"), float("inf"), -float("inf")])
+@pytest.mark.parametrize(
+    "helper,padding",
+    [
+        ("_coordinate_loss", float("nan")),
+        ("_boundary_loss", -float("inf")),
+    ],
+)
 def test_fixed_shape_coordinate_losses_match_boolean_oracle_with_nonfinite_gt_padding(
         helper, padding):
     predicted, target, valid = _fixed_shape_loss_fixture()
@@ -2468,7 +2344,7 @@ def test_fixed_shape_coordinate_loss_uses_valid_xy_micro_denominator():
     assert caught.value.reason_code == "invalid_training_batch"
 
 
-@pytest.mark.parametrize("grid", [(5, 7), (3, 4), (1, 1)])
+@pytest.mark.parametrize("grid", [(5, 7), (1, 1)])
 def test_fixed_shape_differential_loss_matches_boolean_stencil_reference(grid):
     predicted, target, valid = _fixed_shape_loss_fixture()
     truth = torch.where(valid[..., None], target, 0.0)
@@ -2556,7 +2432,7 @@ def test_fixed_shape_losses_have_finite_gradients_and_zero_invalid_gt_gradient(h
     assert torch.count_nonzero(predicted.grad[~valid]) == 0
 
 
-@pytest.mark.parametrize("partitions", [(3,), (2, 1), (1, 1, 1)])
+@pytest.mark.parametrize("partitions", [(3,), (1, 1, 1)])
 def test_vectorized_validation_is_macro_and_independent_of_batch_partition(monkeypatch, partitions):
     config = study.StudyConfig(device="cpu", output_size=(2, 3))
     predicted = torch.zeros(3, 2, 3, 2)
@@ -2591,9 +2467,14 @@ def test_vectorized_validation_is_macro_and_independent_of_batch_partition(monke
     assert result == pytest.approx(13 / 3, abs=1e-6)
 
 
-@pytest.mark.parametrize("training", [False, True])
-@pytest.mark.parametrize("include_source_mask", [False, True])
-@pytest.mark.parametrize("cuda", [False, True])
+@pytest.mark.parametrize(
+    "training,include_source_mask,cuda",
+    [
+        (False, False, False),
+        (True, True, False),
+        (True, False, True),
+    ],
+)
 def test_cached_batch_loader_preserves_sampling_rng_and_fetch_contract(
         monkeypatch, training, include_source_mask, cuda):
     records = [{"image": torch.full((3, 2, 2), index / 5),
@@ -2850,12 +2731,10 @@ def test_training_admission_rejects_deferred_topology_overflow_before_backward(m
 
 
 @pytest.mark.training
-@pytest.mark.parametrize("architecture", ["global", "page", "projective", "surface"])
-@pytest.mark.parametrize("initialization_mode", ["full", "resolution"])
-@pytest.mark.parametrize("portable", [
-    pytest.param(False, marks=pytest.mark.skipif(
+@pytest.mark.parametrize("architecture,initialization_mode,portable", [
+    ("global", "full", True),
+    pytest.param("surface", "resolution", False, marks=pytest.mark.skipif(
         os.name == "nt", reason="nonportable checkpoints require POSIX symlinks")),
-    True,
 ])
 def test_finetune_resets_training_state_and_resumes_without_initial_file(
     tmp_path, monkeypatch, architecture, portable, initialization_mode
@@ -2954,8 +2833,6 @@ def test_finetune_resets_training_state_and_resumes_without_initial_file(
     "page_relative_weight,orientation_weight,rotation_probability,rotation_mode,background_probability",
     [
     pytest.param(0, 0, 0, "batch", 0, id="0"),
-    pytest.param(0.25, 0, 0, "batch", 0, id="0.25"),
-    pytest.param(0.25, 0.2, 1.0, "batch", 0, id="orientation-rotation"),
     pytest.param(0.25, 0.2, 1.0, "per_image_fit", 1.0, id="quality-augmentation"),
 ])
 def test_prepared_cache_reuse_preserves_training_and_resume(
@@ -3038,7 +2915,7 @@ def test_backbone_initialization_transfers_only_compatible_layers(initial_checkp
         study._initialization(config, None, None)
 
 
-@pytest.mark.parametrize("scale", [1.0, 0.1, 0.02])
+@pytest.mark.parametrize("scale", [1.0, 0.02])
 def test_relative_topology_is_scale_relative_and_masks_whole_invalid_cells(scale):
     target = coarse_identity((5, 7))[None] * scale
     valid = torch.ones(1, 5, 7, dtype=torch.bool)

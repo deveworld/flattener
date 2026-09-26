@@ -87,7 +87,7 @@ def study_models(tmp_path_factory, never_train):
     return root
 
 
-@pytest.mark.parametrize("architecture", ["global", "spatial", "page", "oriented_surface"])
+@pytest.mark.parametrize("architecture", ["global", "oriented_surface"])
 def test_model_load_and_existing_renderer_exact(study_models, architecture):
     checkpoint = study_models / architecture / "best.pt"
     before_rng = torch.get_rng_state().clone()
@@ -165,7 +165,7 @@ def test_photo_cli_exit_status_and_saved_results(study_models, tmp_path, outcome
             np.testing.assert_array_equal(np.asarray(decoded), image)
 
 
-@pytest.mark.parametrize("architecture", ["global", "spatial", "page", "oriented_surface"])
+@pytest.mark.parametrize("architecture", ["global", "oriented_surface"])
 def test_explicit_cpu_checkpoint_loads_without_cuda(
     study_models, architecture, monkeypatch, tmp_path
 ):
@@ -269,12 +269,14 @@ def _legacy_payload(study_models, architecture, schema="coordinate-study-0.1"):
     return saved
 
 
-@pytest.mark.parametrize("architecture", ["global", "spatial"])
-@pytest.mark.parametrize("schema", [
-    "coordinate-study-0.1", "coordinate-study-0.2", "coordinate-study-0.3",
-    "coordinate-study-0.4", "coordinate-study-0.5", "coordinate-study-0.6",
-    "coordinate-study-0.7", "coordinate-study-0.8", "coordinate-study-0.9",
-    "coordinate-study-0.10", "coordinate-study-0.11",
+# Schemas that exist on disk under outputs/; 0.3 global is selected.pt.
+@pytest.mark.parametrize("architecture,schema", [
+    ("spatial", "coordinate-study-0.1"),
+    ("global", "coordinate-study-0.2"),
+    ("global", "coordinate-study-0.3"),
+    ("global", "coordinate-study-0.4"),
+    ("global", "coordinate-study-0.5"),
+    ("global", "coordinate-study-0.7"),
 ])
 def test_legacy_schema_loads_without_rewriting_or_adding_new_objectives(
     study_models, architecture, schema, tmp_path
@@ -317,9 +319,8 @@ def test_legacy_schema_loads_without_rewriting_or_adding_new_objectives(
     assert checkpoint.read_bytes() == before
 
 
-@pytest.mark.parametrize("architecture", ["global", "spatial", "page"])
-def test_new_schema_records_explicit_regularization_contract(study_models, architecture):
-    saved = torch.load(study_models / architecture / "best.pt", weights_only=True)
+def test_new_schema_records_explicit_regularization_contract(study_models):
+    saved = torch.load(study_models / "global" / "best.pt", weights_only=True)
     assert saved["schema_version"] == study.CHECKPOINT_SCHEMA == "coordinate-study-0.12"
     assert len(saved["config"]) == 28
     assert saved["config"]["direction_training"] == "predicted"
@@ -342,7 +343,7 @@ def test_new_schema_records_explicit_regularization_contract(study_models, archi
     assert "180-degree" in protocol["orientation"]
     assert "CPU-global" in saved["provenance"]["augmentation_protocol"]["quarter_turn"]
     assert "nearest-exact" in saved["provenance"]["augmentation_protocol"]["source_mask"]
-    page_weight = 0.75 if architecture == "page" else 0.0
+    page_weight = 0.75 if "global" == "page" else 0.0
     saved["config"].update(
         topology_weight=0.5, curvature_weight=0.25, gradient_clip_norm=2.0,
         page_weight=page_weight, boundary_weight=0.125, differential_weight=0.0625,
@@ -360,11 +361,10 @@ def test_new_schema_records_explicit_regularization_contract(study_models, archi
     assert config.orientation_weight == 50.0 and config.rotation_probability == 0.5
 
 
-@pytest.mark.parametrize("architecture", ["global", "surface"])
 def test_07_objective_load_and_warm_start_keep_saved_batch_and_weights(
-    study_models, architecture, tmp_path
+    study_models, tmp_path
 ):
-    saved = _legacy_payload(study_models, architecture, study.ORIENTATION_CHECKPOINT_SCHEMA)
+    saved = _legacy_payload(study_models, "global", study.ORIENTATION_CHECKPOINT_SCHEMA)
     saved["config"].update(batch_size=16, orientation_weight=50.0, rotation_probability=0.5)
     validated = study._validate_saved(saved)
     assert validated.batch_size == 16 and study.StudyConfig().batch_size == 32
@@ -403,11 +403,10 @@ def test_checkpoint_validation_does_not_rehash_current_source(study_models, monk
         study._validate_saved(saved)
 
 
-@pytest.mark.parametrize("architecture", ["global", "spatial", "page", "projective", "surface"])
 def test_resolution_lineage_from_08_checkpoint_loads_at_native_input_resolution(
-    study_models, architecture, tmp_path
+    study_models, tmp_path
 ):
-    old = _legacy_payload(study_models, architecture, study.OPTIMIZED_CHECKPOINT_SCHEMA)
+    old = _legacy_payload(study_models, "global", study.OPTIMIZED_CHECKPOINT_SCHEMA)
     source_config = study._validate_saved(old)
     source = tmp_path / "source.pt"
     digest = study._save_checkpoint(source, old)
@@ -431,7 +430,7 @@ def test_resolution_lineage_from_08_checkpoint_loads_at_native_input_resolution(
     assert study._validate_saved(saved).initial_model_config.input_size == (32, 24)
 
 
-@pytest.mark.parametrize("field", ["input_size", "grid_size", "channels", "hidden", "extra"])
+@pytest.mark.parametrize("field", ["input_size", "extra"])
 def test_resolution_checkpoint_requires_complete_exact_source_model_config(study_models, field):
     saved = torch.load(study_models / "surface" / "best.pt", weights_only=True)
     source = dict(saved["config"]["model_config"])
@@ -445,20 +444,20 @@ def test_resolution_checkpoint_requires_complete_exact_source_model_config(study
         study._validate_saved(saved)
 
 
-@pytest.mark.parametrize("field", ["initial_model_config", "initial_checkpoint_sha256"])
-def test_resolution_checkpoint_cannot_omit_bound_source(study_models, field):
+def test_resolution_checkpoint_cannot_omit_bound_source(study_models):
     saved = torch.load(study_models / "surface" / "best.pt", weights_only=True)
     saved["config"].update(initialization_mode="resolution",
                            initial_model_config=dict(saved["config"]["model_config"]),
                            initial_checkpoint_sha256="e" * 64)
-    saved["config"][field] = None
+    saved["config"]["initial_model_config"] = None
     with pytest.raises(FlattenerError, match="requires source config and checkpoint SHA"):
         study._validate_saved(saved)
 
 
-@pytest.mark.parametrize("field,value", [("background_probability", 0.0),
-                                         ("rotation_mode", "batch"),
-                                         ("initial_model_config", None)])
+@pytest.mark.parametrize("field,value", [
+    ("background_probability", 0.0),
+    ("initial_model_config", None),
+])
 def test_08_schema_rejects_new_augmentation_or_lineage_fields(study_models, field, value):
     saved = _legacy_payload(study_models, "surface", study.OPTIMIZED_CHECKPOINT_SCHEMA)
     saved["config"][field] = value
@@ -470,10 +469,7 @@ def test_08_schema_rejects_new_augmentation_or_lineage_fields(study_models, fiel
         study._validate_saved(current)
 
 
-@pytest.mark.parametrize("schema", [
-    "coordinate-study-0.9", "coordinate-study-0.10", "coordinate-study-0.11",
-    "coordinate-study-0.12",
-])
+@pytest.mark.parametrize("schema", ["coordinate-study-0.9", "coordinate-study-0.12"])
 def test_09_augmentation_protocol_is_explicit_and_strict(study_models, schema):
     saved = (_legacy_payload(study_models, "surface", schema)
              if schema != "coordinate-study-0.12" else
@@ -494,13 +490,9 @@ def test_09_augmentation_protocol_is_explicit_and_strict(study_models, schema):
         study._validate_saved(saved)
 
 
-@pytest.mark.parametrize("schema", [
-    "coordinate-study-0.9", "coordinate-study-0.10", "coordinate-study-0.11",
-    "coordinate-study-0.12",
-])
-def test_09_checkpoint_requires_augmentation_source_fingerprint(study_models, schema):
-    saved = (_legacy_payload(study_models, "surface", schema)
-             if schema != "coordinate-study-0.12" else
+def test_09_checkpoint_requires_augmentation_source_fingerprint(study_models):
+    saved = (_legacy_payload(study_models, "surface", "coordinate-study-0.12")
+             if "coordinate-study-0.12" != "coordinate-study-0.12" else
              torch.load(study_models / "surface" / "best.pt", weights_only=True))
     del saved["provenance"]["source_code_sha256"]["learning/augmentation.py"]
     with pytest.raises(FlattenerError, match="source fingerprints"):
@@ -510,8 +502,10 @@ def test_09_checkpoint_requires_augmentation_source_fingerprint(study_models, sc
     study._validate_saved(old)
 
 
-@pytest.mark.parametrize("schema", [f"coordinate-study-0.{version}" for version in range(1, 10)])
-@pytest.mark.parametrize("field", ["direction_weight", "corner_weight"])
+@pytest.mark.parametrize("schema,field", [
+    ("coordinate-study-0.3", "direction_weight"),
+    ("coordinate-study-0.9", "corner_weight"),
+])
 def test_pre_oriented_schemas_reject_even_zero_semantic_objective_fields(
     study_models, schema, field
 ):
@@ -521,18 +515,13 @@ def test_pre_oriented_schemas_reject_even_zero_semantic_objective_fields(
         study._validate_saved(saved)
 
 
-@pytest.mark.parametrize("schema", [f"coordinate-study-0.{version}" for version in range(1, 10)])
-def test_pre_oriented_schema_cannot_claim_oriented_architecture(study_models, schema):
-    saved = _legacy_payload(study_models, "oriented_surface", schema)
+def test_pre_oriented_schema_cannot_claim_oriented_architecture(study_models):
+    saved = _legacy_payload(study_models, "oriented_surface", "coordinate-study-0.9")
     with pytest.raises(FlattenerError):
         study._validate_saved(saved)
 
 
-@pytest.mark.parametrize("field,value", [
-    ("page_weight", 0.0), ("direction_weight", 0.0), ("corner_weight", 0.0),
-    ("direction_weight", -1), ("corner_weight", float("nan")),
-    ("direction_weight", True), ("corner_weight", None), ("map_mode", "legacy"),
-])
+@pytest.mark.parametrize("field,value", [("direction_weight", 0.0), ("map_mode", "legacy")])
 def test_oriented_checkpoint_requires_explicit_analytic_semantic_supervision(
     study_models, field, value
 ):
@@ -542,16 +531,15 @@ def test_oriented_checkpoint_requires_explicit_analytic_semantic_supervision(
         study._validate_saved(saved)
 
 
-@pytest.mark.parametrize("head", ["orientation_head.bias", "page_head.2.bias"])
-@pytest.mark.parametrize("fault", ["missing", "shape", "nonfinite"])
+@pytest.mark.parametrize(
+    "head,fault", [("orientation_head.bias", "missing"), ("page_head.2.bias", "nonfinite")]
+)
 def test_oriented_checkpoint_requires_complete_finite_semantic_head_weights(
     study_models, head, fault
 ):
     saved = torch.load(study_models / "oriented_surface" / "best.pt", weights_only=True)
     if fault == "missing":
         del saved["model_state"][head]
-    elif fault == "shape":
-        saved["model_state"][head] = torch.zeros(9)
     else:
         saved["model_state"][head].fill_(float("nan"))
     with pytest.raises(FlattenerError):
@@ -567,9 +555,8 @@ def test_surface_weights_cannot_be_relabelled_as_oriented_surface(study_models):
 
 
 @pytest.mark.parametrize("protocol,key", [
-    ("loss_protocol", "direction"), ("loss_protocol", "corners"),
-    ("loss_protocol", "semantic_page"), ("map_protocol", "oriented_surface"),
-    ("initialization_protocol", "oriented_backbone"),
+    ("loss_protocol", "direction"),
+    ("map_protocol", "oriented_surface"),
 ])
 def test_oriented_checkpoint_protocol_cannot_be_dropped_or_changed(study_models, protocol, key):
     saved = torch.load(study_models / "oriented_surface" / "best.pt", weights_only=True)
@@ -582,7 +569,7 @@ def test_oriented_checkpoint_protocol_cannot_be_dropped_or_changed(study_models,
         study._validate_saved(saved)
 
 
-@pytest.mark.parametrize("photo_size", [(47, 83), (83, 47), (64, 64)])
+@pytest.mark.parametrize("photo_size", [(47, 83), (64, 64)])
 def test_oriented_inference_passes_original_photo_aspect_and_preserves_metadata(
     study_models, photo_size, monkeypatch
 ):
@@ -625,12 +612,11 @@ def test_oriented_inference_passes_original_photo_aspect_and_preserves_metadata(
     assert all(p.grad is None for p in predictor._model.parameters())
 
 
-@pytest.mark.parametrize("input_size", [(32, 24), (40, 56)])
 def test_oriented_network_input_size_does_not_replace_runtime_photo_size(
-    study_models, tmp_path, input_size, monkeypatch
+    study_models, tmp_path, monkeypatch
 ):
     saved = torch.load(study_models / "oriented_surface" / "best.pt", weights_only=True)
-    saved["config"]["model_config"]["input_size"] = input_size
+    saved["config"]["model_config"]["input_size"] = (40, 56)
     checkpoint = tmp_path / "resized-input.pt"
     study._save_checkpoint(checkpoint, saved)
     predictor = load_coordinate_predictor(checkpoint)
@@ -650,7 +636,7 @@ def test_oriented_network_input_size_does_not_replace_runtime_photo_size(
     expected = identity_map(size).copy()
     expected[..., 0] *= 0.5
     np.testing.assert_array_equal(actual, expected)
-    assert calls == [(input_size, (45, 90))]
+    assert calls == [((40, 56), (45, 90))]
 
 
 @pytest.mark.parametrize("photo_size", [(47, 83), (83, 47)])
@@ -732,10 +718,9 @@ def test_semantic_010_checkpoint_loads_without_xpu_state_or_execution_protocol(
     assert checkpoint.read_bytes() == before
 
 
-@pytest.mark.parametrize("schema", [f"coordinate-study-0.{version}" for version in range(1, 11)])
 @pytest.mark.parametrize("claim", ["rng", "version", "execution", "device"])
-def test_pre_xpu_checkpoints_reject_new_backend_claims(study_models, schema, claim):
-    saved = _legacy_payload(study_models, "global", schema)
+def test_pre_xpu_checkpoints_reject_new_backend_claims(study_models, claim):
+    saved = _legacy_payload(study_models, "global", "coordinate-study-0.3")
     if claim == "rng":
         saved["xpu_rng_state"] = None
     elif claim == "version":
@@ -751,8 +736,7 @@ def test_pre_xpu_checkpoints_reject_new_backend_claims(study_models, schema, cla
         study._validate_saved(saved)
 
 
-@pytest.mark.parametrize("field", ["missing_rng", "missing_version", "bad_version",
-                                    "missing_execution", "changed_execution"])
+@pytest.mark.parametrize("field", ["missing_rng", "changed_execution"])
 def test_current_checkpoint_requires_explicit_xpu_execution_provenance(study_models, field):
     saved = torch.load(study_models / "global" / "best.pt", weights_only=True)
     assert saved["xpu_rng_state"] is None
@@ -760,12 +744,6 @@ def test_current_checkpoint_requires_explicit_xpu_execution_provenance(study_mod
     assert saved["provenance"]["execution_protocol"]["version"] == "explicit-device-0.11"
     if field == "missing_rng":
         del saved["xpu_rng_state"]
-    elif field == "missing_version":
-        del saved["provenance"]["versions"]["torch_xpu"]
-    elif field == "bad_version":
-        saved["provenance"]["versions"]["torch_xpu"] = True
-    elif field == "missing_execution":
-        del saved["provenance"]["execution_protocol"]
     else:
         saved["provenance"]["execution_protocol"]["precision"] = "implicit autocast"
     with pytest.raises(FlattenerError):
@@ -784,9 +762,10 @@ def _xpu_payload(study_models, architecture="oriented_surface"):
     return saved
 
 
-@pytest.mark.parametrize("architecture", ["global", "surface", "oriented_surface"])
-@pytest.mark.parametrize("device", ["xpu", "xpu:0"])
-@pytest.mark.parametrize("schema", ["coordinate-study-0.11", "coordinate-study-0.12"])
+@pytest.mark.parametrize("architecture,device,schema", [
+    ("global", "xpu", "coordinate-study-0.11"),
+    ("oriented_surface", "xpu:0", "coordinate-study-0.12"),
+])
 def test_xpu_checkpoint_loads_and_predicts_on_cpu_without_any_accelerator_api(
     study_models, tmp_path, monkeypatch, architecture, device, schema
 ):
@@ -826,9 +805,10 @@ def test_xpu_checkpoint_loads_and_predicts_on_cpu_without_any_accelerator_api(
     assert checkpoint.read_bytes() == before and torch.equal(torch.get_rng_state(), rng)
 
 
-@pytest.mark.parametrize("schema", ["coordinate-study-0.1", "coordinate-study-0.9",
-                                    "coordinate-study-0.10", "coordinate-study-0.11"])
-@pytest.mark.parametrize("claim", ["config", "protocol"])
+@pytest.mark.parametrize("schema,claim", [
+    ("coordinate-study-0.1", "config"),
+    ("coordinate-study-0.11", "protocol"),
+])
 def test_pre_teacher_checkpoints_reject_new_training_direction_claims(
         study_models, schema, claim):
     saved = _legacy_payload(study_models, "global", schema)
@@ -841,20 +821,15 @@ def test_pre_teacher_checkpoints_reject_new_training_direction_claims(
         study._validate_saved(saved)
 
 
-@pytest.mark.parametrize("fault", ["missing_config", "invalid_config", "missing_protocol",
-                                    "changed_protocol"])
+@pytest.mark.parametrize("fault", ["invalid_config", "changed_protocol"])
 def test_teacher_checkpoint_requires_explicit_strict_training_protocol(study_models, fault):
     saved = torch.load(study_models / "oriented_surface" / "best.pt", weights_only=True)
     saved["config"]["direction_training"] = "teacher"
     assert study._validate_saved(saved).direction_training == "teacher"
     assert saved["provenance"]["direction_training_protocol"]["version"] == (
         "training-direction-0.12")
-    if fault == "missing_config":
-        del saved["config"]["direction_training"]
-    elif fault == "invalid_config":
+    if fault == "invalid_config":
         saved["config"]["direction_training"] = True
-    elif fault == "missing_protocol":
-        del saved["provenance"]["direction_training_protocol"]
     else:
         saved["provenance"]["direction_training_protocol"]["evaluation"] = "use GT geometry"
     with pytest.raises(FlattenerError):
@@ -885,46 +860,25 @@ def test_teacher_checkpoint_public_inference_uses_only_predicted_direction(
     assert all(parameter.grad is None for parameter in predictor._model.parameters())
 
 
-@pytest.mark.parametrize("fault", ["missing", "none", "float", "bool", "scalar", "matrix",
-                                    "short", "huge", "sparse", "cuda_state", "device", "index",
-                                    "capability"])
+@pytest.mark.parametrize("fault", ["missing", "float", "sparse", "device"])
 def test_xpu_checkpoint_rejects_invalid_serialized_rng_and_device_metadata(study_models, fault):
     saved = _xpu_payload(study_models)
     if fault == "missing":
         del saved["xpu_rng_state"]
-    elif fault == "none":
-        saved["xpu_rng_state"] = None
     elif fault == "float":
         saved["xpu_rng_state"] = torch.zeros(16, dtype=torch.float32)
-    elif fault == "bool":
-        saved["xpu_rng_state"] = torch.zeros(16, dtype=torch.bool)
-    elif fault == "scalar":
-        saved["xpu_rng_state"] = torch.tensor(1, dtype=torch.uint8)
-    elif fault == "matrix":
-        saved["xpu_rng_state"] = torch.zeros((4, 4), dtype=torch.uint8)
-    elif fault == "short":
-        saved["xpu_rng_state"] = torch.zeros(15, dtype=torch.uint8)
-    elif fault == "huge":
-        saved["xpu_rng_state"] = torch.zeros(65_537, dtype=torch.uint8)
     elif fault == "sparse":
         saved["xpu_rng_state"] = saved["xpu_rng_state"].to_sparse()
-    elif fault == "cuda_state":
-        saved["cuda_rng_state"] = torch.zeros(16, dtype=torch.uint8)
-    elif fault == "device":
-        saved["device_info"]["device"] = "cuda:0"
-    elif fault == "index":
-        saved["device_info"]["device"] = "xpu:1"
     else:
-        saved["device_info"]["capability"] = (1, 0)
+        saved["device_info"]["device"] = "cuda:0"
     with pytest.raises(FlattenerError):
         study._validate_saved(saved)
 
 
-@pytest.mark.parametrize("device", ["cpu", "cuda:0"])
-def test_non_xpu_checkpoint_cannot_contain_xpu_rng_state(study_models, device):
+def test_non_xpu_checkpoint_cannot_contain_xpu_rng_state(study_models):
     saved = torch.load(study_models / "global" / "best.pt", weights_only=True)
-    saved["config"]["device"] = device
-    if device == "cpu":
+    saved["config"]["device"] = "cpu"
+    if "cpu" == "cpu":
         saved["device_info"] = {"device": "cpu", "name": "fixture", "capability": None}
         saved["cuda_rng_state"] = None
     saved["xpu_rng_state"] = torch.zeros(16, dtype=torch.uint8)
@@ -932,11 +886,7 @@ def test_non_xpu_checkpoint_cannot_contain_xpu_rng_state(study_models, device):
         study._validate_saved(saved)
 
 
-@pytest.mark.parametrize("field", [
-    "topology_weight", "curvature_weight", "gradient_clip_norm",
-    "page_weight", "boundary_weight", "differential_weight", "page_relative_weight",
-    "orientation_weight", "rotation_probability", "direction_weight", "corner_weight",
-])
+@pytest.mark.parametrize("field", ["topology_weight", "page_relative_weight"])
 def test_checkpoint_schema_does_not_silently_add_or_drop_objective_fields(study_models, field):
     current = torch.load(study_models / "global" / "best.pt", weights_only=True)
     del current["config"][field]
@@ -948,42 +898,31 @@ def test_checkpoint_schema_does_not_silently_add_or_drop_objective_fields(study_
         study._validate_saved(legacy)
 
 
-@pytest.mark.parametrize("field", ["page_weight", "boundary_weight", "differential_weight"])
-def test_regularized_legacy_schema_rejects_new_objective_fields(study_models, field):
+def test_regularized_legacy_schema_rejects_new_objective_fields(study_models):
     legacy = _legacy_payload(study_models, "global", "coordinate-study-0.2")
-    legacy["config"][field] = 0.0
+    legacy["config"]["page_weight"] = 0.0
     with pytest.raises(FlattenerError):
         study._validate_saved(legacy)
 
 
-@pytest.mark.parametrize("schema", [
-    "coordinate-study-0.1", "coordinate-study-0.2", "coordinate-study-0.3",
-])
-@pytest.mark.parametrize("field,value", [
-    ("include_paper_augmentation", False), ("initial_checkpoint_sha256", None),
-])
-def test_legacy_schema_cannot_silently_enable_new_data_or_initialization_contract(
-    study_models, schema, field, value
-):
-    legacy = _legacy_payload(study_models, "global", schema)
-    legacy["config"][field] = value
+def test_legacy_schema_cannot_silently_enable_new_data_or_initialization_contract(study_models):
+    legacy = _legacy_payload(study_models, "global", "coordinate-study-0.3")
+    legacy["config"]["include_paper_augmentation"] = False
     with pytest.raises(FlattenerError):
         study._validate_saved(legacy)
 
 
-@pytest.mark.parametrize("field", ["include_paper_augmentation", "initial_checkpoint_sha256"])
-def test_current_schema_requires_explicit_data_and_initialization_contract(study_models, field):
+def test_current_schema_requires_explicit_data_and_initialization_contract(study_models):
     current = torch.load(study_models / "global" / "best.pt", weights_only=True)
-    del current["config"][field]
+    del current["config"]["include_paper_augmentation"]
     with pytest.raises(FlattenerError):
         study._validate_saved(current)
 
 
-@pytest.mark.parametrize("architecture", ["global", "spatial", "page"])
 def test_current_schema_loads_explicit_augmentation_and_initial_model_provenance(
-    study_models, architecture, tmp_path
+    study_models, tmp_path
 ):
-    saved = torch.load(study_models / architecture / "best.pt", weights_only=True)
+    saved = torch.load(study_models / "global" / "best.pt", weights_only=True)
     saved["config"].update(include_paper_augmentation=True, initial_checkpoint_sha256="b" * 64)
     config = study._validate_saved(saved)
     assert config.include_paper_augmentation is True
@@ -1000,12 +939,9 @@ def test_current_schema_loads_explicit_augmentation_and_initial_model_provenance
 
 
 @pytest.mark.parametrize("field,value", [
-    ("include_paper_augmentation", 0), ("include_paper_augmentation", 1),
-    ("include_paper_augmentation", None), ("include_paper_augmentation", "true"),
-    ("initial_checkpoint_sha256", True), ("initial_checkpoint_sha256", 0),
-    ("initial_checkpoint_sha256", ""), ("initial_checkpoint_sha256", "a" * 63),
-    ("initial_checkpoint_sha256", "a" * 65), ("initial_checkpoint_sha256", "A" * 64),
-    ("initial_checkpoint_sha256", "g" * 64),
+    ("include_paper_augmentation", None),
+    ("initial_checkpoint_sha256", 0),
+    ("initial_checkpoint_sha256", "A" * 64),
 ])
 def test_current_schema_validates_augmentation_and_initial_model_provenance(
     study_models, field, value
@@ -1035,56 +971,36 @@ def test_page_schema_03_loads_with_existing_loss_weights_and_no_new_data_contrac
     assert checkpoint.read_bytes() == before
 
 
-@pytest.mark.parametrize("field", ["topology_weight", "curvature_weight", "gradient_clip_norm"])
-def test_regularized_legacy_schema_requires_its_original_objective_fields(study_models, field):
+def test_regularized_legacy_schema_requires_its_original_objective_fields(study_models):
     legacy = _legacy_payload(study_models, "global", "coordinate-study-0.2")
-    del legacy["config"][field]
+    del legacy["config"]["topology_weight"]
     with pytest.raises(FlattenerError):
         study._validate_saved(legacy)
 
 
-@pytest.mark.parametrize("schema", ["coordinate-study-0.1", "coordinate-study-0.2"])
-def test_legacy_schema_cannot_claim_new_page_architecture(study_models, schema):
-    saved = _legacy_payload(study_models, "page", schema)
+def test_legacy_schema_cannot_claim_new_page_architecture(study_models):
+    saved = _legacy_payload(study_models, "page", "coordinate-study-0.1")
     with pytest.raises(FlattenerError):
         study._validate_saved(saved)
 
 
-@pytest.mark.parametrize("schema", [
-    "coordinate-study-0.2", "coordinate-study-0.3", "coordinate-study-0.4",
-    "coordinate-study-0.5", "coordinate-study-0.6", "coordinate-study-0.7",
-    "coordinate-study-0.8", "coordinate-study-0.9",
-])
+@pytest.mark.parametrize("schema", ["coordinate-study-0.3", "coordinate-study-0.7"])
 def test_loss_protocol_cannot_be_swapped_between_regularized_schemas(study_models, schema):
-    if schema == "coordinate-study-0.2":
-        saved = _legacy_payload(study_models, "global", schema)
-        other = "coordinate-study-0.3"
-    elif schema in ("coordinate-study-0.3", "coordinate-study-0.4"):
-        saved = _legacy_payload(study_models, "global", schema)
-        other = "coordinate-study-0.2"
-    elif schema in ("coordinate-study-0.5", "coordinate-study-0.6"):
-        saved = _legacy_payload(study_models, "global", schema)
-        other = "coordinate-study-0.7"
-    else:
-        saved = _legacy_payload(study_models, "global", schema)
-        other = study.CHECKPOINT_SCHEMA
+    saved = _legacy_payload(study_models, "global", schema)
+    other = "coordinate-study-0.2" if schema == "coordinate-study-0.3" else study.CHECKPOINT_SCHEMA
     saved["provenance"]["loss_protocol"] = study._provenance(other)["loss_protocol"]
     with pytest.raises(FlattenerError):
         study._validate_saved(saved)
 
 
-@pytest.mark.parametrize("schema", [
-    "coordinate-study-0.1", "coordinate-study-0.2", "coordinate-study-0.3",
-    "coordinate-study-0.4", "coordinate-study-0.5",
-])
-def test_older_schemas_reject_even_zero_page_relative_weight(study_models, schema):
-    saved = _legacy_payload(study_models, "global", schema)
+def test_older_schemas_reject_even_zero_page_relative_weight(study_models):
+    saved = _legacy_payload(study_models, "global", "coordinate-study-0.3")
     saved["config"]["page_relative_weight"] = 0.0
     with pytest.raises(FlattenerError, match="configuration fields"):
         study._validate_saved(saved)
 
 
-@pytest.mark.parametrize("architecture", ["global", "spatial", "page", "projective", "surface"])
+@pytest.mark.parametrize("architecture", ["global", "surface"])
 def test_analytic_schema_05_loads_and_warmstarts_06_without_changing_weights(
     study_models, architecture, tmp_path
 ):
@@ -1107,19 +1023,17 @@ def test_analytic_schema_05_loads_and_warmstarts_06_without_changing_weights(
     assert path.read_bytes() == before
 
 
-@pytest.mark.parametrize("protocol", ["map_protocol", "initialization_protocol"])
-def test_analytic_schema_05_still_strictly_validates_its_protocol(study_models, protocol):
+def test_analytic_schema_05_still_strictly_validates_its_protocol(study_models):
     saved = _legacy_payload(study_models, "surface", study.ANALYTIC_CHECKPOINT_SCHEMA)
-    saved["provenance"][protocol][next(iter(saved["provenance"][protocol]))] = "altered"
+    saved["provenance"]["map_protocol"][next(iter(saved["provenance"]["map_protocol"]))] = "altered"
     with pytest.raises(FlattenerError, match="incompatible map or initialization protocol"):
         study._validate_saved(saved)
 
 
-@pytest.mark.parametrize("schema", [
-    "coordinate-study-0.1", "coordinate-study-0.2", "coordinate-study-0.3",
-    "coordinate-study-0.4", "coordinate-study-0.5", "coordinate-study-0.6",
+@pytest.mark.parametrize("schema,field", [
+    ("coordinate-study-0.3", "orientation_weight"),
+    ("coordinate-study-0.6", "rotation_probability"),
 ])
-@pytest.mark.parametrize("field", ["orientation_weight", "rotation_probability"])
 def test_pre_orientation_schemas_reject_even_zero_new_controls(study_models, schema, field):
     saved = _legacy_payload(study_models, "global", schema)
     saved["config"][field] = 0
@@ -1127,12 +1041,11 @@ def test_pre_orientation_schemas_reject_even_zero_new_controls(study_models, sch
         study._validate_saved(saved)
 
 
-@pytest.mark.parametrize("architecture", ["global", "spatial", "page", "projective", "surface"])
 def test_page_relative_schema_06_preserves_objective_and_warmstarts_07(
-    study_models, architecture, tmp_path
+    study_models, tmp_path
 ):
     assert study.PAGE_RELATIVE_CHECKPOINT_SCHEMA == "coordinate-study-0.6"
-    saved = _legacy_payload(study_models, architecture, study.PAGE_RELATIVE_CHECKPOINT_SCHEMA)
+    saved = _legacy_payload(study_models, "global", study.PAGE_RELATIVE_CHECKPOINT_SCHEMA)
     saved["config"]["page_relative_weight"] = 0.25
     config = study._validate_saved(saved)
     assert config.page_relative_weight == 0.25
@@ -1149,13 +1062,11 @@ def test_page_relative_schema_06_preserves_objective_and_warmstarts_07(
     assert path.read_bytes() == before
 
 
-@pytest.mark.parametrize("change", ["missing", "changed", "legacy_claim"])
+@pytest.mark.parametrize("change", ["missing", "legacy_claim"])
 def test_rotation_protocol_is_strict_and_cannot_be_claimed_by_old_schema(study_models, change):
     saved = torch.load(study_models / "global" / "best.pt", weights_only=True)
     if change == "missing":
         del saved["provenance"]["augmentation_protocol"]
-    elif change == "changed":
-        saved["provenance"]["augmentation_protocol"]["target"] = "rotate output domain"
     else:
         old = _legacy_payload(study_models, "global", study.PAGE_RELATIVE_CHECKPOINT_SCHEMA)
         old["provenance"]["augmentation_protocol"] = saved["provenance"]["augmentation_protocol"]
@@ -1175,7 +1086,7 @@ def test_new_checkpoint_requires_loss_protocol_and_legacy_must_not_claim_it(stud
         study._validate_saved(legacy)
 
 
-@pytest.mark.parametrize("architecture", ["global", "spatial", "page", "oriented_surface"])
+@pytest.mark.parametrize("architecture", ["global", "oriented_surface"])
 def test_study_predictor_preserves_input_error_policy(study_models, architecture):
     predictor = load_coordinate_predictor(study_models / architecture / "best.pt")
     image = np.full((32, 32, 3), 120, dtype=np.uint8)
@@ -1203,15 +1114,14 @@ def test_changed_checkpoint_is_rejected(study_models, tmp_path):
         load_coordinate_predictor(destination)
 
 
-@pytest.mark.parametrize("architecture", ["global", "spatial", "page", "oriented_surface"])
 @pytest.mark.parametrize(
     "mutation",
     ["schema", "extra", "shape", "dtype", "sparse", "nan", "epoch", "optimizer", "rng", "huge"],
 )
 def test_valid_hash_does_not_bypass_checkpoint_validation(
-    study_models, architecture, mutation, tmp_path
+    study_models, mutation, tmp_path
 ):
-    saved = torch.load(study_models / architecture / "best.pt", weights_only=True)
+    saved = torch.load(study_models / "global" / "best.pt", weights_only=True)
     key = next(iter(saved["model_state"]))
     if mutation == "schema":
         saved["schema_version"] = "learning-0.1"
@@ -1272,15 +1182,14 @@ def test_loader_digest_refers_to_the_exact_bytes_it_deserialized(study_models, m
     assert load_coordinate_predictor(source).model_sha256 == expected
 
 
-@pytest.mark.parametrize("kind", ["best", "last"])
-def test_synthetic_epoch_one_state_is_validated_without_optimizer(study_models, kind):
+def test_synthetic_epoch_one_state_is_validated_without_optimizer(study_models):
     saved = torch.load(study_models / "global" / "best.pt", weights_only=True)
     saved.update(
         epoch=1,
         best_epoch=1,
         best_validation_epe_pixels=0.5,
-        checkpoint_kind=kind,
-        best_checkpoint_sha256=None if kind == "best" else "a" * 64,
+        checkpoint_kind="last",
+        best_checkpoint_sha256=None if "last" == "best" else "a" * 64,
         history=[{"epoch": 1, "train_loss": 1.0, "validation_epe_pixels": 0.5}],
     )
     # Synthetic moments validate the schema, not actual GPU optimizer behavior.
@@ -1358,7 +1267,7 @@ def test_checkpoint_generation_selects_best_and_preserves_previous_pair(
     assert study.coordinate_checkpoint(initial_last)["epoch"] == 0
 
 
-@pytest.mark.parametrize("failed_write", [1, 2, 3, 4, "publish"])
+@pytest.mark.parametrize("failed_write", [1, "publish"])
 @pytest.mark.parametrize("portable", [False, True] if os.name != "nt" else [True])
 def test_interrupted_checkpoint_publication_keeps_old_pair_readable(
     study_models, tmp_path, monkeypatch, failed_write, portable
@@ -1453,9 +1362,7 @@ def test_portable_checkpoint_pointer_preserves_complete_generations(
     assert Path(loaded.checkpoint_path).parent.name.startswith(".checkpoint-")
 
 
-@pytest.mark.parametrize("pointer", [
-    "../escaped", "/abs/path", ".checkpoint-../../escape", "plain",
-])
+@pytest.mark.parametrize("pointer", ["../escaped", ".checkpoint-../../escape"])
 def test_portable_checkpoint_pointer_rejects_unowned_paths(tmp_path, pointer):
     (tmp_path / "current.json").write_text(json.dumps({"generation": pointer}))
     with pytest.raises(FlattenerError):

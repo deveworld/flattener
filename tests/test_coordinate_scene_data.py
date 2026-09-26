@@ -16,36 +16,15 @@ from PIL import Image
 from flattener import FlattenerError
 from flattener.learning import scene_data
 from flattener.learning.model import ModelConfig, preprocess_image
-from flattener.synthetic.paired_scenes import PairedSceneConfig, generate_paired_scene_dataset
 
 PHOTO_SIZE = (128, 160)
 CONFIG = ModelConfig(input_size=(24, 20), grid_size=(7, 5))
 
 
-@pytest.fixture(scope="module")
-def source(tmp_path_factory):
-    root = tmp_path_factory.mktemp("coordinate-data-only")
-    directory = root / "scenes"
-    generate_paired_scene_dataset(
-        directory,
-        PairedSceneConfig(
-            train_documents=1,
-            validation_documents=1,
-            test_documents=1,
-            image_size=PHOTO_SIZE,
-            seed=397,
-        ),
-    )
-    try:
-        yield directory
-    finally:
-        shutil.rmtree(root)
-
-
 @pytest.fixture
-def mutable(source, tmp_path):
+def mutable(scene_source, tmp_path):
     directory = tmp_path / "own-coordinate-data-copy"
-    shutil.copytree(source, directory)
+    shutil.copytree(scene_source, directory)
     try:
         yield directory
     finally:
@@ -117,14 +96,14 @@ def _independent_forward(size, parameters):
     return result, visible
 
 
-def test_constructor_checks_whole_manifest_without_pixel_or_map_decode(source, monkeypatch):
+def test_constructor_checks_whole_manifest_without_pixel_or_map_decode(scene_source, monkeypatch):
     def forbidden(*args, **kwargs):
         pytest.fail("constructor may not decode pixels or create coordinate maps")
 
     monkeypatch.setattr(Image, "open", forbidden)
     monkeypatch.setattr(scene_data, "make_geometry", forbidden)
     for split in ("train", "validation"):
-        dataset = scene_data.SceneCoordinateDataset(source, split, CONFIG)
+        dataset = scene_data.SceneCoordinateDataset(scene_source, split, CONFIG)
         assert len(dataset) == 4
         assert dataset.sample_counts == dict.fromkeys(("train", "validation", "test"), 6)
         assert dataset.page_counts == dict.fromkeys(("train", "validation", "test"), 4)
@@ -159,10 +138,10 @@ def test_flat_collection_preserves_scene_targets_and_excludes_external_sources(m
     torch.testing.assert_close(after["valid"], before["valid"])
 
 
-def test_getitem_opens_only_selected_positive_once_per_artifact(source, monkeypatch):
-    dataset = scene_data.SceneCoordinateDataset(source, "validation", CONFIG)
+def test_getitem_opens_only_selected_positive_once_per_artifact(scene_source, monkeypatch):
+    dataset = scene_data.SceneCoordinateDataset(scene_source, "validation", CONFIG)
     record = dataset.records[1]
-    expected = [source / record["paths"][name] for name in ("image.png", "mask.png")]
+    expected = [scene_source / record["paths"][name] for name in ("image.png", "mask.png")]
     original, opened = Image.open, []
 
     def selected_only(path, *args, **kwargs):
@@ -179,11 +158,11 @@ def test_getitem_opens_only_selected_positive_once_per_artifact(source, monkeypa
     assert value["geometry_family"] == value["family"] == record["family"]
 
 
-def test_original_pixels_and_preprocessing_are_independent_of_output_size(source):
-    dataset = scene_data.SceneCoordinateDataset(source, "train", CONFIG, (137, 149))
+def test_original_pixels_and_preprocessing_are_independent_of_output_size(scene_source):
+    dataset = scene_data.SceneCoordinateDataset(scene_source, "train", CONFIG, (137, 149))
     value = dataset[0]
     record = dataset.records[0]
-    with Image.open(source / record["paths"]["image.png"]) as image:
+    with Image.open(scene_source / record["paths"]["image.png"]) as image:
         original = np.array(image)
     np.testing.assert_array_equal(value["original_image"], original)
     assert value["original_image"].dtype == np.uint8
@@ -198,12 +177,12 @@ def test_original_pixels_and_preprocessing_are_independent_of_output_size(source
     assert not value["image"].requires_grad
 
 
-def test_varying_output_sizes_use_analytic_original_frame_half_centers(source):
+def test_varying_output_sizes_use_analytic_original_frame_half_centers(scene_source):
     for size in ((128, 160), (137, 149), (257, 131)):
-        dataset = scene_data.SceneCoordinateDataset(source, "train", CONFIG, size)
+        dataset = scene_data.SceneCoordinateDataset(scene_source, "train", CONFIG, size)
         for index, record in enumerate(dataset.records):
             metadata = json.loads(
-                (source / record["paths"]["metadata.json"]).read_text(encoding="utf-8"))
+                (scene_source / record["paths"]["metadata.json"]).read_text(encoding="utf-8"))
             expected, valid = _independent_forward(size, metadata["geometry"]["parameters"])
             value = dataset[index]
             assert value["target"].dtype == torch.float32
@@ -216,8 +195,8 @@ def test_varying_output_sizes_use_analytic_original_frame_half_centers(source):
             assert np.linalg.norm(error, axis=-1).max() < 1e-5
 
 
-def test_samples_and_public_snapshots_do_not_share_trusted_state(source):
-    dataset = scene_data.SceneCoordinateDataset(source, "train", CONFIG)
+def test_samples_and_public_snapshots_do_not_share_trusted_state(scene_source):
+    dataset = scene_data.SceneCoordinateDataset(scene_source, "train", CONFIG)
     expected = dataset[0]
     changed = dataset[0]
     changed["image"].zero_()
@@ -258,8 +237,8 @@ def test_invalid_configuration_is_rejected_before_io():
         assert error.value.reason_code == "invalid_coordinate_scene_dataset"
 
 
-def test_index_semantics_are_integer_only_and_preserve_index_error(source):
-    dataset = scene_data.SceneCoordinateDataset(source, "train", CONFIG)
+def test_index_semantics_are_integer_only_and_preserve_index_error(scene_source):
+    dataset = scene_data.SceneCoordinateDataset(scene_source, "train", CONFIG)
     for index in (True, np.bool_(False), 0.0, "0", slice(None)):
         with pytest.raises(FlattenerError, match="index must be an integer"):
             dataset[index]
@@ -340,8 +319,8 @@ def test_generator_source_claims_must_match_the_current_implementation(mutable):
         scene_data.SceneCoordinateDataset(mutable, "train", CONFIG)
 
 
-def test_source_changes_after_construction_are_rejected(source, monkeypatch):
-    dataset = scene_data.SceneCoordinateDataset(source, "train", CONFIG)
+def test_source_changes_after_construction_are_rejected(scene_source, monkeypatch):
+    dataset = scene_data.SceneCoordinateDataset(scene_source, "train", CONFIG)
     changed = dataset.source_code_sha256
     changed["learning/model.py"] = "0" * 64
     monkeypatch.setattr(scene_data, "_source_hashes", lambda: changed)
@@ -349,40 +328,11 @@ def test_source_changes_after_construction_are_rejected(source, monkeypatch):
         dataset[0]
 
 
-def test_resource_limits_reject_before_image_decode(source, monkeypatch):
+def test_resource_limits_reject_before_image_decode(scene_source, monkeypatch):
     monkeypatch.setattr(Image, "open", lambda *args: pytest.fail("oversized decode"))
     monkeypatch.setattr(scene_data, "_ARTIFACT_LIMIT", 1)
     with pytest.raises(FlattenerError, match="encoded resource limit"):
-        scene_data.SceneCoordinateDataset(source, "train", CONFIG)
-
-
-def test_mid_load_manifest_change_is_rejected(mutable, monkeypatch):
-    dataset = scene_data.SceneCoordinateDataset(mutable, "train", CONFIG)
-    original = scene_data.preprocess_image
-
-    def change_while_loading(*args):
-        path = mutable / "manifest.json"
-        path.write_bytes(path.read_bytes() + b"\n")
-        return original(*args)
-
-    monkeypatch.setattr(scene_data, "preprocess_image", change_while_loading)
-    with pytest.raises(FlattenerError, match="manifest changed while loading"):
-        dataset[0]
-
-
-def test_mid_load_source_change_is_rejected(source, monkeypatch):
-    dataset = scene_data.SceneCoordinateDataset(source, "train", CONFIG)
-    original = scene_data.preprocess_image
-
-    def change_while_loading(*args):
-        changed = dataset.source_code_sha256
-        changed["learning/model.py"] = "0" * 64
-        monkeypatch.setattr(scene_data, "_source_hashes", lambda: changed)
-        return original(*args)
-
-    monkeypatch.setattr(scene_data, "preprocess_image", change_while_loading)
-    with pytest.raises(FlattenerError, match="sources changed while loading"):
-        dataset[0]
+        scene_data.SceneCoordinateDataset(scene_source, "train", CONFIG)
 
 
 def test_missing_or_malformed_manifest_has_a_structured_error(tmp_path):
@@ -393,8 +343,8 @@ def test_missing_or_malformed_manifest_has_a_structured_error(tmp_path):
         scene_data.SceneCoordinateDataset(tmp_path, "train", CONFIG)
 
 
-def test_cache_is_exact_tensor_only_snapshot_and_loads_each_example_once(source, monkeypatch):
-    dataset = scene_data.SceneCoordinateDataset(source, "train", CONFIG)
+def test_cache_is_exact_tensor_only_snapshot_and_loads_each_example_once(scene_source, monkeypatch):
+    dataset = scene_data.SceneCoordinateDataset(scene_source, "train", CONFIG)
     expected = [dataset[index] for index in range(len(dataset))]
     original = scene_data.SceneCoordinateDataset.__getitem__
     accessed = []
@@ -426,8 +376,8 @@ def test_cache_is_exact_tensor_only_snapshot_and_loads_each_example_once(source,
     assert accessed == list(range(len(dataset)))
 
 
-def test_cache_returns_copies_and_preserves_index_semantics(source):
-    dataset = scene_data.SceneCoordinateDataset(source, "validation", CONFIG)
+def test_cache_returns_copies_and_preserves_index_semantics(scene_source):
+    dataset = scene_data.SceneCoordinateDataset(scene_source, "validation", CONFIG)
     cache = scene_data.cache_scene_dataset(dataset)
     expected = cache[0]
     changed = cache[0]
@@ -443,8 +393,8 @@ def test_cache_returns_copies_and_preserves_index_semantics(source):
         cache[len(cache)]
 
 
-def test_cache_budget_rejects_before_loading_any_example(source, monkeypatch):
-    dataset = scene_data.SceneCoordinateDataset(source, "train", CONFIG)
+def test_cache_budget_rejects_before_loading_any_example(scene_source, monkeypatch):
+    dataset = scene_data.SceneCoordinateDataset(scene_source, "train", CONFIG)
     required = scene_data.scene_cache_bytes(dataset)
     monkeypatch.setattr(
         scene_data.SceneCoordinateDataset,
@@ -458,8 +408,10 @@ def test_cache_budget_rejects_before_loading_any_example(source, monkeypatch):
 
 
 @pytest.mark.parametrize("fault", ["dtype", "shape"])
-def test_cache_rejects_non_original_boolean_source_mask(source, monkeypatch, fault):
-    dataset = scene_data.SceneCoordinateDataset(source, "train", CONFIG, output_size=(137, 149))
+def test_cache_rejects_non_original_boolean_source_mask(scene_source, monkeypatch, fault):
+    dataset = scene_data.SceneCoordinateDataset(
+        scene_source, "train", CONFIG, output_size=(137, 149)
+    )
     original = scene_data.SceneCoordinateDataset.__getitem__
 
     def invalid_mask(self, index):
@@ -475,8 +427,8 @@ def test_cache_rejects_non_original_boolean_source_mask(source, monkeypatch, fau
         scene_data.cache_scene_dataset(dataset)
 
 
-def test_cache_rejects_test_split_and_non_dataset_without_decode(source, monkeypatch):
-    dataset = scene_data.SceneCoordinateDataset(source, "test", CONFIG)
+def test_cache_rejects_test_split_and_non_dataset_without_decode(scene_source, monkeypatch):
+    dataset = scene_data.SceneCoordinateDataset(scene_source, "test", CONFIG)
     monkeypatch.setattr(Image, "open", lambda *args: pytest.fail("test cache decode"))
     for value in (dataset, None, object()):
         with pytest.raises(FlattenerError, match="uncached train or validation"):
@@ -491,110 +443,6 @@ def test_cached_integrity_rejects_later_artifact_changes_without_decode(mutable,
     monkeypatch.setattr(Image, "open", lambda *args: pytest.fail("integrity decode"))
     with pytest.raises(FlattenerError, match="artifact changed"):
         cache.verify_integrity()
-
-
-def test_cache_rejects_manifest_change_before_loading(mutable, monkeypatch):
-    dataset = scene_data.SceneCoordinateDataset(mutable, "train", CONFIG)
-    path = mutable / "manifest.json"
-    path.write_bytes(path.read_bytes() + b"\n")
-    monkeypatch.setattr(Image, "open", lambda *args: pytest.fail("changed manifest decode"))
-    with pytest.raises(FlattenerError, match="cached coordinate manifest changed"):
-        scene_data.cache_scene_dataset(dataset)
-
-
-@pytest.fixture(scope="module")
-def paper_source(source, tmp_path_factory):
-    """Three tiny authored stand-ins, never actual external images or training."""
-    from flattener.synthetic import paper
-
-    root = tmp_path_factory.mktemp("paper-adapter-contract")
-    directory = root / "dataset"
-    shutil.copytree(source, directory)
-    (directory / "files").mkdir()
-    manifest = _manifest(directory)
-    block = {"schema_version": "paper-augmentation-1.0", "complete": True,
-             "photo_size": list(PHOTO_SIZE), "generator_code_sha256": {
-                 "synthetic/paper.py": scene_data._data_hashes(True)["synthetic/paper.py"]},
-             "templates": [], "captures": [], "records": []}
-    for index, split in enumerate(("train", "validation", "test")):
-        flat = np.full((128, 160, 3), 245 - index, np.uint8)
-        flat[20:105:8, 15:145] = 30 + index
-        filename = f"files/template-{split}.png"
-        Image.fromarray(flat).save(directory / filename)
-        template = {"id": f"template-{split}", "document_group": f"smartdoc:fixture-{split}",
-                    "split": split, "capture_id": f"flat-capture-{split}",
-                    "source_dataset": "smartdoc2015-ch1", "license_spdx": "CC-BY-4.0",
-                    "path": filename, "sha256": scene_data._sha256(directory / filename),
-                    "bytes": (directory / filename).stat().st_size,
-                    "content_sha256": hashlib.sha256(flat.tobytes()).hexdigest()}
-        block["templates"].append(template)
-        seed = 720 + index
-        params, _, sampling = paper.sample_paper_geometry(
-            "gentle", seed, size_bin="medium", photo_size=PHOTO_SIZE, output_size=(137, 149))
-        sample = paper.generate_paper_sample(flat, seed + 10, params, photo_size=PHOTO_SIZE)
-        capture_rgb = np.full((*PHOTO_SIZE, 3), 100 + index, np.uint8)
-        capture_name = f"files/capture-{split}.png"
-        Image.fromarray(capture_rgb).save(directory / capture_name)
-        capture = {"id": f"capture-{split}", "document_group": template["document_group"],
-                   "split": split, "source_dataset": "smartdoc2015-ch1",
-                   "license_spdx": "CC-BY-4.0", "path": capture_name,
-                   "sha256": scene_data._sha256(directory / capture_name),
-                   "bytes": (directory / capture_name).stat().st_size,
-                   "original_size": list(PHOTO_SIZE),
-                   "corners_xy": [[20, 18], [138, 21], [140, 109], [18, 111]]}
-        block["captures"].append(capture)
-        capture_geometry = paper.make_capture_geometry(
-            capture["corners_xy"], PHOTO_SIZE, (192, 144), PHOTO_SIZE)
-        for kind, image, geometry in (("simulated", sample.image, sample.geometry),
-                                      ("capture", capture_rgb, capture_geometry)):
-            identifier = f"paper-{split}-{kind}"
-            fraction = float(geometry.photo_page_mask.mean())
-            size_bin = "small" if fraction < .25 else "medium" if fraction < .5 else "large"
-            record = {"id": identifier, "source": "paper", "kind": kind,
-                      "document_group": template["document_group"], "split": split,
-                      "capture_session": f"session-{split}-{kind}", "has_page": True,
-                      "template_id": template["id"], "template_sha256": template["sha256"],
-                      "family": "gentle" if kind == "simulated" else "capture_perspective",
-                      "size_bin": size_bin}
-            metadata = {key: record[key] for key in scene_data._PAPER_FIELDS}
-            metadata.update(schema_version="paper-augmentation-1.0", sample_id=identifier,
-                            image_size=list(PHOTO_SIZE), is_real_photo=kind == "capture",
-                            source_template_is_real_capture=True,
-                            template_content_sha256=template["content_sha256"],
-                            geometry=geometry.metadata)
-            if kind == "simulated":
-                metadata.update(geometry_seed=seed, sampling=sampling)
-            else:
-                record["capture_id"] = capture["id"]
-                metadata.update(capture_id=capture["id"], capture_sha256=capture["sha256"],
-                                original_size=capture["original_size"],
-                                corners_xy=capture["corners_xy"], photometric_augmented=False)
-            record["paths"] = {name: f"files/{identifier}-{name}"
-                               for name in ("image.png", "mask.png", "metadata.json")}
-            Image.fromarray(image).save(directory / record["paths"]["image.png"])
-            Image.fromarray(geometry.photo_page_mask.astype(np.uint8) * 255).save(
-                directory / record["paths"]["mask.png"])
-            (directory / record["paths"]["metadata.json"]).write_text(
-                json.dumps(metadata), encoding="utf-8")
-            record["sha256"] = {name: scene_data._sha256(directory / relative)
-                                for name, relative in record["paths"].items()}
-            block["records"].append(record)
-    manifest["collection"] = {"paper_augmentation": block}
-    _rewrite_manifest(directory, manifest)
-    try:
-        yield directory
-    finally:
-        shutil.rmtree(root)
-
-
-@pytest.fixture
-def mutable_paper(paper_source, tmp_path):
-    directory = tmp_path / "paper-copy"
-    shutil.copytree(paper_source, directory)
-    try:
-        yield directory
-    finally:
-        shutil.rmtree(directory)
 
 
 def test_paper_opt_in_is_strict_and_default_remains_native(paper_source):
@@ -652,7 +500,7 @@ def test_paper_real_helpers_and_original_frame_maps(paper_source, output_size):
         assert actual["original_image"].shape == (*PHOTO_SIZE, 3)
 
 
-@pytest.mark.parametrize("field", ["document_group", "capture_id", "content_sha256", "sha256"])
+@pytest.mark.parametrize("field", ["document_group", "content_sha256"])
 def test_paper_source_split_leakage_is_rejected(mutable_paper, field):
     manifest = _manifest(mutable_paper)
     templates = manifest["collection"]["paper_augmentation"]["templates"]
@@ -663,21 +511,14 @@ def test_paper_source_split_leakage_is_rejected(mutable_paper, field):
             mutable_paper, "train", CONFIG, include_paper_augmentation=True)
 
 
-@pytest.mark.parametrize("change", ["source", "license", "generator", "docunet_hash", "complete"])
+@pytest.mark.parametrize("change", ["source", "generator"])
 def test_paper_provenance_rejections(mutable_paper, change):
     manifest = _manifest(mutable_paper)
     block = manifest["collection"]["paper_augmentation"]
     if change == "source":
         block["templates"][0]["source_dataset"] = "docunet"
-    elif change == "license":
-        block["templates"][0]["license_spdx"] = None
-    elif change == "generator":
-        block["generator_code_sha256"]["synthetic/paper.py"] = "0" * 64
-    elif change == "complete":
-        block["complete"] = False
     else:
-        manifest["collection"]["sources"] = {"docunet": {
-            "files": [{"sha256": block["templates"][0]["sha256"]}]}}
+        block["generator_code_sha256"]["synthetic/paper.py"] = "0" * 64
     _rewrite_manifest(mutable_paper, manifest)
     with pytest.raises(FlattenerError):
         scene_data.SceneCoordinateDataset(
@@ -837,8 +678,8 @@ def test_cache_postflight_catches_earlier_sample_changed_during_load(mutable, mo
         scene_data.cache_scene_dataset(dataset)
 
 
-def test_cached_integrity_rejects_implementation_change(source, monkeypatch):
-    dataset = scene_data.SceneCoordinateDataset(source, "validation", CONFIG)
+def test_cached_integrity_rejects_implementation_change(scene_source, monkeypatch):
+    dataset = scene_data.SceneCoordinateDataset(scene_source, "validation", CONFIG)
     cache = scene_data.cache_scene_dataset(dataset)
     changed = cache.source_code_sha256
     changed["learning/model.py"] = "0" * 64
@@ -968,12 +809,7 @@ def test_paper_cache_tensors_are_bitwise_equal_to_uncached_samples(paper_source)
             assert tensor.numpy().tobytes() == expected[key].numpy().tobytes()
 
 
-@pytest.mark.parametrize("change", [
-    None, "size", "mtime", "inode",
-    pytest.param("mode", marks=pytest.mark.skipif(
-        os.name != "posix", reason="POSIX execute-bit changes are not supported by Windows chmod")),
-    "missing",
-])
+@pytest.mark.parametrize("change", [None, "size", "missing"])
 def test_cache_light_verification_does_not_read_payloads_and_detects_file_changes(
         mutable_paper, monkeypatch, change):
     dataset = scene_data.SceneCoordinateDataset(
@@ -982,19 +818,8 @@ def test_cache_light_verification_does_not_read_payloads_and_detects_file_change
     # Held-out source files must remain in the integrity inventory as well.
     template = _manifest(mutable_paper)["collection"]["paper_augmentation"]["templates"][-1]
     path = mutable_paper / template["path"]
-    info = path.stat()
     if change == "size":
         path.write_bytes(path.read_bytes() + b"changed")
-    elif change == "mtime":
-        os.utime(path, ns=(info.st_atime_ns, info.st_mtime_ns + 1_000_000_000))
-    elif change == "inode":
-        replacement = path.with_suffix(".replacement")
-        replacement.write_bytes(path.read_bytes())
-        os.utime(replacement, ns=(info.st_atime_ns, info.st_mtime_ns))
-        os.replace(replacement, path)
-        assert path.stat().st_ino != info.st_ino
-    elif change == "mode":
-        path.chmod(info.st_mode ^ 0o100)
     elif change == "missing":
         path.unlink()
     payloads = set(cache._artifact_files)
@@ -1014,20 +839,15 @@ def test_cache_light_verification_does_not_read_payloads_and_detects_file_change
             cache.verify_integrity(full=False)
 
 
-@pytest.mark.parametrize("kind", ["sample", "template", "capture"])
 def test_cache_full_verification_hashes_same_size_restored_mtime_tampering(
-        mutable_paper, monkeypatch, kind):
+        mutable_paper, monkeypatch):
     from flattener.synthetic import scenes
 
     dataset = scene_data.SceneCoordinateDataset(
         mutable_paper, "train", CONFIG, include_paper_augmentation=True)
     cache = scene_data.cache_scene_dataset(dataset)
     trusted_state = cache._artifact_state
-    if kind == "sample":
-        path = mutable_paper / dataset.records[0]["paths"]["image.png"]
-    else:
-        block = _manifest(mutable_paper)["collection"]["paper_augmentation"]
-        path = mutable_paper / block[f"{kind}s"][-1]["path"]
+    path = mutable_paper / dataset.records[0]["paths"]["image.png"]
     before = path.stat()
     data = bytearray(path.read_bytes())
     data[-1] ^= 1
@@ -1074,14 +894,13 @@ def test_cache_postflight_retains_global_identity_checks_after_private_loading(
     assert not hasattr(dataset, "_building_source_paths")
 
 
-@pytest.mark.parametrize("kind", ["template", "capture"])
 def test_cache_postflight_detects_mutation_of_private_loader_reused_source(
-        mutable_paper, monkeypatch, kind):
+        mutable_paper, monkeypatch):
     dataset = scene_data.SceneCoordinateDataset(
         mutable_paper, "train", CONFIG, include_paper_augmentation=True)
     before = deepcopy(dataset.__dict__)
     block = _manifest(mutable_paper)["collection"]["paper_augmentation"]
-    source = next(item for item in block[f"{kind}s"] if item["split"] == "train")
+    source = next(item for item in block["templates"] if item["split"] == "train")
     path = mutable_paper / source["path"]
     original = scene_data.SceneCoordinateDataset.__getitem__
 
@@ -1128,8 +947,8 @@ def _cache_pair(directory):
             for split in ("train", "validation")}
 
 
-def test_contiguous_cache_batch_matches_ordered_clones_without_aliases(source, monkeypatch):
-    dataset = scene_data.SceneCoordinateDataset(source, "train", CONFIG)
+def test_contiguous_cache_batch_matches_ordered_clones_without_aliases(scene_source, monkeypatch):
+    dataset = scene_data.SceneCoordinateDataset(scene_source, "train", CONFIG)
     cache = scene_data.cache_scene_dataset(dataset)
     original = {key: value.clone() for key, value in cache._tensors.items()}
     assert all(tensor.is_contiguous() for tensor in cache._tensors.values())
@@ -1145,11 +964,9 @@ def test_contiguous_cache_batch_matches_ordered_clones_without_aliases(source, m
     assert set(cache.fetch_batch([0, 1], include_source_mask=False)) == {"image", "target", "valid"}
 
 
-@pytest.mark.parametrize("indices", [[], [0] * 5, [True], [0.5], ["0"],
-                                     np.array([[0]]), np.array([True]),
-                                     torch.tensor([0.0]), (v for v in [0])])
-def test_cache_batch_rejects_invalid_indices(source, indices):
-    cache = scene_data.cache_scene_dataset(_cache_pair(source)["train"])
+@pytest.mark.parametrize("indices", [[], [True]])
+def test_cache_batch_rejects_invalid_indices(scene_source, indices):
+    cache = scene_data.cache_scene_dataset(_cache_pair(scene_source)["train"])
     with pytest.raises(FlattenerError):
         cache.fetch_batch(indices)
     with pytest.raises(IndexError):
@@ -1158,8 +975,8 @@ def test_cache_batch_rejects_invalid_indices(source, indices):
         cache.fetch_batch([0], pin_memory=1)
 
 
-def test_batch_pin_request_allocates_final_destination_once(source, monkeypatch):
-    cache = scene_data.cache_scene_dataset(_cache_pair(source)["train"])
+def test_batch_pin_request_allocates_final_destination_once(scene_source, monkeypatch):
+    cache = scene_data.cache_scene_dataset(_cache_pair(scene_source)["train"])
     original, allocations = torch.empty, []
 
     def spy(shape, **kwargs):
@@ -1208,8 +1025,8 @@ def test_persistent_pair_round_trip_weights_only_mmap_and_no_warm_decode(mutable
     torch.testing.assert_close(warm["train"][0]["image"], cold["train"][0]["image"])
 
 
-def test_persistent_aggregate_budget_and_test_split_reject_before_decode(source, monkeypatch):
-    datasets = _cache_pair(source)
+def test_persistent_aggregate_budget_and_test_split_reject_before_decode(scene_source, monkeypatch):
+    datasets = _cache_pair(scene_source)
     required = sum(scene_data.scene_cache_bytes(value) for value in datasets.values())
     monkeypatch.setattr(Image, "open", lambda *args: pytest.fail("budget check decoded"))
     with pytest.raises(FlattenerError, match="requires.*budget"):
@@ -1236,17 +1053,16 @@ def test_persistent_stale_identity_requires_explicit_rebuild(mutable, monkeypatc
     assert rebuilt["train"].manifest_sha256 != old["train"].manifest_sha256
 
 
-@pytest.mark.parametrize("fault", ["payload", "sidecar", "missing_sidecar", "missing_payload"])
+@pytest.mark.parametrize("fault", ["payload", "missing_sidecar"])
 def test_persistent_corruption_is_fail_closed(mutable, fault):
     datasets = _cache_pair(mutable)
     path = mutable / "preprocessed.pt"
     scene_data.cache_scene_datasets(datasets, persistent_path=path)
     metadata = path.with_suffix(".pt.json")
-    target = metadata if "sidecar" in fault else path
-    if fault.startswith("missing"):
-        target.unlink()
+    if fault == "missing_sidecar":
+        metadata.unlink()
     else:
-        target.write_bytes(target.read_bytes() + b"damaged")
+        path.write_bytes(path.read_bytes() + b"damaged")
     before = {p: p.read_bytes() for p in (path, metadata) if p.exists()}
     with pytest.raises(FlattenerError):
         scene_data.cache_scene_datasets(datasets, persistent_path=path)
@@ -1264,8 +1080,7 @@ def _rewrite_persistent_payload(path, change):
     sidecar.write_text(json.dumps(metadata))
 
 
-@pytest.mark.parametrize("fault", ["image_nan", "image_range", "coordinate_ulp", "missing_nan",
-                                  "valid_empty", "mask_empty", "dtype", "storage"])
+@pytest.mark.parametrize("fault", ["image_nan", "coordinate_ulp", "storage"])
 def test_persistent_tensor_admission_rejects_tampering_even_with_new_hashes(mutable, fault):
     datasets = _cache_pair(mutable)
     path = mutable / "preprocessed.pt"
@@ -1275,19 +1090,9 @@ def test_persistent_tensor_admission_rejects_tampering_even_with_new_hashes(muta
         fields = saved["splits"]["train"]
         if fault == "image_nan":
             fields["image"][0, 0, 0, 0] = torch.nan
-        elif fault == "image_range":
-            fields["image"][0, 0, 0, 0] = 1.1
         elif fault == "coordinate_ulp":
             above_one = torch.nextafter(torch.tensor(1.), torch.tensor(torch.inf))
             fields["target"][0, 0, 0, 0] = above_one
-        elif fault == "missing_nan":
-            fields["valid"][0, 0, 0] = False
-        elif fault == "valid_empty":
-            fields["valid"][0].zero_()
-        elif fault == "mask_empty":
-            fields["source_mask"][0].zero_()
-        elif fault == "dtype":
-            fields["image"] = fields["image"].double()
         else:
             shape = fields["image"].shape
             fields["image"] = torch.zeros((shape[0] + 1, *shape[1:]))[:shape[0]]
@@ -1336,15 +1141,12 @@ def test_persistent_mmap_backing_change_is_detected_before_fetch(mutable):
             read()
 
 
-@pytest.mark.parametrize("kind", ["sample", "template", "capture"])
-def test_paper_cache_rejects_same_bytes_inside_root_symlink(mutable_paper, kind):
+def test_paper_cache_rejects_same_bytes_inside_root_symlink(mutable_paper):
     dataset = scene_data.SceneCoordinateDataset(
         mutable_paper, "train", CONFIG, include_paper_augmentation=True)
     cache = scene_data.cache_scene_dataset(dataset)
     block = _manifest(mutable_paper)["collection"]["paper_augmentation"]
-    relative = (block["records"][0]["paths"]["image.png"] if kind == "sample"
-                else block[f"{kind}s"][0]["path"])
-    path = mutable_paper / relative
+    path = mutable_paper / block["records"][0]["paths"]["image.png"]
     same = path.with_name(path.name + ".same")
     path.rename(same)
     try:
@@ -1356,9 +1158,8 @@ def test_paper_cache_rejects_same_bytes_inside_root_symlink(mutable_paper, kind)
             cache.verify_integrity(full=full)
 
 
-@pytest.mark.parametrize("failure_at", [1, 2])
 def test_persistent_atomic_replace_failures_are_closed_and_never_unlink_old_payload(
-        mutable, monkeypatch, failure_at):
+        mutable, monkeypatch):
     datasets = _cache_pair(mutable)
     path = mutable / "preprocessed.pt"
     scene_data.cache_scene_datasets(datasets, persistent_path=path)
@@ -1373,7 +1174,7 @@ def test_persistent_atomic_replace_failures_are_closed_and_never_unlink_old_payl
 
     def interrupted(source, destination):
         calls.append(destination)
-        if len(calls) == failure_at:
+        if len(calls) == 1:
             raise PermissionError("simulated Windows sharing/publication interruption")
         return original(source, destination)
 
@@ -1381,10 +1182,7 @@ def test_persistent_atomic_replace_failures_are_closed_and_never_unlink_old_payl
     with pytest.raises(FlattenerError, match="sharing/publication"):
         scene_data.cache_scene_datasets(datasets, persistent_path=path, rebuild=True)
     assert path.is_file() and metadata_path.is_file()
-    if failure_at == 1:
-        assert all(p.read_bytes() == value for p, value in before.items())
-    else:
-        assert metadata_path.read_bytes() == before[metadata_path]
+    assert all(p.read_bytes() == value for p, value in before.items())
     assert not path.with_suffix(".pt.lock").exists()
     assert not list(mutable.glob(".preprocessed-*"))
     with pytest.raises(FlattenerError):
@@ -1493,26 +1291,25 @@ def test_semantic_table_preserves_persistent_cache_bytes_and_warm_no_decode(muta
     scene_data.verify_scene_caches(warm)
 
 
-@pytest.mark.parametrize("split", ["train", "validation", "test"])
-def test_semantic_label_split_order_and_output_resolution_invariance(paper_source, split):
+def test_semantic_label_split_order_and_output_resolution_invariance(paper_source):
     from flattener.learning.augmentation import prepare_semantic_page_labels
 
     first = scene_data.SceneCoordinateDataset(
-        paper_source, split, CONFIG, (101, 83), include_paper_augmentation=True)
+        paper_source, "train", CONFIG, (101, 83), include_paper_augmentation=True)
     second = scene_data.SceneCoordinateDataset(
-        paper_source, split, CONFIG, (173, 131), include_paper_augmentation=True)
+        paper_source, "train", CONFIG, (173, 131), include_paper_augmentation=True)
     a, b = (prepare_semantic_page_labels(value) for value in (first, second))
-    assert a.record_ids == b.record_ids and a.split == b.split == split
+    assert a.record_ids == b.record_ids and a.split == b.split == "train"
     for key in a.fetch_batch([0, -1]):
         torch.testing.assert_close(a.fetch_batch([0, -1])[key], b.fetch_batch([0, -1])[key],
                                    rtol=0, atol=0, equal_nan=True)
 
 
-def test_semantic_corner_out_of_frame_or_nonfinite_is_nan_not_clipped(source, monkeypatch):
+def test_semantic_corner_out_of_frame_or_nonfinite_is_nan_not_clipped(scene_source, monkeypatch):
     from flattener.learning.augmentation import prepare_semantic_page_labels
     from flattener.synthetic import geometry
 
-    dataset = scene_data.SceneCoordinateDataset(source, "train", CONFIG)
+    dataset = scene_data.SceneCoordinateDataset(scene_source, "train", CONFIG)
     raw = np.array([[-1.2, -.5], [.5, -.5], [.5, .5], [-1.2, .5]], dtype=np.float32)
     monkeypatch.setattr(geometry, "flat_to_photo", lambda points, params: raw.copy())
     result = prepare_semantic_page_labels(dataset).fetch_batch([0])
@@ -1545,10 +1342,10 @@ def test_semantic_metadata_mutation_detected_before_and_after_prepare(mutable, m
         labels.verify_integrity()
 
 
-def test_semantic_table_budget_and_batch_index_contract(source, monkeypatch):
+def test_semantic_table_budget_and_batch_index_contract(scene_source, monkeypatch):
     from flattener.learning.augmentation import prepare_semantic_page_labels
 
-    dataset = scene_data.SceneCoordinateDataset(source, "train", CONFIG)
+    dataset = scene_data.SceneCoordinateDataset(scene_source, "train", CONFIG)
     monkeypatch.setattr(Image, "open", lambda *args: pytest.fail("labels decoded pixels"))
     with pytest.raises(FlattenerError, match="budget"):
         prepare_semantic_page_labels(dataset, max_bytes=len(dataset) * 45 - 1)

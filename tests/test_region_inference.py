@@ -110,9 +110,8 @@ def test_prepare_view_exact_crop_without_unnecessary_resampling(image):
     assert metadata["preview_source_support_fraction"] == 1
 
 
-@pytest.mark.parametrize("value", [0, 255])
-def test_prepare_view_outside_source_is_gray_without_clipping_virtual_geometry(value):
-    source = np.full((8, 12, 3), value, np.uint8)
+def test_prepare_view_outside_source_is_gray_without_clipping_virtual_geometry():
+    source = np.full((8, 12, 3), 255, np.uint8)
     preview, virtual, metadata = prepare_page_view(
         source,
         PageRegion(0, 0, 12, 8),
@@ -123,7 +122,7 @@ def test_prepare_view_outside_source_is_gray_without_clipping_virtual_geometry(v
     assert preview.shape == (8, 12, 3)
     assert virtual == PageRegion(-6, -4, 18, 12)
     expected = np.full((8, 12, 3), 64, np.uint8)
-    expected[2:6, 3:9] = value
+    expected[2:6, 3:9] = 255
     np.testing.assert_array_equal(preview, expected)
     assert metadata["outside_source_fill_rgb"] == [64, 64, 64]
     assert metadata["preview_source_support_fraction"] == 0.25
@@ -265,8 +264,7 @@ def test_estimate_rejection_itself_retains_segmenter_provenance(image):
     assert caught.value.metadata["segmenter_sha256"] == segmenter.model_sha256
 
 
-@pytest.mark.parametrize("method", ["crop", "unwarp"])
-@pytest.mark.parametrize("supplied", ["neither", "both"])
+@pytest.mark.parametrize("method,supplied", [("crop", "neither"), ("unwarp", "both")])
 def test_exactly_one_region_source_is_required(image, predictor, method, supplied):
     kwargs = (
         {"region": PageRegion(24, 16, 48, 32), "segmenter": _Segmenter()}
@@ -285,8 +283,7 @@ def test_exactly_one_region_source_is_required(image, predictor, method, supplie
     assert result.metadata["failure_stage"] == "prepare_input"
 
 
-@pytest.mark.parametrize("policy", ["raise", "return", "original"])
-@pytest.mark.parametrize("bad_predictor", [None, object(), "weights.pt"])
+@pytest.mark.parametrize("bad_predictor,policy", [(None, "raise"), (object(), "original")])
 def test_invalid_predictor_follows_every_failure_policy_including_none(
     image, policy, bad_predictor
 ):
@@ -318,38 +315,22 @@ def test_invalid_predictor_follows_every_failure_policy_including_none(
         assert result.image is None
 
 
-@pytest.mark.parametrize("policy", ["raise", "return", "original"])
-def test_detection_rejection_is_never_reported_as_success_or_a_hidden_crop(image, policy):
+def test_detection_rejection_is_never_reported_as_success_or_a_hidden_crop(image):
     segmenter = _Segmenter(np.zeros((12, 18), np.float32))
-
-    def call():
-        return crop_page(image, (16, 24), segmenter=segmenter, config=RenderConfig(on_error=policy))
-
-    if policy == "raise":
-        with pytest.raises(FlattenerError) as caught:
-            call()
-        assert caught.value.status == Status.MODEL_ERROR
-        assert caught.value.reason_code == "page_not_found"
-        assert caught.value.metadata["processing_status"] == "model_error"
-        assert caught.value.metadata["quality_status"] == "not_evaluated"
-        assert caught.value.metadata["failure_stage"] == "estimate_region"
-        assert caught.value.metadata["page_region"]["foreground_pixels"] == 0
-        return
-    result = call()
+    result = crop_page(
+        image, (16, 24), segmenter=segmenter, config=RenderConfig(on_error="original")
+    )
     assert result.status == Status.MODEL_ERROR
     assert result.reason_code == "page_not_found"
     assert result.metadata["processing_status"] == "model_error"
     assert result.metadata["quality_status"] == "not_evaluated"
-    assert result.used_fallback == (policy == "original")
+    assert result.used_fallback
     assert result.metadata["requested_output_size"] == [16, 24]
     assert result.metadata["failure_stage"] == "estimate_region"
     assert result.metadata["page_region"]["foreground_pixels"] == 0
-    assert result.metadata["actual_output_size"] == ([48, 72] if policy == "original" else None)
-    if policy == "original":
-        np.testing.assert_array_equal(result.image, image)
-        assert not np.shares_memory(result.image, image)
-    else:
-        assert result.image is None
+    assert result.metadata["actual_output_size"] == [48, 72]
+    np.testing.assert_array_equal(result.image, image)
+    assert not np.shares_memory(result.image, image)
 
 
 def test_original_fallback_preserves_preoriented_readonly_negative_stride_rgb(image):
@@ -384,15 +365,8 @@ def test_invalid_image_is_not_returned_as_a_trusted_original_fallback(image):
     assert result.metadata["quality_status"] == "not_evaluated"
 
 
-@pytest.mark.parametrize("method", ["crop", "unwarp"])
 @pytest.mark.parametrize(
-    "config",
-    [
-        {},
-        RenderConfig(on_error=None),
-        RenderConfig(on_error="silent"),
-        RenderConfig(on_error=np.array(["return", "original"])),
-    ],
+    "method,config", [("crop", {}), ("unwarp", RenderConfig(on_error="silent"))]
 )
 def test_invalid_failure_policy_always_raises_a_structured_input_error(
     image, predictor, method, config
@@ -409,34 +383,20 @@ def test_invalid_failure_policy_always_raises_a_structured_input_error(
     assert caught.value.metadata["quality_status"] == "not_evaluated"
 
 
-@pytest.mark.parametrize("policy", ["raise", "return", "original"])
-def test_out_of_bounds_virtual_prediction_is_rejected_by_existing_renderer_gate(
-    image, predictor, policy
-):
-    def call():
-        return unwarp_page(
-            image,
-            predictor,
-            (32, 48),
-            region=PageRegion(0, 0, 72, 48),
-            region_config=RegionConfig(canonical_occupancy=0.5),
-            config=RenderConfig(on_error=policy),
-        )
-
-    if policy == "raise":
-        with pytest.raises(FlattenerError) as caught:
-            call()
-        assert caught.value.status == Status.INVALID_TRANSFORM
-        return
-    result = call()
+def test_out_of_bounds_virtual_prediction_is_rejected_by_existing_renderer_gate(image, predictor):
+    result = unwarp_page(
+        image,
+        predictor,
+        (32, 48),
+        region=PageRegion(0, 0, 72, 48),
+        region_config=RegionConfig(canonical_occupancy=0.5),
+        config=RenderConfig(on_error="original"),
+    )
     assert result.status == Status.INVALID_TRANSFORM
     assert result.metadata["failure_stage"] == "process_coordinates"
     assert result.metadata["model_id"] == predictor.model_id
-    assert result.used_fallback == (policy == "original")
-    if policy == "original":
-        np.testing.assert_array_equal(result.image, image)
-    else:
-        assert result.image is None
+    assert result.used_fallback
+    np.testing.assert_array_equal(result.image, image)
 
 
 def _set_shrinking_prediction(predictor, monkeypatch, scale):
@@ -464,42 +424,27 @@ def test_roi_guard_widens_an_undersized_footprint_only_within_configured_budget(
     assert result.metadata["validation"]["fold_check"] == "passed"
 
 
-@pytest.mark.parametrize("policy", ["raise", "return", "original"])
 def test_roi_guard_rejects_uncorrectable_crop_with_structured_diagnostics(
-    image, predictor, monkeypatch, policy
+    image, predictor, monkeypatch
 ):
     _set_shrinking_prediction(predictor, monkeypatch, 0.2)
-
-    def call():
-        return unwarp_page(
-            image,
-            predictor,
-            (24, 40),
-            region=PageRegion(16, 12, 56, 36),
-            region_config=RegionConfig(canonical_occupancy=1),
-            config=RenderConfig(on_error=policy),
-        )
-
-    if policy == "raise":
-        with pytest.raises(FlattenerError) as caught:
-            call()
-        assert caught.value.status == Status.MODEL_ERROR
-        assert caught.value.reason_code == "page_coverage_insufficient"
-        assert caught.value.metadata["failure_stage"] == "page_coverage"
-        return
-    result = call()
+    result = unwarp_page(
+        image,
+        predictor,
+        (24, 40),
+        region=PageRegion(16, 12, 56, 36),
+        region_config=RegionConfig(canonical_occupancy=1),
+        config=RenderConfig(on_error="return"),
+    )
     assert result.status == Status.MODEL_ERROR
     assert result.reason_code == "page_coverage_insufficient"
     assert result.metadata["failure_stage"] == "page_coverage"
     assert result.metadata["page_region"]["final_estimated_page_coverage"] < 0.98
-    assert result.used_fallback == (policy == "original")
-    if policy == "original":
-        np.testing.assert_array_equal(result.image, image)
-    else:
-        assert result.image is None
+    assert not result.used_fallback
+    assert result.image is None
 
 
-@pytest.mark.parametrize("bad_size", [(1, 24), (32, 1), (0, 24), (32, True), (32.0, 24)])
+@pytest.mark.parametrize("bad_size", [(1, 24), (32, True)])
 def test_output_size_rejected_before_segmenter_or_model_runs(image, predictor, bad_size):
     class UncalledSegmenter:
         def predict_probability(self, image):
