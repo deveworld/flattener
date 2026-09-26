@@ -10,9 +10,9 @@ picklable datasets, no lambdas, ``__main__`` guard.
 Validation runs in fp32 over the ``val_views`` (see ``data.ViewConfig``), logs a grid
 endpoint error per view in pixels of ``epe_reference_size`` and picks the best
 checkpoint by ``val_select``. Samples without a valid target node are counted as
-``not_evaluable`` and left out; a validation with nothing to evaluate picks no best. The best metric carries a signature of everything that
-defines validation; a resume with a different signature starts a new best. Every new
-best is saved.
+``not_evaluable`` and left out; a validation with nothing to evaluate picks no best.
+The best metric carries a signature of everything that defines validation; a resume
+with a different signature starts a new best. Every new best is saved.
 
 Loss (UVDoc ``train.py`` defaults): 5 * L1(2-D grid) + 5 * L1(3-D grid, only
 samples that have one) + optional reconstruction L1 (UVDoc: 1.0 from epoch 10
@@ -655,7 +655,8 @@ class _Logger:
 def _check_resume(
     config: TrainConfig, payload: dict[str, Any], spec: DataSpec, sources: dict[str, Any]
 ) -> None:
-    """Refuse a resume whose config, track, data spec or indexed samples changed."""
+    """Refuse a resume whose config, track, data spec, indexed samples or target
+    conventions (``DewarpDataset.describe``) changed."""
     saved = payload["train_config"]
     current = config.to_dict()
     changed = sorted(
@@ -665,8 +666,11 @@ def _check_resume(
         changed.append("track")
     if payload["data_spec_sha256"] != spec.sha256:
         changed.append("data spec")
-    if payload.get("data_sources") != sources:  # re-converted, re-split or relabelled data
-        changed.append("data sources (sample lists or license classes)")
+    saved_sources = payload.get("data_sources") or {}
+    if any("targets_sha256" not in source for split in saved_sources.values() for source in split):
+        changed.append("data sources (the checkpoint predates the target-convention signature)")
+    elif saved_sources != sources:  # re-converted, re-split, relabelled or reinterpreted data
+        changed.append("data sources (samples, license classes or target conventions)")
     if changed:
         raise _error("resume_mismatch", f"resume differs in {changed}; use a new output_dir")
 

@@ -223,7 +223,8 @@ def test_resume_compatibility_and_initialization_lineage(tmp_path):
     spec_path = _spec(tmp_path)
     spec = DataSpec.load(spec_path)
     config = _config(tmp_path)
-    sources = {"train": [{"name": "own-train", "samples": 4, "records_sha256": "a"}], "val": []}
+    source = {"name": "own-train", "samples": 4, "records_sha256": "a", "targets_sha256": "t"}
+    sources = {"train": [source], "val": []}
     payload = {
         "train_config": config.to_dict(),
         "track": "release",
@@ -244,6 +245,9 @@ def test_resume_compatibility_and_initialization_lineage(tmp_path):
     reconverted = {"train": [{**sources["train"][0], "records_sha256": "b"}], "val": []}
     with pytest.raises(FlattenerError, match="data sources"):
         _check_resume(config, payload, spec, reconverted)
+    legacy = {"train": [{k: v for k, v in source.items() if k != "targets_sha256"}], "val": []}
+    with pytest.raises(FlattenerError, match="predates the target-convention signature"):
+        _check_resume(config, {**payload, "data_sources": legacy}, spec, sources)
     research = tmp_path / "research.pt"
     save_checkpoint(research, _payload(7, track="research"))
     with pytest.raises(FlattenerError) as error:

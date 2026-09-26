@@ -98,6 +98,28 @@ RELEASE_LICENSE_KEYS = frozenset(
 # Upstream UVDoc 3-D normalization constants (xmax, xmin, ymax, ymin, zmax, zmin).
 DOC3D_GRID3D_RANGE = (1.2539363, -1.2442188, 1.2396319, -1.2289206, 0.6436657, -0.67492497)
 UVDOC_GRID3D_RANGE = (0.11433014, -0.12551452, 0.12401487, -0.12401487, 0.1952378, -0.1952378)
+# How stored values become targets, as defined in code (``coords`` and the adapters).
+# Every source description carries its digest; raise the version when a conversion
+# changes, so resumes and best checkpoints of the old targets are refused.
+TARGET_CONVENTIONS = {
+    "version": 1,
+    "values": "flattener align_corners=False; syntheticdoc q = b + 1/render_size; "
+    "pixel grids q = (2x + 1)/size - 1",
+    "grid": "edge-aligned nodes; map_to_grid extrapolates half a map pixel",
+    "doc3d_grid3d": {"range": DOC3D_GRID3D_RANGE, "order": "zyx", "flip_channel_1": True},
+    "uvdoc_grid3d": {"range": UVDOC_GRID3D_RANGE, "order": "xyz"},
+    "layouts": {"sample": SAMPLE_SCHEMA, "compact": COMPACT_SCHEMA},
+}
+# compact.json fields that decide how the copy was made (not its creation time or tool).
+COMPACT_SETTINGS_KEYS = (
+    "schema",
+    "track",
+    "scale",
+    "jpeg_quality",
+    "chroma_subsampling",
+    "resample",
+    "backward_map",
+)
 VIEW_CROPS = ("page", "full_frame")
 # ``color`` item layout: on, brightness, contrast, saturation, gain r/g/b, gamma,
 # grayscale, blur on, blur sigma, noise on, noise std.
@@ -461,6 +483,7 @@ class _Source:
             raise _error("missing_data", f"source {spec.name!r}: root {root} is not a directory")
         self.spec, self.root, self.grid_size = spec, root, grid_size
         self.hashes: dict[str, tuple[str, ...]] = {}
+        self.settings: dict[str, Any] | None = None  # copy settings that shape the targets
         records = self._index()
         if spec.ids_file is not None:
             wanted = set(Path(root, spec.ids_file).read_text(encoding="utf-8").split())
@@ -530,13 +553,17 @@ class _Source:
 
     def describe(self) -> dict[str, Any]:
         """Name, track, license manifest (sample counts per license class), a digest of the
-        sample list (ids, tracks, license classes; paths excluded) and the content digest."""
+        sample list (ids, tracks, license classes; paths excluded), the content digest and
+        what decides how targets are read: the grid size, the code conventions
+        (``TARGET_CONVENTIONS``), each record's map convention and render size
+        (``targets_sha256``) and the copy settings."""
         fallback = self.spec.license or self.spec.kind
         classes = Counter(r.get("license_class") or fallback for r in self.records)
         listing = "\n".join(
             f"{r['sample_id']}\t{r.get('track', '')}\t{r.get('license_class', '')}"
             for r in self.records
         )
+        targets = "\n".join(f"{r['sample_id']}\t{r.get('render_size')}" for r in self.records)
         return {
             "name": self.spec.name,
             "kind": self.spec.kind,
@@ -545,6 +572,10 @@ class _Source:
             "license_classes": dict(sorted(classes.items())),
             "records_sha256": hashlib.sha256(listing.encode("utf-8")).hexdigest(),
             "content_sha256": self.content_sha256,
+            "grid_size": list(self.grid_size),
+            "conventions_sha256": hashlib.sha256(canonical_json(TARGET_CONVENTIONS)).hexdigest(),
+            "targets_sha256": hashlib.sha256(targets.encode("utf-8")).hexdigest(),
+            "settings": self.settings,
         }
 
 
@@ -615,6 +646,7 @@ class ConvertedSource(_Source):
                     "backward_map": str(Path(base, entry["backward_map"])),
                     "track": track,
                     "license_class": license_class,
+                    # None: flattener values; a size: SyntheticDoc values of that render
                     "render_size": tuple(render_size) if convention == "syntheticdoc" else None,
                     "bytes": sizes if known_sizes else None,
                 }
@@ -651,6 +683,7 @@ class SyntheticDocCompactSource(ConvertedSource):
             raise _error("invalid_data", f"{path}: schema must be {COMPACT_SCHEMA}")
         if self.spec.track == "release" and settings.get("track") != "release":
             raise _error("track_violation", f"{path}: copy of track {settings.get('track')!r}")
+        self.settings = {key: settings.get(key) for key in COMPACT_SETTINGS_KEYS}
         return super()._index()
 
 

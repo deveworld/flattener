@@ -15,6 +15,7 @@ import pytest
 from PIL import Image
 
 from flattener import FlattenerError
+from flattener.dewarp import data
 from flattener.dewarp.data import (
     COMPACT_SCHEMA,
     SAMPLE_SCHEMA,
@@ -26,11 +27,6 @@ from flattener.dewarp.model import DewarpModelConfig
 from flattener.dewarp.train import TrainConfig, _check_resume, _data_sources, validation_signature
 
 TINY = DewarpModelConfig(input_size=(64, 48), grid_size=(5, 4), num_filter=4)
-F3 = (
-    "F3 (Codex review): _Source.describe digests sample ids, tracks, license classes, "
-    "hashes and sizes; backward_map_convention, original_render_size and compact.json "
-    "settings stay out of data_sources, so _check_resume accepts the changed data"
-)
 SIZE = (60, 44)
 
 
@@ -135,7 +131,6 @@ CASES = {
 }
 
 
-@pytest.mark.xfail(strict=True, reason=F3)
 @pytest.mark.parametrize("case", sorted(CASES))
 def test_resume_refuses_records_read_in_another_coordinate_convention(tmp_path, case):
     kind, change = CASES[case]
@@ -177,3 +172,35 @@ def test_the_convention_fields_change_the_targets(tmp_path, change):
     before = target()
     _edit_records(tmp_path / "data", change)
     assert (target() - before).abs().max() > 1e-3
+
+
+def _config(tmp_path, model=TINY):
+    return TrainConfig(
+        data_spec=str(tmp_path / "spec.json"),
+        output_dir=str(tmp_path / "run"),
+        track="release",
+        model=model,
+    )
+
+
+def test_code_conventions_and_the_grid_size_are_part_of_the_signature(tmp_path, monkeypatch):
+    _write_samples(tmp_path / "data")
+    spec = _spec(tmp_path, "converted")
+    before = _sources(spec, _config(tmp_path))
+    monkeypatch.setitem(data.TARGET_CONVENTIONS, "version", 2)
+    assert _sources(spec, _config(tmp_path)) != before
+    monkeypatch.undo()
+    assert _sources(spec, _config(tmp_path)) == before
+    finer = DewarpModelConfig(input_size=(64, 48), grid_size=(9, 7), num_filter=4)
+    assert _sources(spec, _config(tmp_path, finer))["val"][0]["grid_size"] == [9, 7]
+
+
+def test_the_compact_creation_time_leaves_the_signature(tmp_path):
+    _write_samples(tmp_path / "data", compact=True)
+    spec = _spec(tmp_path, "syntheticdoc_compact")
+    before = _sources(spec, _config(tmp_path))
+    settings = tmp_path / "data/compact.json"
+    stamped = {**json.loads(settings.read_text()), "created_at": "2026-09-26T00:00:00Z"}
+    settings.write_text(json.dumps(stamped))
+    after = _sources(spec, _config(tmp_path))
+    assert after == before and after["train"][0]["settings"]["scale"] == 0.5
