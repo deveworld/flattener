@@ -509,7 +509,8 @@ def test_evaluation_views_resize_whole_pixel_crops_like_predict(tmp_path):
     assert torch.equal(again["image"], item["image"])  # views ignore the run seed and augment
     assert not torch.equal(item["grid2d"][0], item["grid2d"][1])
     # The full-frame view is exactly predict's input: the whole image resized.
-    source_image = torch.from_numpy(np.array(Image.open(tmp_path / "conv/s1.jpg")))
+    with Image.open(tmp_path / "conv/s1.jpg") as opened:
+        source_image = torch.from_numpy(np.array(opened))
     reference = F.interpolate(
         source_image.permute(2, 0, 1)[None].double(),
         size=INPUT,

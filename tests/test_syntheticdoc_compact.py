@@ -110,7 +110,8 @@ def test_compact_copy_is_resized_hashed_and_readable_by_the_loader(tmp_path):
     assert [e["sample_id"][-7:] for e in entries] == ["0000001", "0000002", "0000009"]
     for entry in entries:
         image = output / entry["image"]
-        assert Image.open(image).size == (57, 81) and entry["image_size"] == [81, 57]
+        with Image.open(image) as opened:
+            assert opened.size == (57, 81) and entry["image_size"] == [81, 57]
         assert hashlib.sha256(image.read_bytes()).hexdigest() == entry["image_sha256"]
         original = source / "samples" / entry["shard"] / f"{entry['sample_id'][-7:]}.bm16.npy"
         assert (output / entry["backward_map"]).read_bytes() == original.read_bytes()
