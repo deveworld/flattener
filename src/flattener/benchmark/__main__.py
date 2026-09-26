@@ -1,8 +1,9 @@
-"""Command line: ``python -m flattener.benchmark {docunet,ocr,calibrate,build-siftflow}``.
+"""Command line: ``python -m flattener.benchmark
+{docunet,ocr,calibrate,docunet-stress,build-siftflow}``.
 
-``docunet``, ``ocr`` and ``calibrate`` take ``--workers`` (default 2). Scoring LD/AD
-needs your copy of the SIFT-flow C++ sources: pass ``--siftflow-source DIR`` or set
-``FLATTENER_SIFTFLOW_SOURCE``.
+``docunet``, ``ocr``, ``calibrate`` and ``docunet-stress`` take ``--workers`` (default 2).
+Scoring LD/AD needs your copy of the SIFT-flow C++ sources: pass ``--siftflow-source
+DIR`` or set ``FLATTENER_SIFTFLOW_SOURCE``.
 """
 
 from __future__ import annotations
@@ -12,7 +13,7 @@ import json
 import sys
 from pathlib import Path
 
-from . import calibration, docunet, metrics, ocr, siftflow
+from . import calibration, docunet, metrics, ocr, siftflow, stress
 from .reporting import write_json_atomic
 
 _EPILOG = """\
@@ -23,6 +24,8 @@ examples:
       --tesseract /usr/bin/tesseract --output reports/ocr.json
   python -m flattener.benchmark calibrate --reports-dir reports/calibration \\
       --paperedge-dir res_test --uvdoc-dir DocUnet_results --tesseract tesseract
+  python -m flattener.benchmark docunet-stress --weights best_model.pkl \\
+      --output-dir stress/uvdoc --force-render --device cuda
 """
 
 
@@ -202,6 +205,50 @@ def build_parser() -> argparse.ArgumentParser:
         "--rerun", action="store_true", help="recompute reports that already exist"
     )
 
+    strain = commands.add_parser(
+        "docunet-stress",
+        help="predict and score DocUNet stress variants with a dewarp model",
+        description="Build the stress variants (whole photos, crops turned by a quarter, "
+        "small pages on a canvas), rectify them with a flattener.dewarp checkpoint or the "
+        "UVDoc weights, score them against the upright scans and write OUT/stress.json. "
+        "Exit status 1 when a prediction failed its checks or a variant could not be scored.",
+    )
+    _add_common(strain, predictions=False)
+    _add_siftflow(strain)
+    strain.add_argument("--weights", required=True, help="dewarp checkpoint or best_model.pkl")
+    strain.add_argument("--output-dir", type=Path, required=True)
+    strain.add_argument(
+        "--variant",
+        action="append",
+        choices=tuple(stress.VARIANTS),
+        help="variant (repeatable); default all: " + ", ".join(stress.VARIANTS),
+    )
+    strain.add_argument("--device", default="cpu")
+    strain.add_argument(
+        "--force-render",
+        action="store_true",
+        help="write and score images whose map fails the geometry checks (the failures "
+        "are still counted)",
+    )
+    strain.add_argument("--overwrite", action="store_true", help="predict every image again")
+    strain.add_argument("--crop-dir", type=Path, default=stress.DEFAULT_CROP_DIR)
+    strain.add_argument(
+        "--photo-dir",
+        type=Path,
+        default=stress.DEFAULT_PHOTO_DIR,
+        help="directory of docunet-photo-{k}_{m}.jpg; default %(default)s",
+    )
+    strain.add_argument(
+        "--convention", action="append", choices=docunet.CONVENTIONS, help="default all three"
+    )
+    strain.add_argument("--ms-ssim-only", action="store_true", help="skip SIFT flow (no LD/AD)")
+    strain.add_argument("--seed", type=int, default=0, help="small-page canvas seed")
+    strain.add_argument(
+        "--no-verify-references",
+        action="store_true",
+        help="accept scans whose bytes differ from the published DocUNet scans",
+    )
+
     build = commands.add_parser(
         "build-siftflow",
         help="compile the SIFT-flow extension and print its build record",
@@ -252,6 +299,33 @@ def main(argv: list[str] | None = None) -> int:
         _write_report(args.output, report, args.overwrite)
         print(json.dumps(report["summary"], indent=2, sort_keys=True))
         return 0
+    if args.command == "docunet-stress":
+        build = None
+        if not args.ms_ssim_only:
+            build = siftflow.build_siftflow(args.siftflow_source, cache_dir=args.cache_dir)
+        summary = stress.run_stress(
+            args.weights,
+            args.output_dir,
+            variants=args.variant or tuple(stress.VARIANTS),
+            device=args.device,
+            force_render=args.force_render,
+            overwrite=args.overwrite,
+            crop_dir=args.crop_dir,
+            photo_dir=args.photo_dir,
+            conventions=args.convention or docunet.DEFAULT_CONVENTIONS,
+            build=build,
+            references_dir=args.references_dir,
+            reference_pattern=args.reference_pattern,
+            verify_references=not args.no_verify_references,
+            workers=args.workers,
+            seed=args.seed,
+            progress=None if args.quiet else docunet.print_progress,
+            log=lambda message: print(message, file=sys.stderr, flush=True),
+        )
+        print(stress.format_table(summary))
+        entries = summary["variants"].values()
+        failed = any(e["status"] != "scored" or e["predictions"]["failed"] for e in entries)
+        return 1 if failed else 0
     if args.command == "ocr":
         _check_output(args.output, args.overwrite)
         report = ocr.evaluate_ocr(

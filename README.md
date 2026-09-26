@@ -79,6 +79,16 @@ python -m flattener.benchmark calibrate --reports-dir reports/calibration \
 - OCR 보고서의 `comparable`은 Tesseract 5.0.1이고 스캔 해시가 맞을 때만 `true`입니다.
 - G1–G4 보정 결과는 `outputs/benchmarks/docunet/calibration.json`에 있습니다.
 
+실사진 스트레스 평가는 DocUNet 사진을 바꿔 가며 같은 평가기로 채점합니다.
+
+```bash
+python -m flattener.benchmark docunet-stress --weights CKPT --output-dir OUT --force-render --device cuda
+```
+
+- 변형은 `crop`(표준 크롭, 같은 실행 안의 기준), `full_frame`(배경까지 담긴 원본 사진 `docunet-photo-{k}_{m}.jpg`), `rot90`·`rot270`(크롭을 ±90° 돌림), `small_page`(무늬 캔버스 면적의 10–25%를 차지하는 크롭)입니다. 출력은 모두 똑바로 선 크롭의 크기로 렌더링합니다.
+- 스캔은 똑바로 둔 채 채점하므로 돌아간 페이지를 그대로 돌려주는 모델은 `rot90`·`rot270` 점수가 낮게 나옵니다.
+- 결과는 `OUT/stress.json`과 변형별 `OUT/<변형>/docunet.json`에 남습니다. 검사에 실패한 예측 수도 변형별로 셉니다.
+
 ## 결과의 근거 구분
 
 `predictions.json`, 학습 로그와 `best.json`, `flattener.benchmark` 보고서에는 `evidence` 항목이 들어갑니다. `evidence_kind` 하나로 결과의 종류를 구분합니다.

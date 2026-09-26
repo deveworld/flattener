@@ -21,6 +21,7 @@ when any image failed, with or without ``--force-render``.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -375,6 +376,7 @@ def rectify_batch(
                 reason=result.reason_code,
                 forced=bool(result.metadata.get("forced_render")),
                 size=list(image.shape[:2]),
+                input_sha256=hashlib.sha256(np.ascontiguousarray(image).tobytes()).hexdigest(),
                 output_size=result.metadata["dewarp"]["output_size"],
                 validation=_validation_summary(result),
                 seconds=result.metadata["dewarp"]["seconds"],
