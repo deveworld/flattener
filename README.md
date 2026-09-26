@@ -92,16 +92,16 @@ python -m flattener.benchmark docunet-stress --weights CKPT --output-dir OUT --f
 
 ## 결과의 근거 구분
 
-`predictions.json`, 학습 로그와 `best.json`, `flattener.benchmark` 보고서에는 `evidence` 항목이 들어갑니다. `evidence_kind` 하나로 결과의 종류를 구분합니다.
+`predictions.json`, 학습 로그·`status.json`·`best.json`, `flattener.benchmark` 보고서에는 `evidence` 항목이 들어갑니다. `evidence_kind` 하나로 결과의 종류를 구분합니다.
 
 - `new_model_real_photo`: 직접 학습한 체크포인트(1만 스텝 이상)로 DocUNet 실사진(표준 크롭 또는 스트레스 변형)을 보정하고 채점한 결과입니다. 새 모델의 실사진 성능 향상으로 세는 결과는 이것 하나입니다.
 - `gt_crop_validation`, `gt_full_frame_validation`: 학습 중 검증입니다. 정답이 있는 샘플을 정답 페이지 영역에 맞춰 자르거나 전체 화면으로 넣어 잽니다. 학습 상태를 확인하는 용도입니다.
 - `external_pretrained`: UVDoc 공개 가중치, 논문 저자가 공개한 결과처럼 밖에서 학습한 모델의 결과입니다. 위 예제의 UVDoc 가중치와 기준선이 여기에 들어가며, 비교 기준으로 씁니다.
 - `smoke_training`: 1만 스텝 미만으로 학습한 체크포인트의 결과입니다. 코드가 도는지 확인하는 용도입니다.
-- `docunet_standard`, `docunet_stress`: 예측 폴더에 `predictions.json`이 없어 모델 출처를 모르는 채점 결과입니다.
-- `evaluator_calibration`은 평가기 보정(G1–G4) 보고서, `predictions`는 점수 없이 예측만 담은 기록입니다.
+- `docunet_standard`, `docunet_stress`: 예측 폴더에 `predictions.json`이 없어 모델 출처를 모르거나, 예전 좌표 모델(`own_previous_model`)을 채점한 결과입니다.
+- `evaluator_calibration`은 평가기 보정(G1–G4) 보고서, `predictions`는 점수 없이 예측만 담은 기록, `training_loss`는 학습 로그와 `status.json`의 학습 손실입니다. `calibration.json`은 목록에 올린 보고서마다 `evidence`를 붙이고, 그전에 만든 보고서 파일은 해시가 기록돼 있어 그대로 둡니다.
 
-`measurement`(무엇을 쟀는지), `model_provenance`(`own_checkpoint`, `external_pretrained`), `checkpoint_step`도 함께 기록합니다.
+`measurement`(무엇을 쟀는지), `model_provenance`(`own_checkpoint`, `own_previous_model`, `external_pretrained`), `checkpoint_step`, `initialization`도 함께 기록합니다. `initialization`은 직접 학습한 체크포인트의 출발점(`scratch` 또는 UVDoc 가중치인 `external_pretrained`)입니다. UVDoc 가중치에서 시작한 미세조정도 `new_model_real_photo`로 세고, 향상 폭은 같은 변형의 UVDoc 기준선과 비교해 읽습니다.
 
 ## 데이터와 내부 평가
 

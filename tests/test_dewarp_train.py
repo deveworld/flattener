@@ -372,7 +372,9 @@ def test_train_and_val_must_not_share_samples(tmp_path):
     with pytest.raises(FlattenerError, match="both train and val") as error:
         train(_config(tmp_path))
     assert error.value.reason_code == "invalid_data"
-    assert json.loads((tmp_path / "run/status.json").read_text())["state"] == "failed"
+    status = json.loads((tmp_path / "run/status.json").read_text())
+    assert status["state"] == "failed"
+    assert status["evidence"]["measurement"] == "training_loss"  # labelled before any step
 
 
 def test_losses_are_masked_by_node_validity_and_3d_availability():
@@ -420,8 +422,13 @@ def test_two_step_cpu_training_smoke_and_exact_resume(tmp_path):
     first = train(_config(tmp_path, max_steps=2))
     assert first["state"] == "stopped" and first["step"] == 2
     run = tmp_path / "run"
-    assert json.loads((run / "status.json").read_text())["state"] == "stopped"
+    status = json.loads((run / "status.json").read_text())
+    assert status["state"] == "stopped" and status["evidence"] == first["evidence"]
     log = [json.loads(line) for line in (run / "train_log.jsonl").read_text().splitlines()]
+    trained = [r["evidence"] for r in log if r["kind"] == "train"]
+    assert {(e["measurement"], e["evidence_kind"]) for e in trained} == {
+        ("training_loss", "smoke_training")
+    }
     names = [view.name for view in DEFAULT_VIEWS]
     assert [r["kind"] for r in log] == ["train", "train"] + ["val"] * len(names)
     assert [(r["view"], r["selected"]) for r in log[2:]] == [(n, n == "page") for n in names]
@@ -438,6 +445,7 @@ def test_two_step_cpu_training_smoke_and_exact_resume(tmp_path):
     assert views["rot90"]["evidence"]["measurement"] == "gt_crop_validation"
     assert checkpoint["metrics"]["evidence"] == views["page"]["evidence"]
     assert first["evidence"]["evidence_kind"] == "smoke_training"
+    assert first["evidence"]["initialization"] == "scratch"
     assert checkpoint["best"]["signature"] == checkpoint["metrics"]["signature"]
     manifest = checkpoint["data_sources"]
     assert [s["license_classes"] for s in manifest["train"]] == [{"clean": 4}]

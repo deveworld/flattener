@@ -734,6 +734,11 @@ def train(config: TrainConfig, *, resume: str = "auto") -> dict[str, Any]:
     checkpoints = output / "checkpoints"
     checkpoints.mkdir(parents=True, exist_ok=True)
     step = 0
+    lineage: list[dict[str, Any]] | None = None
+
+    def own(measurement: str) -> dict[str, Any]:
+        """Evidence of this run's model at the current step."""
+        return evidence(measurement, {"kind": "checkpoint", "step": step, "lineage": lineage})
 
     def status(state: str, **extra: Any) -> None:
         record = {
@@ -742,6 +747,7 @@ def train(config: TrainConfig, *, resume: str = "auto") -> dict[str, Any]:
             "track": config.track,
             "pid": os.getpid(),
             "updated_utc": utc_now(),
+            "evidence": own("training_loss"),
         }
         try:  # best effort: the run continues while a monitor holds the file
             write_json(output / "status.json", {**record, **extra})
@@ -904,12 +910,9 @@ def train(config: TrainConfig, *, resume: str = "auto") -> dict[str, Any]:
                 return False
             metrics = {**validate(model, val_loader, config, device), "signature": signature}
             validated_step = step
-            own = {"kind": "checkpoint", "step": step}
             for view in config.val_views:
                 crop = "gt_full_frame_validation" if view.crop == "full_frame" else None
-                metrics["views"][view.name]["evidence"] = evidence(
-                    crop or "gt_crop_validation", own
-                )
+                metrics["views"][view.name]["evidence"] = own(crop or "gt_crop_validation")
             metrics["evidence"] = metrics["views"][metrics["view"]]["evidence"]
             memory = {k: v for k, v in metrics.items() if k in MEMORY_KEYS}
             for name, values in metrics["views"].items():
@@ -986,7 +989,7 @@ def train(config: TrainConfig, *, resume: str = "auto") -> dict[str, Any]:
                     "elapsed_sec": time.perf_counter() - started,
                     **{key: value / count for key, value in sums.items()},
                 }
-                record.update(memory_stats(device))
+                record.update(memory_stats(device), evidence=own("training_loss"))
                 log(record)
                 status("running", last=record)
                 window = {"images": 0, "data": 0.0, "start": time.perf_counter()}
@@ -1001,7 +1004,7 @@ def train(config: TrainConfig, *, resume: str = "auto") -> dict[str, Any]:
         final = latest_checkpoint(checkpoints)
         state = "completed" if step >= config.total_steps else "stopped"
         memory = memory_stats(device)
-        label = metrics.get("evidence")
+        label = metrics.get("evidence") or own("training_loss")
         status(state, reason=stop_reason, checkpoint=str(final), memory=memory, evidence=label)
         return {
             "state": state,

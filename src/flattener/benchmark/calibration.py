@@ -11,7 +11,10 @@ G4  DocTr OCR protocol on PaperEdge outputs with Tesseract 5.0.1: DocScanner tab
     come from Tesseract 5.0.1 with the plain DocTr configuration and verified scans.
 
 Each gate reads a report written by :func:`run_calibration`; existing reports are
-reused, so the summary can be rebuilt from copied reports without the inputs.
+reused, so the summary can be rebuilt from copied reports without the inputs. Reused
+reports keep their bytes because summaries record their sha256; the summary labels
+every report it lists with its evidence (``evaluator_calibration``), also reports
+written before reports carried an ``evidence`` field.
 """
 
 from __future__ import annotations
@@ -410,9 +413,9 @@ def run_calibration(
     if paperedge_dir is not None:
         adres_path = root / "paperedge-adres.json"
         if rerun or not adres_path.is_file():
-            write_json_atomic(
-                adres_path, parse_adres(Path(paperedge_dir) / ADRES_NAME), overwrite=True
-            )
+            adres = parse_adres(Path(paperedge_dir) / ADRES_NAME)
+            adres["evidence"] = CALIBRATION_EVIDENCE
+            write_json_atomic(adres_path, adres, overwrite=True)
     for name in runs:
         spec = RUNS[name]
         path = root / f"{name}.json"
@@ -466,21 +469,26 @@ def summarize_calibration(
     root = Path(reports_dir).resolve()
     destination = Path(summary_path).resolve()
     gates = evaluate_gates(root)
+
+    def listed(path: Path) -> dict[str, Any]:
+        report = _load(path)
+        own = report.get("evidence") if isinstance(report, dict) else None
+        return {
+            "path": os.path.relpath(path, destination.parent).replace(os.sep, "/"),
+            "sha256": sha256_file(path),
+            "evidence": own or CALIBRATION_EVIDENCE,
+            "evidence_in_file": own is not None,
+        }
+
     reports = {}
     for name in (*RUNS, "paperedge-adres"):
         path = root / f"{name}.json"
         if path.is_file():
-            reports[name] = {
-                "path": os.path.relpath(path, destination.parent).replace(os.sep, "/"),
-                "sha256": sha256_file(path),
-            }
+            reports[name] = listed(path)
     other_reports = {}
     for path in sorted(root.glob("*.json")):
         if path.stem not in reports and path.resolve() != destination:
-            other_reports[path.stem] = {
-                "path": os.path.relpath(path, destination.parent).replace(os.sep, "/"),
-                "sha256": sha256_file(path),
-            }
+            other_reports[path.stem] = listed(path)
     siftflow = None
     for name in ("paperedge-once", "paperedge-uvdoc", "uvdoc-uvdoc"):
         report = _load(root / f"{name}.json")

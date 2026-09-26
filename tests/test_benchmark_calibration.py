@@ -62,6 +62,10 @@ def test_parse_adres_reads_rows_and_mean_row(tmp_path):
     (tmp_path / "bad.txt").write_text("1 2 3\n4 5 6\n")
     with pytest.raises(ValueError):
         calibration.parse_adres(tmp_path / "bad.txt")
+    reports = tmp_path / "reports"
+    calibration.run_calibration(reports, paperedge_dir=tmp_path, runs=(), log=print)
+    written = json.loads((reports / "paperedge-adres.json").read_text())
+    assert written["evidence"] == calibration.CALIBRATION_EVIDENCE
 
 
 def test_g1_compares_means_with_both_solvers(tmp_path):
@@ -166,6 +170,10 @@ def test_run_and_summarize_reuse_reports_and_write_relative_paths(tmp_path):
     written = json.loads((tmp_path / "calibration.json").read_text())
     assert written["schema"] == calibration.SCHEMA
     assert written["reports"]["paperedge-once"]["path"] == "reports/paperedge-once.json"
+    adres_entry = written["reports"]["paperedge-adres"]  # written before reports had a label
+    assert adres_entry["evidence"] == calibration.CALIBRATION_EVIDENCE
+    assert adres_entry["evidence_in_file"] is False
+    assert written["evidence"] == calibration.CALIBRATION_EVIDENCE
     assert [gate["status"] for gate in summary["gates"]] == [
         "pass",
         "not_run",
