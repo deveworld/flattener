@@ -8,7 +8,7 @@ from PIL import Image
 
 from flattener.benchmark import __main__ as cli
 from flattener.benchmark import docunet, metrics
-from flattener.benchmark.reporting import write_json_atomic
+from flattener.benchmark.reporting import prediction_record, prediction_status, write_json_atomic
 
 
 def test_conventions_select_the_published_image_sets():
@@ -308,3 +308,19 @@ def test_cli_calibrate_builds_siftflow_only_for_docunet_runs(monkeypatch, tmp_pa
     write_json_atomic(tmp_path / "paperedge-once.json", {})
     assert cli.main([*common, "--run", "paperedge-once", "--no-ocr"]) == 0
     assert len(builds) == 1
+
+
+def test_older_prediction_records_count_unchecked_renders_as_failures(tmp_path):
+    items = [
+        {"output": "1_1.png", "status": "written", "fallback": False},
+        {"output": "1_2.png", "status": "kept", "fallback": True},
+    ]
+    record = {"schema": "flattener-dewarp-docunet-1", "model": {"kind": "uvdoc"}, "items": items}
+    (tmp_path / "predictions.json").write_text(json.dumps(record))
+    found = prediction_record(tmp_path)
+    assert found["failed"] == 1 and found["model"]["kind"] == "uvdoc"
+    assert prediction_status(found, "1_2.png") == "invalid_transform"
+    assert prediction_status(found, "1_1.png") == "success"
+    (tmp_path / "predictions.json").write_text(json.dumps({"schema": "other", "items": items}))
+    assert prediction_status(prediction_record(tmp_path), "1_2.png") is None
+    assert prediction_record(tmp_path / "missing") is None
