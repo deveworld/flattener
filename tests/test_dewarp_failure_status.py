@@ -14,18 +14,14 @@ import pytest
 import torch
 from PIL import Image
 
-from flattener import FlattenerError
+from flattener import FlattenerError, RenderConfig
 from flattener.contracts import Status
 from flattener.dewarp.checkpoint import CHECKPOINT_SCHEMA, save_checkpoint
 from flattener.dewarp.coords import edge_positions
-from flattener.dewarp.model import DewarpModelConfig, UVDocNet
+from flattener.dewarp.model import DewarpModelConfig, UVDocNet, sha256_file
 from flattener.dewarp.predict import Dewarper, main, rectify
 
 TINY = DewarpModelConfig(input_size=(64, 48), grid_size=(5, 4), num_filter=4)
-F1 = (
-    "F1 (Codex review): predict.rectify(allow_unchecked=True) returns Status.SUCCESS for a "
-    "map that fails the fold check, and predict.main renders unchecked and exits 0"
-)
 
 
 class _FoldGrid(torch.nn.Module):
@@ -80,7 +76,6 @@ def _records_invalid_transform(item):
     return Status.INVALID_TRANSFORM.value in {str(value) for value in item.values()}
 
 
-@pytest.mark.xfail(strict=True, reason=F1)
 def test_forced_rectify_keeps_the_invalid_transform_status():
     image = np.random.default_rng(0).integers(0, 256, (40, 30, 3), dtype=np.uint8)
     dewarper = Dewarper(_FoldGrid(), TINY, torch.device("cpu"))
@@ -93,7 +88,6 @@ def test_forced_rectify_keeps_the_invalid_transform_status():
     assert forced.reason_code == "fold_or_degenerate"
 
 
-@pytest.mark.xfail(strict=True, reason=F1)
 def test_image_cli_fails_on_a_degenerate_map_by_default(tmp_path, capsys):
     weights = _degenerate_checkpoint(tmp_path / "model.pt")
     source, output = _photo(tmp_path / "in.png"), tmp_path / "out.png"
@@ -106,7 +100,6 @@ def test_image_cli_fails_on_a_degenerate_map_by_default(tmp_path, capsys):
     assert Status.INVALID_TRANSFORM.value in shown
 
 
-@pytest.mark.xfail(strict=True, reason=F1)
 def test_image_cli_force_render_writes_the_image_and_still_fails(tmp_path, capsys):
     weights = _degenerate_checkpoint(tmp_path / "model.pt")
     source, output = _photo(tmp_path / "in.png"), tmp_path / "out.png"
@@ -127,7 +120,6 @@ def _docunet_args(tmp_path):
     return [*argv, "--output-dir", str(output)], output
 
 
-@pytest.mark.xfail(strict=True, reason=F1)
 def test_docunet_cli_records_failures_and_exits_non_zero(tmp_path, capsys):
     argv, output = _docunet_args(tmp_path)
     code, _ = _exit_code(argv)
@@ -138,7 +130,6 @@ def test_docunet_cli_records_failures_and_exits_non_zero(tmp_path, capsys):
     assert json.loads(capsys.readouterr().out)["failed"] == 1
 
 
-@pytest.mark.xfail(strict=True, reason=F1)
 def test_docunet_cli_force_render_keeps_the_failure_on_every_run(tmp_path, capsys):
     argv, output = _docunet_args(tmp_path)
     assert main([*argv, "--force-render"]) != 0
@@ -152,3 +143,26 @@ def test_docunet_cli_force_render_keeps_the_failure_on_every_run(tmp_path, capsy
     [kept] = json.loads((output / "predictions.json").read_text())["items"]
     assert _records_invalid_transform(kept)
     assert json.loads(capsys.readouterr().out)["failed"] == 1
+
+
+def test_checked_rectify_follows_the_failure_policy():
+    image = np.random.default_rng(0).integers(0, 256, (40, 30, 3), dtype=np.uint8)
+    dewarper = Dewarper(_FoldGrid(), TINY, torch.device("cpu"))
+    returned = rectify(dewarper, image, render_config=RenderConfig(on_error="return"))
+    assert returned.status == Status.INVALID_TRANSFORM and returned.image is None
+    assert returned.metadata["validation"]["failed_cells"] > 0
+    original = rectify(dewarper, image, render_config=RenderConfig(on_error="original"))
+    assert original.status == Status.INVALID_TRANSFORM and original.used_fallback
+    np.testing.assert_array_equal(original.image, image)
+    assert "forced_render" not in original.metadata
+
+
+def test_docunet_cli_refuses_predictions_of_the_older_format(tmp_path):
+    argv, output = _docunet_args(tmp_path)
+    output.mkdir()
+    old = {"schema": "flattener-dewarp-docunet-1", "items": []}
+    old["model"] = {"sha256": sha256_file(tmp_path / "model.pt")}
+    (output / "predictions.json").write_text(json.dumps(old))
+    with pytest.raises(FlattenerError, match="older format"):
+        main(argv)
+    assert main([*argv, "--overwrite", "--force-render"]) != 0

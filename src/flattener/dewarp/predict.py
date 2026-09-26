@@ -9,6 +9,13 @@ converted to a dense flattener backward map at the requested output size
 (default: the input size) and rendered by ``flattener.render``. Upstream UVDoc
 weights (``grid_convention="uvdoc"``) use the exact upstream densification.
 The model runs in full float32 precision (TF32 off) so CUDA and CPU predictions agree.
+
+Rendering runs the renderer's checks (source bounds, coverage, fold/Jacobian). An
+image that fails them keeps its status (``invalid_transform`` and a reason code) in
+the printed JSON and in ``predictions.json``, and no image is written for it.
+``--force-render`` writes the image anyway (published methods are scored that way)
+and still records the failure. The exit status is 0 when every image passed and 1
+when any image failed, with or without ``--force-render``.
 """
 
 from __future__ import annotations
@@ -18,9 +25,9 @@ import json
 import re
 import sys
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +52,8 @@ from .model import (
 )
 
 DOCUNET_INPUT = re.compile(r"^(\d+)_(\d+) copy\.png$")
+PREDICTIONS_SCHEMA = "flattener-dewarp-predictions-2"
+EXIT_FAILED = 1  # some image failed its checks (also when it was force-rendered)
 
 
 @dataclass(slots=True)
@@ -198,30 +207,35 @@ def rectify(
     render_config: RenderConfig | None = None,
     allow_unchecked: bool = False,
 ) -> RenderResult:
-    """Predict and render. Out-of-source output pixels get ``fill_rgb``.
+    """Predict and render through ``flattener.render`` and its checks.
 
-    A fold/degenerate map raises (per ``render_config.on_error``) unless
-    ``allow_unchecked``, which samples anyway and sets ``used_fallback``.
+    A failed check follows ``render_config.on_error`` (default ``RenderConfig()``:
+    raise). With ``allow_unchecked``, a map that fails a geometry check
+    (``invalid_transform``) is sampled anyway: the result keeps the failed status and
+    reason code, carries the image and sets ``used_fallback`` and
+    ``metadata["forced_render"]``. Out-of-source output pixels get ``fill_rgb``.
     """
     started = time.perf_counter()
+    config = RenderConfig() if render_config is None else render_config
+    if not isinstance(config, RenderConfig):
+        raise FlattenerError(
+            Status.INPUT_ERROR, "invalid_config", "render_config must be RenderConfig"
+        )
     size = tuple(image.shape[:2]) if output_size is None else tuple(output_size)
     grid = predict_grid(dewarper, image)
     backward_map = dense_backward_map(grid, dewarper.config.grid_convention, size, image.shape[:2])
-    config = (
-        RenderConfig(max_out_of_bounds_fraction=1.0) if render_config is None else render_config
-    )
-    try:
-        result = render(image, backward_map, config=config)
-    except FlattenerError as error:
-        if not allow_unchecked or error.status != Status.INVALID_TRANSFORM:
-            raise
-        output = render_unchecked(image, backward_map, config.fill_rgb)
-        result = RenderResult(
-            Status.SUCCESS,
-            image=output,
-            used_fallback=True,
-            metadata={"render_fallback": error.reason_code},
-        )
+    result = render(image, backward_map, config=replace(config, on_error="return"))
+    if result.status != Status.SUCCESS:
+        if allow_unchecked and result.status == Status.INVALID_TRANSFORM:
+            result.image = render_unchecked(image, backward_map, config.fill_rgb)
+            result.used_fallback = True
+            result.metadata["forced_render"] = True
+        elif config.on_error == "raise":
+            raise FlattenerError(
+                result.status, result.reason_code, result.message, metadata=result.metadata
+            )
+        elif config.on_error == "original":
+            result.image, result.used_fallback = image.copy(), True
     result.metadata["dewarp"] = {
         "model_sha256": dewarper.info.get("sha256"),
         "grid_convention": dewarper.config.grid_convention,
@@ -237,27 +251,55 @@ def load_rgb(path: str | Path) -> NDArray[np.uint8]:
         return np.array(image.convert("RGB"))
 
 
-def rectify_docunet(
-    dewarper: Dewarper, input_dir: str | Path, output_dir: str | Path, *, overwrite: bool = False
-) -> dict[str, Any]:
-    """Rectify every ``{k}_{m} copy.png`` into ``{k}_{m}.png`` at the crop's own size.
+@dataclass(frozen=True, slots=True)
+class BatchInput:
+    """One image of a batch: output file name, input label and a loader."""
 
-    Without ``overwrite``, outputs that ``predictions.json`` lists for the same
-    weights are kept (with their recorded details) and other outputs are
-    re-rendered; a directory holding predictions of other weights, or outputs
-    without a ``predictions.json``, is refused. The report names the current
-    weights before any image is written, and images are written atomically.
+    output: str
+    source: str
+    load: Callable[[], NDArray[np.uint8]]
+    output_size: tuple[int, int] | None = None  # None: the input size
+
+
+def _validation_summary(result: RenderResult) -> dict[str, Any] | None:
+    stats = result.metadata.get("validation")
+    if not isinstance(stats, dict):
+        return None
+    keys = ("out_of_bounds_fraction", "failed_cells", "checked_cells", "min_jacobian_ratio")
+    return {key: stats.get(key) for key in keys}
+
+
+def _count(items: list[dict[str, Any]]) -> dict[str, int]:
+    return {
+        "items": len(items),
+        "written": sum(item["action"] == "written" for item in items),
+        "kept": sum(item["action"] == "kept" for item in items),
+        "failed": sum(item["status"] != Status.SUCCESS for item in items),
+        "forced": sum(bool(item.get("forced")) for item in items),
+    }
+
+
+def rectify_batch(
+    dewarper: Dewarper,
+    inputs: list[BatchInput],
+    output_dir: str | Path,
+    *,
+    overwrite: bool = False,
+    force_render: bool = False,
+    render_config: RenderConfig | None = None,
+    fields: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Rectify ``inputs`` into ``output_dir`` and record every item in ``predictions.json``.
+
+    Each item records the check status and reason code. An image that fails a check is
+    written only with ``force_render`` (``forced: true``). Without ``overwrite``, outputs
+    that ``predictions.json`` lists as written for the same weights are kept with their
+    recorded status, and the rest are rendered again; a directory holding predictions
+    of other weights or of an older format, or outputs without a ``predictions.json``,
+    is refused. The report names the current weights before any image is written, and
+    images are written atomically.
     """
-    input_dir, output_dir = Path(input_dir), Path(output_dir)
-    names = []
-    for path in input_dir.iterdir():
-        match = DOCUNET_INPUT.match(path.name)
-        if match:
-            names.append((int(match[1]), int(match[2]), path))
-    if not names:
-        raise FlattenerError(
-            Status.INPUT_ERROR, "no_inputs", f"no '{{k}}_{{m}} copy.png' in {input_dir}"
-        )
+    output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     report_path = output_dir / "predictions.json"
     previous_items: dict[str, dict[str, Any]] = {}
@@ -267,42 +309,118 @@ def rectify_docunet(
             raise FlattenerError(
                 Status.IO_ERROR, "output_exists", f"{output_dir} holds predictions of other weights"
             )
+        if previous.get("schema") != PREDICTIONS_SCHEMA:
+            raise FlattenerError(
+                Status.IO_ERROR,
+                "output_exists",
+                f"{report_path} has an older format; use --overwrite",
+            )
         previous_items = {item["output"]: item for item in previous.get("items", [])}
-    elif not overwrite and any((output_dir / f"{k}_{m}.png").is_file() for k, m, _ in names):
+    elif not overwrite and any((output_dir / item.output).is_file() for item in inputs):
         raise FlattenerError(
             Status.IO_ERROR,
             "output_exists",
             f"{output_dir} holds outputs without predictions.json; use --overwrite",
         )
+    config = RenderConfig() if render_config is None else render_config
+    config = replace(config, on_error="return")
     report = {
-        "schema": "flattener-dewarp-docunet-1",
+        "schema": PREDICTIONS_SCHEMA,
         "created_utc": utc_now(),
         "model": dewarper.info,
-        "input_dir": str(input_dir),
+        **(fields or {}),
+        "force_render": force_render,
+        "render_config": asdict(config),
+        "counts": _count([]),
         "items": [],
     }
     write_json(report_path, report)
-    for k, m, path in sorted(names):
-        target = output_dir / f"{k}_{m}.png"
-        item = {"input": path.name, "output": target.name}
-        if target.is_file() and target.name in previous_items:
-            item = {**previous_items[target.name], **item, "status": "kept"}
-        else:
-            image = load_rgb(path)
-            result = rectify(dewarper, image, allow_unchecked=True)
-            atomic_write(
-                target,
-                lambda stream, pixels=result.image: Image.fromarray(pixels).save(stream, "PNG"),
+    for task in inputs:
+        target = output_dir / task.output
+        previous = previous_items.get(task.output)
+        if previous is not None and previous.get("action") in ("written", "kept"):
+            if target.is_file():
+                report["items"].append({**previous, "action": "kept"})
+                report["counts"] = _count(report["items"])
+                write_json(report_path, report)
+                continue
+        item: dict[str, Any] = {"input": task.source, "output": task.output}
+        try:
+            image = task.load()
+            result = rectify(
+                dewarper,
+                image,
+                task.output_size,
+                render_config=config,
+                allow_unchecked=force_render,
             )
+        except (FlattenerError, OSError) as error:
+            status = error.status if isinstance(error, FlattenerError) else Status.IO_ERROR
+            reason = error.reason_code if isinstance(error, FlattenerError) else "unreadable_input"
+            item.update(action="not_written", status=str(status), reason=reason, forced=False)
+            item["message"] = str(error)
+        else:
+            if result.image is not None:
+                atomic_write(
+                    target,
+                    lambda stream, pixels=result.image: Image.fromarray(pixels).save(stream, "PNG"),
+                )
+            elif target.is_file():
+                target.unlink()  # an older image of this input no longer matches the record
             item.update(
-                status="written",
+                action="written" if result.image is not None else "not_written",
+                status=str(result.status),
+                reason=result.reason_code,
+                forced=bool(result.metadata.get("forced_render")),
                 size=list(image.shape[:2]),
-                fallback=result.used_fallback,
+                output_size=result.metadata["dewarp"]["output_size"],
+                validation=_validation_summary(result),
                 seconds=result.metadata["dewarp"]["seconds"],
             )
         report["items"].append(item)
+        report["counts"] = _count(report["items"])
         write_json(report_path, report)
     return report
+
+
+def docunet_inputs(input_dir: str | Path) -> list[BatchInput]:
+    """``{k}_{m} copy.png`` crops of ``input_dir`` as batch inputs for ``{k}_{m}.png``."""
+    input_dir = Path(input_dir)
+    names = []
+    for path in input_dir.iterdir():
+        match = DOCUNET_INPUT.match(path.name)
+        if match:
+            names.append((int(match[1]), int(match[2]), path))
+    if not names:
+        raise FlattenerError(
+            Status.INPUT_ERROR, "no_inputs", f"no '{{k}}_{{m}} copy.png' in {input_dir}"
+        )
+    return [
+        BatchInput(f"{k}_{m}.png", path.name, lambda path=path: load_rgb(path))
+        for k, m, path in sorted(names)
+    ]
+
+
+def rectify_docunet(
+    dewarper: Dewarper,
+    input_dir: str | Path,
+    output_dir: str | Path,
+    *,
+    overwrite: bool = False,
+    force_render: bool = False,
+) -> dict[str, Any]:
+    """Rectify every ``{k}_{m} copy.png`` into ``{k}_{m}.png`` at the crop's own size.
+
+    See ``rectify_batch`` for what is kept, refused and recorded.
+    """
+    return rectify_batch(
+        dewarper,
+        docunet_inputs(input_dir),
+        output_dir,
+        overwrite=overwrite,
+        force_render=force_render,
+        fields={"input_dir": str(Path(input_dir))},
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -312,28 +430,50 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--device", default="cpu")
     commands = parser.add_subparsers(dest="command", required=True)
+    force_help = (
+        "write the image even when the map fails the geometry checks; the failure is "
+        "still recorded and the exit status is 1"
+    )
     single = commands.add_parser("image")
     single.add_argument("--input", required=True)
     single.add_argument("--output", required=True)
     single.add_argument("--output-size", type=int, nargs=2, metavar=("HEIGHT", "WIDTH"))
+    single.add_argument("--force-render", action="store_true", help=force_help)
     batch = commands.add_parser("docunet")
     batch.add_argument("--input-dir", required=True)
     batch.add_argument("--output-dir", required=True)
     batch.add_argument("--overwrite", action="store_true")
+    batch.add_argument("--force-render", action="store_true", help=force_help)
     args = parser.parse_args(argv)
     dewarper = load_dewarper(args.weights, device=args.device)
     if args.command == "image":
         size = None if args.output_size is None else tuple(args.output_size)
-        result = rectify(dewarper, load_rgb(args.input), size, allow_unchecked=True)
-        Image.fromarray(result.image).save(args.output)
-        print(json.dumps({"output": args.output, "fallback": result.used_fallback}))
-    else:
-        report = rectify_docunet(
-            dewarper, args.input_dir, args.output_dir, overwrite=args.overwrite
+        result = rectify(
+            dewarper,
+            load_rgb(args.input),
+            size,
+            render_config=RenderConfig(on_error="return"),
+            allow_unchecked=args.force_render,
         )
-        written = sum(item["status"] == "written" for item in report["items"])
-        print(json.dumps({"items": len(report["items"]), "written": written}))
-    return 0
+        if result.image is not None:
+            Image.fromarray(result.image).save(args.output)
+        summary = {
+            "output": None if result.image is None else args.output,
+            "status": str(result.status),
+            "reason": result.reason_code,
+            "forced": bool(result.metadata.get("forced_render")),
+        }
+        print(json.dumps(summary))
+        return 0 if result.status == Status.SUCCESS else EXIT_FAILED
+    report = rectify_docunet(
+        dewarper,
+        args.input_dir,
+        args.output_dir,
+        overwrite=args.overwrite,
+        force_render=args.force_render,
+    )
+    print(json.dumps(report["counts"]))
+    return 0 if report["counts"]["failed"] == 0 else EXIT_FAILED
 
 
 if __name__ == "__main__":

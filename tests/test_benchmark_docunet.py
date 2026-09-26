@@ -149,6 +149,45 @@ def test_evaluate_docunet_checks_inputs(tiny_docunet):
         )  # fmt: skip
 
 
+def _record(predictions, failed):
+    items = [
+        {"output": f"{k}_{m}.png", "action": "written", "status": "success"}
+        for k in range(1, 66)
+        for m in (1, 2)
+    ]
+    for item in items:
+        if item["output"] in failed:
+            item.update(failed[item["output"]], reason="fold_or_degenerate")
+    record = {"schema": "flattener-dewarp-predictions-2", "model": {"sha256": "a"}, "items": items}
+    (predictions / "predictions.json").write_text(json.dumps(record))
+
+
+def test_reports_count_the_recorded_prediction_failures(tiny_docunet):
+    scans, predictions = tiny_docunet
+    arguments = dict(
+        pattern="{k}_{m}.png", build=None, references_dir=scans, verify_references=False, workers=1
+    )
+    report = docunet.evaluate_docunet(predictions, conventions=["128_excl64"], **arguments)
+    assert report["predictions_record"] is None
+    assert report["summary"]["128_excl64"]["prediction_failures"] is None
+    forced = {"status": "invalid_transform", "forced": True}
+    (predictions / "5_2.png").unlink()
+    _record(predictions, {"3_1.png": forced, "5_2.png": {**forced, "action": "not_written"}})
+    with pytest.raises(FileNotFoundError, match="records 1 of them as failed checks"):
+        docunet.evaluate_docunet(predictions, conventions=["128_excl64"], **arguments)
+    Image.fromarray(np.zeros((20, 16, 3), np.uint8)).save(predictions / "5_2.png")
+    _record(predictions, {"3_1.png": forced, "5_2.png": forced, "64_1.png": forced})
+    report = docunet.evaluate_docunet(
+        predictions, conventions=["130_raw", "128_excl64"], **arguments
+    )
+    assert report["predictions_record"]["failed"] == 3
+    assert report["summary"]["130_raw"]["prediction_failures"] == 3
+    assert report["summary"]["128_excl64"]["prediction_failures"] == 2
+    assert report["summary"]["128_excl64"]["views"]["2"]["prediction_failures"] == 1
+    statuses = {row["id"]: row["prediction_status"] for row in report["rows"]}
+    assert statuses["3_1"] == "invalid_transform" and statuses["3_2"] == "success"
+
+
 def test_worker_initializer_limits_torch_to_one_thread():
     import torch
 

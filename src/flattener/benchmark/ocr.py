@@ -48,7 +48,7 @@ from .docunet import (
     format_name,
     hash_references,
 )
-from .reporting import environment, mean, sha256_file, utc_now
+from .reporting import environment, mean, prediction_record, sha256_file, utc_now
 
 REPORT_SCHEMA = "flattener-benchmark-ocr-1.0"
 DEFAULT_WORKERS = 2
@@ -509,6 +509,7 @@ def evaluate_ocr(
             "references": {str(k): digest for k, digest in reference_hashes.items()},
             "references_dir": str(references_root),
         },
+        "predictions_record": prediction_record(predictions_root),
         "protocol": {name: PROTOCOL_DESCRIPTION[name] for name in protocols}
         | {"alpha_composite": PROTOCOL_DESCRIPTION["alpha_composite"]},
         "rows": rows,

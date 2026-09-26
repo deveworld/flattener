@@ -22,7 +22,15 @@ from typing import Any
 import numpy as np
 
 from . import metrics
-from .reporting import environment, mean, sha256_bytes, sha256_file, utc_now
+from .reporting import (
+    environment,
+    mean,
+    prediction_record,
+    prediction_status,
+    sha256_bytes,
+    sha256_file,
+    utc_now,
+)
 from .siftflow import SiftFlow, SiftFlowBuild
 
 REPORT_SCHEMA = "flattener-benchmark-docunet-1.0"
@@ -346,10 +354,18 @@ def summarize(rows: Sequence[dict[str, Any]], conventions: Sequence[str]) -> dic
 
 
 def _means(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """Means, plus ``prediction_failures``: scored images whose prediction failed its
+    checks (force-rendered), or ``None`` when the predictions carry no record."""
     result: dict[str, Any] = {"n": len(rows)}
     for name in ("ms_ssim", "ld", "ad", "ad_exact_lstsq", "ad_lsqr_4iter"):
         values = [row[name] for row in rows]
         result[name] = None if any(value is None for value in values) else mean(values)
+    statuses = [row.get("prediction_status") for row in rows]
+    result["prediction_failures"] = (
+        None
+        if any(status is None for status in statuses)
+        else sum(s != "success" for s in statuses)
+    )
     return result
 
 
@@ -409,15 +425,28 @@ def evaluate_docunet(
     reference_hashes = hash_references(
         references_root, reference_pattern, documents, verify=verify_references
     )
-    missing = []
+    record = prediction_record(predictions_root)
+    missing, names = [], {}
     grouped: dict[int, list[ViewTask]] = {}
     for k, m, rotated in views:
-        path = predictions_root / format_name(pattern, fields=("k", "m"), k=k, m=m)
+        names[f"{k}_{m}"] = format_name(pattern, fields=("k", "m"), k=k, m=m)
+        path = predictions_root / names[f"{k}_{m}"]
         if not path.is_file():
-            missing.append(str(path))
+            missing.append(names[f"{k}_{m}"])
         grouped.setdefault(k, []).append(ViewTask(m, rotated, str(path)))
     if missing:
-        raise FileNotFoundError(f"{len(missing)} predictions missing, first: {missing[:5]}")
+        failed = [
+            name for name in missing if prediction_status(record, name) not in (None, "success")
+        ]
+        note = (
+            f"; predictions.json records {len(failed)} of them as failed checks "
+            "(predict with --force-render to score the forced images)"
+            if failed
+            else ""
+        )
+        raise FileNotFoundError(
+            f"{len(missing)} predictions missing in {predictions_root}, first: {missing[:5]}{note}"
+        )
     tasks = [
         DocumentTask(
             document=k,
@@ -437,6 +466,7 @@ def evaluate_docunet(
     for row in rows:
         if row["reference_sha256"] != reference_hashes[row["k"]]:
             raise RuntimeError(f"scan {row['k']} changed during evaluation")
+        row["prediction_status"] = prediction_status(record, names[row["id"]])
     return {
         "benchmark": "docunet",
         "comparable": build is not None and verify_references,
@@ -457,6 +487,7 @@ def evaluate_docunet(
             "references": {str(k): digest for k, digest in reference_hashes.items()},
             "references_dir": str(references_root),
         },
+        "predictions_record": record,
         "protocol": PROTOCOL,
         "rows": rows,
         "schema": REPORT_SCHEMA,

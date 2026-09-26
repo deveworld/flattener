@@ -11,6 +11,7 @@ import torch.nn.functional as F
 from PIL import Image
 
 from flattener import FlattenerError
+from flattener.dewarp import predict
 from flattener.dewarp.checkpoint import CHECKPOINT_SCHEMA, save_checkpoint
 from flattener.dewarp.coords import edge_positions
 from flattener.dewarp.model import DewarpModelConfig, UVDocNet
@@ -154,7 +155,16 @@ def test_checkpoint_loads_with_verification(tmp_path):
         load_dewarper(path)
 
 
-def test_docunet_batch_writes_crop_sized_outputs(tmp_path, capsys):
+def _identity_grid(dewarper, image):
+    height, width = dewarper.config.grid_size
+    return np.stack(np.meshgrid(edge_positions(width), edge_positions(height)), -1).astype(
+        np.float32
+    )
+
+
+def test_docunet_batch_writes_crop_sized_outputs(tmp_path, capsys, monkeypatch):
+    # A random tiny model folds its map; an identity grid passes the render checks.
+    monkeypatch.setattr(predict, "predict_grid", _identity_grid)
     crops, output = tmp_path / "crop", tmp_path / "out"
     crops.mkdir()
     rng = np.random.default_rng(2)
@@ -176,7 +186,8 @@ def test_docunet_batch_writes_crop_sized_outputs(tmp_path, capsys):
         str(output),
     ]
     assert main(arguments) == 0
-    assert json.loads(capsys.readouterr().out) == {"items": 2, "written": 2}
+    counts = json.loads(capsys.readouterr().out)
+    assert counts == {"items": 2, "written": 2, "kept": 0, "failed": 0, "forced": 0}
     for name, size in sizes.items():
         with Image.open(output / f"{name}.png") as written:
             assert written.size == size[::-1]
@@ -185,9 +196,9 @@ def test_docunet_batch_writes_crop_sized_outputs(tmp_path, capsys):
     assert report["model"]["track"] == "release"
     assert main(arguments) == 0 and json.loads(capsys.readouterr().out)["written"] == 0
     kept = json.loads((output / "predictions.json").read_text())["items"]
-    assert [(item["status"], item["size"]) for item in kept] == [
-        ("kept", [45, 33]),
-        ("kept", [30, 52]),
+    assert [(item["action"], item["status"], item["size"]) for item in kept] == [
+        ("kept", "success", [45, 33]),
+        ("kept", "success", [30, 52]),
     ]
     other = tmp_path / "other.pt"
     _checkpoint(other, seed=1)

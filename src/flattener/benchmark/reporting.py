@@ -13,6 +13,10 @@ from typing import Any
 
 from .._version import __version__
 
+PREDICTIONS_FILE = "predictions.json"
+PREDICTIONS_SCHEMA = "flattener-dewarp-predictions-2"
+LEGACY_PREDICTIONS_SCHEMA = "flattener-dewarp-docunet-1"
+
 
 def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
@@ -86,3 +90,65 @@ def mean(values: list[float]) -> float:
     if not values:
         raise ValueError("cannot average an empty list")
     return float(sum(values) / len(values))
+
+
+def prediction_record(predictions_dir: str | os.PathLike[str]) -> dict[str, Any] | None:
+    """What ``flattener.dewarp.predict`` recorded about a predictions directory.
+
+    Reads ``predictions.json`` and returns its hash, the model, the force-render flag,
+    the counts and ``failures``: output file name -> status, reason and whether a forced
+    image was written. Items of the older ``flattener-dewarp-docunet-1`` format that
+    were rendered unchecked (``fallback``) count as ``invalid_transform``; that format
+    ran no coverage check. Returns ``None`` when the directory has no record, and
+    ``failures`` is ``None`` for a record of another format.
+    """
+    path = Path(predictions_dir) / PREDICTIONS_FILE
+    if not path.is_file():
+        return None
+    data = path.read_bytes()
+    payload = json.loads(data)
+    payload = payload if isinstance(payload, dict) else {}
+    items = [item for item in payload.get("items", []) if isinstance(item, dict)]
+    schema = payload.get("schema")
+    failures: dict[str, Any] | None = None
+    if schema == PREDICTIONS_SCHEMA:
+        failures = {
+            str(item.get("output")): {
+                "status": item.get("status"),
+                "reason": item.get("reason"),
+                "forced": bool(item.get("forced")),
+                "written": item.get("action") in ("written", "kept"),
+            }
+            for item in items
+            if item.get("status") != "success"
+        }
+    elif schema == LEGACY_PREDICTIONS_SCHEMA:
+        failures = {
+            str(item.get("output")): {
+                "status": "invalid_transform",
+                "reason": "recorded_as_fallback",
+                "forced": True,
+                "written": True,
+            }
+            for item in items
+            if item.get("fallback")
+        }
+    model = payload.get("model") if isinstance(payload.get("model"), dict) else {}
+    return {
+        "path": str(path),
+        "sha256": sha256_bytes(data),
+        "schema": schema,
+        "model": {key: model.get(key) for key in ("kind", "path", "sha256", "step", "track")},
+        "force_render": payload.get("force_render"),
+        "items": len(items),
+        "failed": None if failures is None else len(failures),
+        "failures": failures,
+    }
+
+
+def prediction_status(record: dict[str, Any] | None, name: str) -> str | None:
+    """Recorded check status of one output file; ``None`` when nothing was recorded."""
+    if record is None or record["failures"] is None:
+        return None
+    failure = record["failures"].get(name)
+    return "success" if failure is None else failure["status"]
