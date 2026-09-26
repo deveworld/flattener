@@ -217,3 +217,27 @@ def test_state_roundtrip(tmp_path):
     state.put("k", {"a": 1})
     assert state.get("k") == {"a": 1} and state.get("missing", 3) == 3
     state.close()
+
+
+class _RangeHttp:
+    """Serves single Range requests (WebDAV style) from an in-memory file."""
+
+    def __init__(self, blob: bytes):
+        self.blob = blob
+
+    def request(self, method, target, headers=None, body=None, **_):
+        a, b = map(int, headers["Range"].split("=", 1)[1].split("-"))
+        cr = f"bytes {a}-{b}/{len(self.blob)}"
+        return sdcommon.Response(206, {"content-range": cr}, self.blob[a : b + 1])
+
+
+def test_truncated_shard_is_terminal_and_intact_shard_parses():
+    blob = _zip64(_shard(40))
+    remote = sdcommon.RemoteFile("tok", "train/train_106.zip")
+    entries, cd_offset, _ = sdcommon.read_central_directory(
+        _RangeHttp(blob), remote, len(blob), None, tail_bytes=70_000
+    )
+    assert len(entries) == 40 * len(FILES) + 1 and cd_offset < len(blob)
+    cut = blob[: (len(blob) // 2 // 4096) * 4096]  # like the upstream partial uploads
+    with pytest.raises(sdcommon.TruncatedArchive):
+        sdcommon.read_central_directory(_RangeHttp(cut), remote, len(cut), None, tail_bytes=70_000)

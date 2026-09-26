@@ -135,6 +135,11 @@ class ConsistencyError(RuntimeError):
     """The remote file changed (ETag/size) or returned bytes that fail verification."""
 
 
+class TruncatedArchive(ConsistencyError):
+    """No end-of-central-directory record where the zip format requires one (the last
+    65,557 bytes): the file on the server is truncated, so retrying cannot help."""
+
+
 @dataclass
 class Response:
     status: int
@@ -191,6 +196,10 @@ class Http:
         self.local = threading.local()
         self.stats = Stats()
         self.context = ssl.create_default_context()
+
+    def thread_bytes(self) -> int:
+        """Response bytes received by the calling thread (exact under concurrency)."""
+        return getattr(self.local, "bytes", 0)
 
     def _conn(self) -> http.client.HTTPSConnection:
         conn = getattr(self.local, "conn", None)
@@ -273,6 +282,7 @@ class Http:
                     self._drop()
                 if status in ok:
                     self.stats.add(len(data))
+                    self.local.bytes = getattr(self.local, "bytes", 0) + len(data)
                     return Response(status, rh, data)
                 retryable = status in RETRYABLE_STATUS
                 err = HttpError(
@@ -649,7 +659,15 @@ def read_central_directory(
     """Read and parse the central directory with at most three range requests."""
     start = max(0, size - tail_bytes)
     tail = get_range(client, remote, start, size - 1, total=size, etag=etag)
-    cd_offset, cd_size, n, z64 = locate_central_directory(tail, start)
+    try:
+        cd_offset, cd_size, n, z64 = locate_central_directory(tail, start)
+    except ConsistencyError as exc:
+        if len(tail) >= min(size, 65557):
+            raise TruncatedArchive(
+                f"{remote.path}: no end-of-central-directory record in the last {len(tail)} "
+                f"bytes of {size} (truncated upstream)"
+            ) from exc
+        raise
     if z64 is not None:
         record = get_range(client, remote, z64, z64 + 55, total=size, etag=etag)
         cd_offset, cd_size, n = parse_zip64_eocd(record)

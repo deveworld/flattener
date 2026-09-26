@@ -725,6 +725,17 @@ def build_manifests(state: State, layout: Layout, track: str = "release") -> dic
             **split_info,
         },
         "selection": selection,
+        "upstream_issues": {
+            "truncated_shards": [
+                {"shard": sh, "size": size, "etag": etag}
+                for sh, size, etag in state.query(
+                    "SELECT shard, size, etag FROM shards WHERE status='truncated' ORDER BY shard"
+                )
+            ],
+            "note": "shards served without a zip central directory (partial uploads); "
+            "skipped, so those train shards contribute no samples (see research "
+            "reports/harvest-report.json)",
+        },
         "license_tables": {
             k: {kk: v.get(kk) for kk in ("etag", "sha256", "size")}
             for k, v in (tables.get("files") or {}).items()

@@ -36,6 +36,7 @@ from sdcommon import (
     Layout,
     RemoteFile,
     State,
+    TruncatedArchive,
     extract_member,
     get_ranges,
     head,
@@ -122,7 +123,7 @@ def parse_metadata(raw: bytes) -> dict[str, Any]:
 
 def harvest_shard(client: Http, state: State, shard: str) -> dict[str, Any]:
     started = time.monotonic()
-    bytes0 = client.stats.bytes
+    bytes0 = client.thread_bytes()
     ((split, path, size, etag),) = state.query(
         "SELECT split, path, size, etag FROM shards WHERE shard=?", (shard,)
     )
@@ -203,7 +204,7 @@ def harvest_shard(client: Http, state: State, shard: str) -> dict[str, Any]:
     if (after.size, after.etag) != (size, etag):
         raise ConsistencyError(f"{shard}: ETag/size changed during harvest ({after.etag})")
     elapsed = time.monotonic() - started
-    nbytes = client.stats.bytes - bytes0  # approximate under concurrency; informational only
+    nbytes = client.thread_bytes() - bytes0
     with state.lock:
         dup = state.db.execute(
             f"SELECT uid, shard FROM samples WHERE uid IN ({','.join('?' * len(rows))}) "
@@ -266,7 +267,8 @@ def harvest_all(
     progress_path = layout.reports / "harvest-progress.json"
     for round_no in range(1, rounds + 1):
         todo = state.query(
-            "SELECT shard, split, idx FROM shards WHERE status != 'harvested' AND attempts < ?",
+            "SELECT shard, split, idx FROM shards WHERE status NOT IN ('harvested', 'truncated') "
+            "AND attempts < ?",
             (max_attempts,),
         )
         total = state.query("SELECT COUNT(*) FROM shards")[0][0]
@@ -282,6 +284,14 @@ def harvest_all(
         def run(shard: str) -> dict[str, Any]:
             try:
                 return harvest_shard(client, state, shard)
+            except TruncatedArchive as exc:
+                state.execute(
+                    "UPDATE shards SET status='truncated', attempts=attempts+1, error=? "
+                    "WHERE shard=?",
+                    (str(exc)[:1000], shard),
+                )
+                log(f"TRUNCATED {shard}: {exc}; skipped (terminal until its ETag changes)")
+                return {"shard": shard, "error": str(exc)}
             except Exception as exc:  # noqa: BLE001 - record, retry in a later round
                 state.execute(
                     "UPDATE shards SET status='error', attempts=attempts+1, error=? WHERE shard=?",
@@ -334,32 +344,41 @@ def harvest_all(
                                 log(f"progress file not written: {exc}")
         if limit:
             break
-        left = state.query("SELECT COUNT(*) FROM shards WHERE status != 'harvested'")[0][0]
+        left = state.query(
+            "SELECT COUNT(*) FROM shards WHERE status NOT IN ('harvested', 'truncated')"
+        )[0][0]
         if left == 0:
             break
         if round_no < rounds:
             log(f"{left} shards not harvested; pausing {round_pause:.0f}s before retry round")
             time.sleep(round_pause)
     left = state.query(
-        "SELECT shard, status, attempts, error FROM shards WHERE status!='harvested'"
+        "SELECT shard, status, attempts, error FROM shards "
+        "WHERE status NOT IN ('harvested', 'truncated')"
     )
     if left:
         log(f"harvest incomplete: {len(left)} shards, e.g. {left[:3]}")
+    truncated = state.query("SELECT shard FROM shards WHERE status='truncated' ORDER BY shard")
+    if truncated:
+        log(f"{len(truncated)} shards truncated upstream (skipped): {[t[0] for t in truncated]}")
     return not left
 
 
 def harvest_report(state: State, layout: Layout) -> dict[str, Any]:
     rows = state.query(
-        "SELECT split, COUNT(*), SUM(n_samples), SUM(size), SUM(seconds), SUM(bytes) "
-        "FROM shards WHERE status='harvested' GROUP BY split"
+        "SELECT split, COUNT(*), SUM(n_samples), SUM(size), SUM(seconds), "
+        "SUM(MIN(size, 1048576)) FROM shards WHERE status='harvested' GROUP BY split"
+    )
+    meta_bytes = dict(
+        state.query("SELECT split, SUM(m_size + 52 + 110) FROM samples GROUP BY split")
     )
     per_split = {
         r[0]: {
             "shards": r[1],
             "samples": r[2],
             "shard_bytes": r[3],
-            "harvest_seconds": r[4],
-            "harvest_bytes": r[5],
+            "harvest_seconds_summed_over_workers": r[4],
+            "harvest_bytes_estimate": r[5] + (meta_bytes.get(r[0]) or 0),
         }
         for r in rows
     }
@@ -377,12 +396,26 @@ def harvest_report(state: State, layout: Layout) -> dict[str, Any]:
     families = dict(state.query("SELECT mesh_family, COUNT(*) FROM samples GROUP BY mesh_family"))
     sources = dict(state.query("SELECT doc_source, COUNT(*) FROM samples GROUP BY doc_source"))
     mixed = {s: f for s, f in fam_by_shard.items() if len(f) > 1}
+    truncated = [
+        {"shard": s, "size": size, "etag": etag, "last_modified": lm, "error": err}
+        for s, size, etag, lm, err in state.query(
+            "SELECT shard, size, etag, last_modified, error FROM shards "
+            "WHERE status='truncated' ORDER BY shard"
+        )
+    ]
+    shard_status = dict(state.query("SELECT status, COUNT(*) FROM shards GROUP BY status"))
     report = {
         "schema": "flattener-syntheticdoc-harvest-report-1",
         "track": "research",
         "generated_at": utcnow(),
         "dataset_doi": "10.3929/ethz-c-000801994",
         "per_split": per_split,
+        "shard_status": shard_status,
+        "truncated_shards": truncated,
+        "truncated_note": "no zip end-of-central-directory record in the last 1 MiB (the format "
+        "requires it within 65,557 bytes); sizes are 4096-byte multiples well below the usual "
+        "~6.4 GB, i.e. incomplete uploads. Skipped; re-harvested automatically if their ETag "
+        "changes. Samples inside could be recovered by walking local headers (not done).",
         "sample_status": status,
         "samples_with_missing_or_extra_members": incomplete,
         "success_samples_without_contiguous_block": no_block,
