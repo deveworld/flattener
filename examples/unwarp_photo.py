@@ -15,7 +15,7 @@ def main() -> int:
         "--checkpoint",
         type=Path,
         required=True,
-        help="trusted coordinate-study best.pt with its .sha256 sidecar",
+        help="trusted coordinate-study checkpoint (e.g. selected.pt) with its .sha256 sidecar",
     )
     parser.add_argument("--input", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
