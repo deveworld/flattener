@@ -15,13 +15,9 @@ from PIL import Image
 
 from flattener.dewarp.data import SAMPLE_SCHEMA, SPEC_SCHEMA
 from flattener.dewarp.model import DewarpModelConfig, UVDocNet
-from flattener.dewarp.train import TrainConfig, improves, train, validate
+from flattener.dewarp.train import TrainConfig, _Logger, improves, train, validate
 
 TINY = DewarpModelConfig(input_size=(64, 48), grid_size=(5, 4), num_filter=4)
-F2 = (
-    "F2 (Codex review): train.validate divides by max(count, 1), so samples with zero "
-    "valid GT nodes give EPE 0.0 and improves() selects that as the best"
-)
 
 
 def _config(**changes):
@@ -63,7 +59,6 @@ def _model():
     return UVDocNet(TINY)
 
 
-@pytest.mark.xfail(strict=True, reason=F2)
 def test_validation_without_valid_ground_truth_has_no_epe_and_no_best():
     config = _config()
     metrics = validate(_model(), [_batch([False, False], ["a", "a"])], config, torch.device("cpu"))
@@ -75,7 +70,6 @@ def test_validation_without_valid_ground_truth_has_no_epe_and_no_best():
     assert not improves(None, metrics["epe_px"])
 
 
-@pytest.mark.xfail(strict=True, reason=F2)
 def test_samples_without_valid_ground_truth_are_counted_and_left_out():
     config = _config()
     model = _model()
@@ -133,7 +127,6 @@ def _spec_with_unlabelled_val(tmp_path):
 
 
 @pytest.mark.training
-@pytest.mark.xfail(strict=True, reason=F2)
 def test_training_with_unevaluable_validation_selects_no_best(tmp_path):
     spec = _spec_with_unlabelled_val(tmp_path)
     config = _config(
@@ -155,3 +148,13 @@ def test_training_with_unevaluable_validation_selects_no_best(tmp_path):
     log = (tmp_path / "run/train_log.jsonl").read_text().splitlines()
     validations = [json.loads(line) for line in log if json.loads(line)["kind"] == "val"]
     assert validations and all(record["not_evaluable"] == 2 for record in validations)
+
+
+def test_the_csv_log_keeps_the_header_it_was_started_with(tmp_path):
+    (tmp_path / "train_log.csv").write_text("kind,step,epe_px\n")
+    log = _Logger(tmp_path, "release")
+    log({"kind": "val", "step": 3, "epe_px": None, "not_evaluable": 2})
+    lines = (tmp_path / "train_log.csv").read_text().splitlines()
+    assert lines == ["kind,step,epe_px", "val,3,"]
+    record = json.loads((tmp_path / "train_log.jsonl").read_text())
+    assert record["epe_px"] is None and record["not_evaluable"] == 2

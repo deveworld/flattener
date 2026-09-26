@@ -9,7 +9,8 @@ picklable datasets, no lambdas, ``__main__`` guard.
 
 Validation runs in fp32 over the ``val_views`` (see ``data.ViewConfig``), logs a grid
 endpoint error per view in pixels of ``epe_reference_size`` and picks the best
-checkpoint by ``val_select``. The best metric carries a signature of everything that
+checkpoint by ``val_select``. Samples without a valid target node are counted as
+``not_evaluable`` and left out; a validation with nothing to evaluate picks no best. The best metric carries a signature of everything that
 defines validation; a resume with a different signature starts a new best. Every new
 best is saved.
 
@@ -130,6 +131,7 @@ CSV_COLUMNS = (
     "images_per_sec",
     "data_fraction",
     "epe_px",
+    "not_evaluable",
     "max_memory_gib",
     "max_reserved_gib",
 )
@@ -320,8 +322,11 @@ def carry_best(
     return None, {"step": best.get("step"), "epe_px": best.get("epe_px")}
 
 
-def improves(best: dict[str, Any] | None, epe: float) -> bool:
-    return math.isfinite(epe) and (best is None or epe < best["epe_px"])
+def improves(best: dict[str, Any] | None, epe: float | None) -> bool:
+    """Whether ``epe`` beats the best; a missing EPE (nothing evaluable) never does."""
+    if epe is None or not math.isfinite(epe):
+        return False
+    return best is None or best.get("epe_px") is None or epe < best["epe_px"]
 
 
 def save_due(
@@ -481,6 +486,12 @@ def memory_stats(device: torch.device) -> dict[str, float]:
 def validate(model: UVDocNet, loader, config: TrainConfig, device: torch.device) -> dict[str, Any]:
     """Mean grid endpoint error per view in pixels of ``epe_reference_size``.
 
+    The EPE pools every valid target node of the view. A sample with no valid node in a
+    view cannot be evaluated there: it adds nothing to that view's means and is counted
+    in ``not_evaluable``. A view or source without an evaluable sample has ``epe_px``
+    ``None``, which ``improves`` never selects. ``loss_grid2d`` is the masked L1 pooled
+    the same way.
+
     The forward runs in fp32 without TF32, like ``predict``. The CUDA cache is emptied
     before and after, so validation batches reuse the training memory; the memory figures
     include the validation peak.
@@ -490,8 +501,9 @@ def validate(model: UVDocNet, loader, config: TrainConfig, device: torch.device)
     height, width = config.epe_reference_size
     scale = torch.tensor([width / 2.0, height / 2.0], device=device).view(1, 2, 1, 1)
     names = [view.name for view in config.val_views]
+    # per view and source: error sum, valid nodes, evaluable samples, not evaluable samples
     sums: dict[str, dict[str, list[float]]] = {name: {} for name in names}
-    losses = dict.fromkeys(names, 0.0)
+    losses = {name: [0.0, 0.0] for name in names}  # masked L1 sum and weight
     batches = samples = 0
     model.eval()
     with ieee_float32():
@@ -500,13 +512,19 @@ def validate(model: UVDocNet, loader, config: TrainConfig, device: torch.device)
             for index, name in enumerate(names):
                 grid2d, _ = model(batch["image"][:, index].float().div_(255))
                 target, valid = batch["grid2d"][:, index], batch["valid"][:, index]
-                losses[name] += float(_masked_l1(grid2d, target, valid))
+                weight = valid.expand_as(target)
+                losses[name][0] += float(((grid2d - target).abs() * weight).sum())
+                losses[name][1] += float(weight.sum())
                 error = torch.linalg.vector_norm((grid2d - target) * scale, dim=1) * valid[:, 0]
                 totals = torch.stack([error.flatten(1).sum(1), valid.flatten(1).sum(1)], 1)
                 for source, (error_sum, count) in zip(batch["source"], totals.tolist()):
-                    entry = sums[name].setdefault(source, [0.0, 0.0])
-                    entry[0] += error_sum
-                    entry[1] += count
+                    entry = sums[name].setdefault(source, [0.0, 0.0, 0, 0])
+                    if count > 0:
+                        entry[0] += error_sum
+                        entry[1] += count
+                        entry[2] += 1
+                    else:
+                        entry[3] += 1
             batches += 1
             samples += len(batch["source"])
             if config.val_max_batches is not None and batches >= config.val_max_batches:
@@ -517,17 +535,26 @@ def validate(model: UVDocNet, loader, config: TrainConfig, device: torch.device)
         torch.cuda.empty_cache()
     views = {}
     for name in names:
-        total = sum(v[0] for v in sums[name].values())
-        count = sum(v[1] for v in sums[name].values())
+        entries = sums[name]
+        total, count = (sum(entry[i] for entry in entries.values()) for i in (0, 1))
         views[name] = {
-            "epe_px": total / max(count, 1.0),
-            "loss_grid2d": losses[name] / max(batches, 1),
-            "per_source_epe_px": {k: v[0] / max(v[1], 1.0) for k, v in sorted(sums[name].items())},
+            "epe_px": total / count if count > 0 else None,
+            "loss_grid2d": losses[name][0] / losses[name][1] if losses[name][1] > 0 else None,
+            "evaluable": int(sum(entry[2] for entry in entries.values())),
+            "not_evaluable": int(sum(entry[3] for entry in entries.values())),
+            "per_source_epe_px": {
+                source: entry[0] / entry[1] if entry[1] > 0 else None
+                for source, entry in sorted(entries.items())
+            },
+            "per_source_not_evaluable": {
+                source: int(entry[3]) for source, entry in sorted(entries.items())
+            },
         }
     selected = config.selected_view
     return {
         "epe_px": views[selected]["epe_px"],
         "view": selected,
+        "not_evaluable": views[selected]["not_evaluable"],
         "views": views,
         "reference_size": [height, width],
         "batches": batches,
@@ -598,7 +625,10 @@ def _initialize(model: UVDocNet, config: TrainConfig) -> dict[str, Any]:
 
 
 class _Logger:
-    """JSONL (every field, tagged with the license track) plus a fixed-column CSV."""
+    """JSONL (every field, tagged with the license track) plus a fixed-column CSV.
+
+    An existing CSV keeps its own header, so rows stay aligned when the columns change.
+    """
 
     def __init__(self, directory: Path, track: str) -> None:
         self.jsonl, self.csv = directory / "train_log.jsonl", directory / "train_log.csv"
@@ -608,10 +638,15 @@ class _Logger:
         record = json_safe({**record, "track": self.track})  # strict JSON: inf/nan -> null
         with self.jsonl.open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(record, sort_keys=True, allow_nan=False) + "\n")
-        new = not self.csv.is_file()
+        columns: list[str] | None = None
+        if self.csv.is_file():
+            with self.csv.open(encoding="utf-8", newline="") as stream:
+                columns = next(csv.reader(stream), None)
         with self.csv.open("a", encoding="utf-8", newline="") as stream:
-            writer = csv.DictWriter(stream, fieldnames=CSV_COLUMNS, extrasaction="ignore")
-            if new:
+            writer = csv.DictWriter(
+                stream, fieldnames=columns or CSV_COLUMNS, extrasaction="ignore"
+            )
+            if not columns:
                 writer.writeheader()
             writer.writerow(record)
         print(json.dumps({k: record[k] for k in CSV_COLUMNS if k in record}), flush=True)
