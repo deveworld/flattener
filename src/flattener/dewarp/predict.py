@@ -8,6 +8,7 @@ antialias: upstream's ``cv2.resize`` INTER_LINEAR), the 2-D grid is predicted,
 converted to a dense flattener backward map at the requested output size
 (default: the input size) and rendered by ``flattener.render``. Upstream UVDoc
 weights (``grid_convention="uvdoc"``) use the exact upstream densification.
+The model runs in full float32 precision (TF32 off) so CUDA and CPU predictions agree.
 """
 
 from __future__ import annotations
@@ -17,6 +18,8 @@ import json
 import re
 import sys
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -101,6 +104,45 @@ def _check_image(image: NDArray[np.uint8]) -> None:
         raise FlattenerError(Status.INPUT_ERROR, "invalid_image", "image must be RGB uint8 HxWx3")
 
 
+def _legacy_matmul_precision() -> str | None:
+    try:
+        return torch.get_float32_matmul_precision()
+    except RuntimeError:  # legacy and new TF32 settings were mixed; keep the new value only
+        return None
+
+
+@contextmanager
+def ieee_float32() -> Iterator[None]:
+    """Run CUDA float32 convolutions and matmuls without TF32; restore the settings on exit.
+
+    Also selects cuDNN algorithms by heuristic (no benchmark) and deterministically.
+    """
+    cudnn, matmul = torch.backends.cudnn, torch.backends.cuda.matmul
+    saved_algorithms = cudnn.benchmark, cudnn.deterministic
+    new_api = hasattr(cudnn, "conv")  # torch >= 2.9 has per-op fp32_precision flags
+    if new_api:
+        flags = (cudnn.conv, matmul, torch.backends.mkldnn.matmul)
+        saved = [flag.fp32_precision for flag in flags], _legacy_matmul_precision()
+        torch.set_float32_matmul_precision("highest")  # keeps legacy and new matmul flags in sync
+        cudnn.conv.fp32_precision = "ieee"
+    else:
+        saved = cudnn.allow_tf32, matmul.allow_tf32
+        cudnn.allow_tf32 = matmul.allow_tf32 = False
+    cudnn.benchmark, cudnn.deterministic = False, True
+    try:
+        yield
+    finally:
+        cudnn.benchmark, cudnn.deterministic = saved_algorithms
+        if new_api:
+            values, legacy = saved
+            if legacy is not None:
+                torch.set_float32_matmul_precision(legacy)
+            for flag, value in zip(flags, values, strict=True):
+                flag.fp32_precision = value
+        else:
+            cudnn.allow_tf32, matmul.allow_tf32 = saved
+
+
 def predict_grid(dewarper: Dewarper, image: NDArray[np.uint8]) -> NDArray[np.float32]:
     """Raw 2-D model output as (Gh, Gw, 2), in the model's grid convention."""
     _check_image(image)
@@ -113,7 +155,7 @@ def predict_grid(dewarper: Dewarper, image: NDArray[np.uint8]) -> NDArray[np.flo
         align_corners=False,
         antialias=False,
     )
-    with torch.inference_mode():
+    with torch.inference_mode(), ieee_float32():
         grid2d, _ = dewarper.model(tensor)
     return grid2d[0].permute(1, 2, 0).float().cpu().numpy()
 

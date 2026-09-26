@@ -14,7 +14,14 @@ from flattener import FlattenerError
 from flattener.dewarp.checkpoint import CHECKPOINT_SCHEMA, save_checkpoint
 from flattener.dewarp.coords import edge_positions
 from flattener.dewarp.model import DewarpModelConfig, UVDocNet
-from flattener.dewarp.predict import Dewarper, load_dewarper, main, predict_grid, rectify
+from flattener.dewarp.predict import (
+    Dewarper,
+    ieee_float32,
+    load_dewarper,
+    main,
+    predict_grid,
+    rectify,
+)
 
 TINY = DewarpModelConfig(input_size=(64, 48), grid_size=(5, 4), num_filter=4)
 DEFAULT_UVDOC_REPO = Path.home() / ".cache/flattener-sota-20260926/repos/UVDoc"
@@ -24,6 +31,32 @@ class _IdentityGrid(torch.nn.Module):
     def forward(self, x):
         grid = np.stack(np.meshgrid(edge_positions(4), edge_positions(5)), 0)
         return torch.from_numpy(grid).float()[None].expand(x.shape[0], -1, -1, -1), None
+
+
+class _RecordFlags(_IdentityGrid):
+    def forward(self, x):
+        self.seen = _flags()
+        return super().forward(x)
+
+
+def _flags():
+    backends = torch.backends
+    return (
+        backends.cudnn.conv.fp32_precision,
+        backends.cuda.matmul.fp32_precision,
+        backends.mkldnn.matmul.fp32_precision,
+        torch.get_float32_matmul_precision(),
+        backends.cudnn.benchmark,
+    )
+
+
+def _set_flags(conv, cuda_matmul, mkldnn_matmul, legacy, benchmark):
+    torch.set_float32_matmul_precision(legacy)
+    backends = torch.backends
+    backends.cudnn.conv.fp32_precision = conv
+    backends.cuda.matmul.fp32_precision = cuda_matmul
+    backends.mkldnn.matmul.fp32_precision = mkldnn_matmul
+    backends.cudnn.benchmark = benchmark
 
 
 def _checkpoint(path, seed=0):
@@ -54,6 +87,48 @@ def test_identity_grid_reproduces_the_input_and_resizes():
     assert rectify(dewarper, image, (50, 20)).image.shape == (50, 20, 3)
     with pytest.raises(FlattenerError):
         rectify(dewarper, image.astype(np.float32))
+
+
+def test_prediction_runs_without_tf32_and_restores_the_flags():
+    original = _flags()
+    model = _RecordFlags()
+    dewarper = Dewarper(model, TINY, torch.device("cpu"))
+    try:
+        _set_flags("tf32", "tf32", "tf32", "high", True)
+        predict_grid(dewarper, np.zeros((8, 6, 3), np.uint8))
+        assert model.seen == ("ieee", "ieee", "ieee", "highest", False)
+        assert _flags() == ("tf32", "tf32", "tf32", "high", True)
+        with pytest.raises(ValueError), ieee_float32():
+            raise ValueError
+        assert _flags() == ("tf32", "tf32", "tf32", "high", True)
+    finally:
+        _set_flags(*original)
+    assert _flags() == original
+
+
+def _upstream_weights():
+    repo = Path(os.environ.get("FLATTENER_UVDOC_REPO", DEFAULT_UVDOC_REPO))
+    weights = repo / "model/best_model.pkl"
+    if not weights.is_file():
+        pytest.skip(f"UVDoc weights not found at {weights}")
+    return weights
+
+
+def _checkerboard_page():
+    yy, xx = np.mgrid[0:120, 0:90]
+    image = np.full((120, 90, 3), 40, np.uint8)
+    image[10:110, 12:80] = 235
+    image[(yy // 8 + xx // 8) % 2 == 0] //= 2
+    return image
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+def test_cuda_prediction_matches_cpu():
+    # With TF32 convolutions the UVDoc grid drifts by ~1e-4 (0.1 px on a DocUNet crop).
+    weights, image = _upstream_weights(), _checkerboard_page()
+    cpu = predict_grid(load_dewarper(weights), image)
+    cuda = predict_grid(load_dewarper(weights, device="cuda"), image)
+    np.testing.assert_allclose(cuda, cpu, rtol=0, atol=1e-5)
 
 
 def test_checkpoint_loads_with_verification(tmp_path):
@@ -131,16 +206,9 @@ def test_docunet_batch_writes_crop_sized_outputs(tmp_path, capsys):
 
 
 def test_upstream_weights_match_the_upstream_unwarping():
-    repo = Path(os.environ.get("FLATTENER_UVDOC_REPO", DEFAULT_UVDOC_REPO))
-    weights = repo / "model/best_model.pkl"
-    if not weights.is_file():
-        pytest.skip(f"UVDoc weights not found at {weights}")
-    dewarper = load_dewarper(weights)
+    dewarper = load_dewarper(_upstream_weights())
     assert dewarper.info["kind"] == "uvdoc" and dewarper.config.grid_convention == "uvdoc"
-    yy, xx = np.mgrid[0:120, 0:90]
-    image = np.full((120, 90, 3), 40, np.uint8)
-    image[10:110, 12:80] = 235
-    image[(yy // 8 + xx // 8) % 2 == 0] //= 2
+    image = _checkerboard_page()
     result = rectify(dewarper, image, allow_unchecked=True)
     tensor = torch.from_numpy(image).permute(2, 0, 1)[None].float() / 255
     small = F.interpolate(tensor, size=(712, 488), mode="bilinear", align_corners=False)
