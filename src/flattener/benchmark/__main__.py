@@ -1,8 +1,8 @@
 """Command line: ``python -m flattener.benchmark {docunet,ocr,calibrate,build-siftflow}``.
 
 ``docunet``, ``ocr`` and ``calibrate`` take ``--workers`` (default 2). Scoring LD/AD
-needs the SIFT-flow C++ sources, which are not distributed: pass
-``--siftflow-source DIR`` or set ``FLATTENER_SIFTFLOW_SOURCE``.
+needs your copy of the SIFT-flow C++ sources: pass ``--siftflow-source DIR`` or set
+``FLATTENER_SIFTFLOW_SOURCE``.
 """
 
 from __future__ import annotations

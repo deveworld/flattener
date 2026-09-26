@@ -273,7 +273,7 @@ def load_uvdoc_state_dict(path: str | Path) -> dict[str, torch.Tensor]:
     """Read upstream ``best_model.pkl`` safely: exactly ``{"model_state": state_dict}``.
 
     Anything else (e.g. a dewarp checkpoint, which also has ``model_state``)
-    is refused, so other weights cannot enter a run disguised as upstream.
+    is refused, so only upstream-format weights load as upstream.
     """
     checkpoint = torch.load(Path(path), map_location="cpu", weights_only=True)
     state = checkpoint.get("model_state") if isinstance(checkpoint, dict) else None
@@ -290,7 +290,7 @@ def load_uvdoc_weights(model: UVDocNet, path: str | Path) -> dict[str, Any]:
     """Load upstream-format weights into ``model``; return a lineage record.
 
     Every upstream tensor must be consumed, except the 3-D head when the model
-    has none. Sizes are not constrained: the convolutions are size-agnostic.
+    has none. Any input and grid size works: the convolutions are size-agnostic.
     Only the published file (``UVDOC_WEIGHTS_SHA256``) is recorded as MIT;
     any other upstream-format file has license ``"unverified"``.
     """

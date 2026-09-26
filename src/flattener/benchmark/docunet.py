@@ -392,7 +392,7 @@ def evaluate_docunet(
     """Score a directory of DocUNet predictions and return the report dictionary.
 
     ``build`` comes from :func:`flattener.benchmark.siftflow.build_siftflow`; ``None``
-    computes MS-SSIM only and is not a comparable benchmark result.
+    computes MS-SSIM only, and the report has ``comparable: false``.
     """
     conventions = validate_conventions(conventions)
     reference_resizes(ref_resize, 1)

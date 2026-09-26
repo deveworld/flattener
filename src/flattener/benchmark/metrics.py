@@ -20,8 +20,8 @@ from . import matlab
 METRIC_AREA = 598_400
 AD_SOLVERS = ("exact_lstsq", "lsqr_4iter")
 # LSQR with the defaults of MATLAB ``lsqr(A, B)`` as called by PaperEdge/UVDoc
-# ``alignLD.m``. Chosen because its benchmark means are closest to MATLAB (G1-G3); it
-# is a mean-calibrated approximation, not a per-image emulation (see ``lsqr_solve``).
+# ``alignLD.m``: its benchmark means are closest to MATLAB (G1-G3); per-image values
+# carry solver noise (see ``lsqr_solve``).
 DEFAULT_AD_SOLVER = "lsqr_4iter"
 LSQR_STOP_REASONS = ("zero_rhs", "zero_normal", "relres", "normal_equations", "maxit")
 AD_GRADIENT_THRESHOLD = 0.5
@@ -125,13 +125,12 @@ def lsqr_solve(
     ``lsqr(A, B)`` without options, which for four unknowns means at most four
     iterations.
 
-    This follows MATLAB's documented algorithm, not its source, and has not been
-    checked against MATLAB image by image. On PaperEdge's outputs the benchmark means
-    match MATLAB within G1-G3, but single images can differ by up to ~0.016 AD
-    (45_1) even where the SIFT flow matches MATLAB, and ``exact_lstsq`` is closer on
-    most of those images. On those outputs 129 of 130 systems stop at ``maxit`` after
-    four iterations without meeting the tolerance, so the result is a partially
-    converged iterate. Treat per-image AD as carrying that solver noise.
+    Implemented from MATLAB's documentation. On PaperEdge's outputs the benchmark
+    means match MATLAB within G1-G3; single images differ by up to ~0.016 AD (45_1)
+    even where the SIFT flow matches MATLAB, and ``exact_lstsq`` is closer on most of
+    them. There 129 of 130 systems stop at ``maxit`` after four iterations, so the
+    result is a partially converged iterate: treat per-image AD as carrying solver
+    noise.
     """
     rows, columns = matrix.shape
     if target.shape != (rows,):
@@ -253,7 +252,7 @@ def aligned_distortions(
 
     ``gradient`` is the scan's normalised Sobel magnitude at the metric size. It is
     resized to the flow grid, pixels above 0.5 fix a per-axis scale and shift, and
-    the gradient-weighted residual magnitude (not squared) is averaged.
+    the gradient-weighted residual magnitude (unsquared) is averaged.
     """
     return aligned_distortion_details(vx, vy, gradient)[0]
 

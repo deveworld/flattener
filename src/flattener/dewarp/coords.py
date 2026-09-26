@@ -8,8 +8,8 @@ Values (where a coordinate points in the *source* image of n pixels per axis):
   align_corners=True)``): center i is at ``2i / (n - 1) - 1``. Equating the
   pixel index gives ``q = u (n - 1) / n``.
 * SyntheticDoc ``backward_map.npy``: ``uv_to_backward_map.py`` interpolates
-  render pixel-center *indices* x and stores ``b = 2x / n - 1`` (division by the
-  render size, not n - 1). Hence ``q = b + 1 / n``, i.e. ``q = b + (1/W, 1/H)``.
+  render pixel-center *indices* x and stores ``b = 2x / n - 1`` (divided by the
+  render size n). Hence ``q = b + 1 / n``, i.e. ``q = b + (1/W, 1/H)``.
 * raw pixel grids (UVDoc/Doc3D ``.mat``): pixel centers at integers, so
   ``q = (2x + 1) / n - 1``.
 
@@ -191,7 +191,8 @@ def uvdoc_dense_map(grid: NDArray, output_size: Size, source_size: Size) -> NDAr
     (Gh, Gw, 2)); ``source_size`` is the image it is applied to. The result
     rendered by ``flattener.render`` samples the same source points as
     ``grid_sample(interpolate(grid, output_size, align_corners=True),
-    align_corners=True)`` (flattener fills, rather than zero-pads, outside).
+    align_corners=True)``; outside the source it uses ``fill_rgb`` where upstream pads
+    with zeros.
     """
     array = _grid(grid, "grid")
     height, width = _size(output_size, "output_size")

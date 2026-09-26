@@ -56,7 +56,7 @@ def write_json_atomic(
 ) -> str:
     """Write ``payload`` via a synced temporary file; return the written SHA-256.
 
-    Without ``overwrite`` an existing file is never replaced (create-if-absent).
+    Without ``overwrite`` the file is created only when absent.
     """
     destination = Path(path)
     encoded = encode_json(payload)

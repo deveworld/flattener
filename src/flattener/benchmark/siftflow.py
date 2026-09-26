@@ -16,9 +16,9 @@
 # of that package is included; its C++ is compiled from the user's own copy.
 """SIFT flow (Ce Liu) compiled at run time from a user-supplied source tree.
 
-The SIFT-flow C++ sources are "All rights reserved" and are never distributed with
-flattener. Pass the directory that contains ``mexDenseSIFT`` and ``mexDiscreteFlow``
-(the ``SIFTflow`` folder of the DocUNet ``eval.zip`` or of UVDoc's ``eval_code``).
+The SIFT-flow C++ sources are "All rights reserved", so each user supplies a copy: the
+directory that contains ``mexDenseSIFT`` and ``mexDiscreteFlow`` (the ``SIFTflow``
+folder of the DocUNet ``eval.zip`` or of UVDoc's ``eval_code``).
 """
 
 from __future__ import annotations

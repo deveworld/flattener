@@ -11,7 +11,7 @@
 
 Every function follows MATLAB semantics for ``uint8`` inputs: arithmetic is done in
 float64 and results are rounded half away from zero and saturated to ``[0, 255]``
-exactly where MATLAB returns ``uint8``. Float64 inputs are never rounded.
+exactly where MATLAB returns ``uint8``. Float64 inputs keep full precision.
 """
 
 from __future__ import annotations

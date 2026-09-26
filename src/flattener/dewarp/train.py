@@ -641,7 +641,7 @@ def train(config: TrainConfig, *, resume: str = "auto") -> dict[str, Any]:
             "pid": os.getpid(),
             "updated_utc": utc_now(),
         }
-        try:  # best effort: a monitor holding the file must not kill the run
+        try:  # best effort: the run continues while a monitor holds the file
             write_json(output / "status.json", {**record, **extra})
         except OSError as error:
             print(f"warning: status.json not updated: {error}", file=sys.stderr, flush=True)

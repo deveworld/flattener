@@ -971,8 +971,8 @@ def to_float_images(batch: dict[str, Any]) -> torch.Tensor:
 
 class DewarpDataset(torch.utils.data.Dataset):
     """Concatenation of sources. Keys are ints or ``(flat_index, position)``;
-    augmentation draws from ``default_rng([seed, position])`` so results do not
-    depend on worker assignment. Top-level and picklable (Windows spawn)."""
+    augmentation draws from ``default_rng([seed, position])``, so every worker
+    assignment gives the same items. Top-level and picklable (Windows spawn)."""
 
     def __init__(
         self,

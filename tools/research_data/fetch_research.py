@@ -1,8 +1,8 @@
 """Fetch the research-track dewarping datasets (and the small UVDoc benchmark) resumably.
 
 RESEARCH TRACK ONLY. Doc3D and UVDoc_final carry non-commercial or unclear upstream terms
-(see ``DATASETS`` below). Weights trained on any of this data are research-track and are never
-released. Every manifest written here carries ``"track"``.
+(see ``DATASETS`` below). Weights trained on any of this data are research-track and stay
+private. Every manifest written here carries ``"track"``.
 
 Tasks (each needs one HTTP connection; ``--connections`` caps how many run at once):
 
@@ -23,11 +23,11 @@ next run; partial downloads resume from ``.part`` files, Range extraction resume
 from a journal. After the network work, ``MANIFEST.json`` is (re)built per dataset with source
 identity (URL, size, ETag, SHA-256), license summary, track, file counts and pairing checks.
 
-Usage (remote, detached via tools\\launch.ps1):
-  python fetch_research.py run --root D:\\flattener-sota\\data \\
+Usage (``--root`` is the data root that holds ``research/`` and ``eval/``):
+  python fetch_research.py run --root <data-root> \\
       --tasks uvdoc-benchmark,doc3d-grid,uvdoc-final --connections 2
-  python fetch_research.py status --root D:\\flattener-sota\\data
-  python fetch_research.py finalize --root D:\\flattener-sota\\data   # manifests + pairing only
+  python fetch_research.py status --root <data-root>
+  python fetch_research.py finalize --root <data-root>   # manifests + pairing only
 Exit codes: 0 all requested work done, 1 a task failed, 3 some task blocked (e.g. gated access).
 """
 
@@ -76,7 +76,7 @@ IGL = "https://igl.ethz.ch/projects/uvdoc"
 HF_REPO = "StonyBrook-CVLab/doc3D-dataset"
 REV = "fd3d37e7c9125c45c587a2eb9a6973f9183436e9"  # HF dataset revision (2025-12-18)
 HF_URL = f"https://huggingface.co/datasets/{HF_REPO}/resolve/{REV}/doc3d/img_{{i}}.zip"
-# Sizes from the HF tree API at REV; a mismatch means the pinned revision is not what we expect.
+# Sizes from the HF tree API at REV; a mismatch means the pinned revision changed.
 DOC3D_IMG_SIZES = {
     1: 1252670277,
     2: 1251189816,

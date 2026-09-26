@@ -396,7 +396,7 @@ def run_calibration(
 ) -> dict[str, str]:
     """Write the calibration reports that are missing (or all with ``rerun``).
 
-    Returns ``{run: status}``. Runs whose inputs were not supplied are skipped.
+    Returns ``{run: status}``. A run without its inputs is skipped.
     """
     root = Path(reports_dir)
     root.mkdir(parents=True, exist_ok=True)

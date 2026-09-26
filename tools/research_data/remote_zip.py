@@ -4,7 +4,7 @@ Building blocks for ``fetch_research.py``:
 
 * ``RangeClient``: one persistent HTTP(S) connection (= one "connection slot") that follows
   redirects, keeps credentials on the original host only, validates ``206`` / ``Content-Range``
-  and uses ``If-Range`` so a changed remote file is detected instead of silently mixed.
+  and uses ``If-Range`` so a changed remote file raises ``RemoteChanged``.
 * ``read_central_directory``: parses a remote zip's central directory (zip64 aware) with two or
   three small Range requests.
 * ``extract_remote_members``: streams contiguous runs of wanted members with one Range request per
@@ -50,7 +50,7 @@ class HttpStatusError(Exception):
 
 
 class RemoteChanged(Exception):
-    """The remote file no longer matches the recorded identity (ETag/size)."""
+    """The remote file differs from the recorded identity (ETag/size)."""
 
 
 class IntegrityError(Exception):

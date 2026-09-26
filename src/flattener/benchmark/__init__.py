@@ -3,8 +3,8 @@
 ``score_pair`` scores one rectified image against its scan (MS-SSIM always; LD and
 AD with a SIFT-flow backend). ``evaluate_docunet`` and ``evaluate_ocr`` score a
 directory of DocUNet predictions and return JSON-ready reports. SIFT flow (Ce Liu)
-is compiled at run time from sources the user supplies (``load_siftflow``); it is
-never distributed with flattener. Command line: ``python -m flattener.benchmark``.
+is compiled at run time from sources the user supplies (``load_siftflow``). Command
+line: ``python -m flattener.benchmark``.
 """
 
 from .calibration import evaluate_gates, run_calibration, summarize_calibration

@@ -4,8 +4,8 @@ A checkpoint ``step_XXXXXXXX.pt`` holds tensors and plain Python data only
 (it loads with ``weights_only=True``). Its sidecar ``<name>.pt.json`` repeats
 every non-state field (track, configs, data spec hash, code hash, lineage,
 metrics) plus the file's sha256. ``latest.json`` is replaced only after a
-checkpoint and its sidecar are durable, so an interrupted save never breaks
-resume.
+checkpoint and its sidecar are durable, so resume always finds a complete
+checkpoint.
 """
 
 from __future__ import annotations
