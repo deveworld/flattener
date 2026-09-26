@@ -70,8 +70,8 @@ def test_generated_page_contains_authored_bilingual_text_table_and_digits():
 
 
 def test_bundled_font_cmap_has_real_glyphs_for_all_authored_korean_and_latin():
-    # Inspect the font's format-12 Unicode character map rather than comparing
-    # pictures of .notdef boxes, which can give false positives for coverage.
+    # Read coverage from the font's format-12 Unicode cmap; rendered .notdef boxes
+    # can look like real glyphs.
     resource = files("flattener").joinpath("assets", "fonts", "NotoSansKR[wght].ttf")
     data = resource.read_bytes()
     assert hashlib.sha256(data).hexdigest() == FONT_SHA256

@@ -271,8 +271,7 @@ def test_global_subclass_matches_legacy_keys_initialization_and_forward_exactly(
     assert model.state_dict().keys() == legacy.state_dict().keys()
     for key, value in legacy.state_dict().items():
         assert torch.equal(model.state_dict()[key], value)
-    # A nonzero final layer exercises the inherited computation rather than
-    # merely comparing two all-zero initial predictions.
+    # Set a nonzero final layer so both models produce nonzero predictions to compare.
     with torch.no_grad():
         legacy.head[-1].weight.fill_(0.031)
         legacy.head[-1].bias.fill_(-0.012)

@@ -424,7 +424,7 @@ def test_xpu_oriented_checkpoint_save_resume_preserves_rng(
         assert 16 <= rng.numel() <= 65_536
     for key in ("torch_rng_state", "shuffle_rng_state", "xpu_rng_state"):
         assert torch.equal(actual[key], expected[key]), key
-    # Accelerator arithmetic is not promised bit-exact; RNG/epoch admission is.
+    # RNG states match exactly; weights, optimizer and history match within tolerance.
     for key in ("model_state", "optimizer_state", "history"):
         torch.testing.assert_close(actual[key], expected[key], rtol=1e-4, atol=2e-6)
     model = study.model_from_checkpoint(actual)
@@ -1606,7 +1606,7 @@ def test_page_relative_loss_is_macro_not_pixel_micro_and_ignores_invalid_gt_nan(
     source_mask[0, :50, :100] = True
     source_mask[1, :25, :50] = True
     result = study._page_relative_loss(predicted, target, valid, source_mask, (100, 200))
-    # (1*.25 + 3*1.25)/2 = 2, not the valid-pixel micro result 2.875.
+    # Mean of per-page losses: (1*.25 + 3*1.25)/2 = 2. The pixel-pooled mean is 2.875.
     assert result.item() == pytest.approx(2.0, abs=1e-6)
     pieces = [study._page_relative_loss(
         predicted[i:i + 1], target[i:i + 1], valid[i:i + 1], source_mask[i:i + 1],

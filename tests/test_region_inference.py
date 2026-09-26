@@ -225,7 +225,7 @@ def test_coverage_describes_selected_component_not_all_foreground_or_rendering_v
     assert region["dominance"] == pytest.approx(100 / 117)
     assert region["final_estimated_page_coverage"] == 1
     assert region["coverage_is_ground_truth"] is False
-    # These are OUTPUT sampling validity masks, not estimated foreground masks.
+    # All three masks mark valid sampling positions in the output grid.
     assert (
         result.valid_mask.shape == result.source_mask.shape == result.target_mask.shape == (24, 36)
     )
