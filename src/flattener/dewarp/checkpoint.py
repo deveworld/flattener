@@ -146,6 +146,11 @@ def load_checkpoint(path: str | Path, *, verify: bool = True) -> dict[str, Any]:
     return payload
 
 
+def checkpoint_sha256(path: str | Path) -> str:
+    """sha256 of a checkpoint file, as recorded in its sidecar."""
+    return json.loads(sidecar_path(Path(path)).read_text(encoding="utf-8"))["sha256"]
+
+
 def latest_checkpoint(directory: str | Path) -> Path | None:
     pointer = Path(directory, "latest.json")
     if not pointer.is_file():

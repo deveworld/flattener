@@ -19,9 +19,10 @@ from flattener.dewarp.checkpoint import (
     save_checkpoint,
     write_json,
 )
-from flattener.dewarp.data import SAMPLE_SCHEMA, SPEC_SCHEMA, DataSpec, require_track
+from flattener.dewarp.data import SAMPLE_SCHEMA, SPEC_SCHEMA, DataSpec, ViewConfig, require_track
 from flattener.dewarp.model import DewarpModelConfig, UVDocNet
 from flattener.dewarp.train import (
+    DEFAULT_VIEWS,
     StepSampler,
     TrainConfig,
     _check_resume,
@@ -29,8 +30,10 @@ from flattener.dewarp.train import (
     compute_losses,
     learning_rate,
     main,
+    memory_stats,
     restore_scaler,
     train,
+    validation_signature,
 )
 
 TINY = DewarpModelConfig(input_size=(64, 48), grid_size=(5, 4), num_filter=4)
@@ -117,10 +120,20 @@ def _payload(step, **extra):
 
 
 def test_train_config_round_trip_and_validation(tmp_path):
-    config = _config(tmp_path, epe_reference_size=(1440, 1024), betas=[0.9, 0.99])
+    config = _config(
+        tmp_path,
+        epe_reference_size=(1440, 1024),
+        betas=[0.9, 0.99],
+        val_views=[{"name": "tight", "margin": [0.0, 0.0]}, ViewConfig("frame", "full_frame")],
+        val_select="frame",
+        val_batch_size=4,
+    )
     data = json.loads(json.dumps(config.to_dict()))
     assert TrainConfig.from_dict(data) == config
-    assert _config(tmp_path).epe_reference_size == (712, 488)  # fixed, not the input size
+    assert config.val_views[0] == ViewConfig("tight", "page", (0.0, 0.0))
+    assert config.selected_view == "frame" and _config(tmp_path).selected_view == "page"
+    assert _config(tmp_path).val_views == DEFAULT_VIEWS
+    assert _config(tmp_path).epe_reference_size == (712, 488)  # fixed across input sizes
     for bad in (
         {"track": "public"},
         {"schedule": "step"},
@@ -130,6 +143,11 @@ def test_train_config_round_trip_and_validation(tmp_path):
         {"lr": 2.0},
         {"max_steps": 0},
         {"epe_reference_size": None},
+        {"val_batch_size": 0},
+        {"val_views": []},
+        {"val_views": [ViewConfig("a"), ViewConfig("a")]},
+        {"val_views": [{"name": "a", "crop": "tight"}]},
+        {"val_select": "missing"},
     ):
         with pytest.raises(FlattenerError):
             replace(config, **bad)
@@ -212,6 +230,9 @@ def test_resume_compatibility_and_initialization_lineage(tmp_path):
     _check_resume(
         replace(config, max_steps=2, num_workers=3, device="cuda"), payload, spec, sources
     )
+    _check_resume(  # validation settings may change; they start a new best instead
+        replace(config, val_max_batches=1, val_views=[ViewConfig("x")]), payload, spec, sources
+    )
     for changed in (replace(config, lr=1e-3), replace(config, seed=1)):
         with pytest.raises(FlattenerError, match="resume"):
             _check_resume(changed, payload, spec, sources)
@@ -230,6 +251,7 @@ def test_resume_compatibility_and_initialization_lineage(tmp_path):
         replace(config, track="research", init="checkpoint", init_path=str(research)),
     )
     assert lineage["kind"] == "checkpoint" and lineage["track"] == "research"
+    assert lineage["sha256"] == json.loads((tmp_path / "research.pt.json").read_text())["sha256"]
     # init="uvdoc": a release run needs the published upstream file (sha256), and a
     # dewarp checkpoint (research weights) is never accepted as upstream weights.
     fake_uvdoc = tmp_path / "best_model.pkl"
@@ -245,6 +267,32 @@ def test_resume_compatibility_and_initialization_lineage(tmp_path):
         with pytest.raises(FlattenerError) as error:
             _initialize(UVDocNet(TINY), disguised)
         assert error.value.reason_code == "invalid_init"
+
+
+def test_validation_signature_covers_what_defines_a_validation_result(tmp_path):
+    config = _config(tmp_path)
+    val = [{"name": "own-val", "records_sha256": "a", "content_sha256": "b"}]
+    reference = validation_signature(config, val)
+    same = (
+        replace(config, val_batch_size=7),  # no sample limit: batch size does not matter
+        replace(config, num_workers=3, val_every=5, lr=1e-3),
+    )
+    for changed in same:
+        assert validation_signature(changed, val) == reference
+    different = (
+        replace(config, val_max_batches=1),
+        replace(config, val_views=[ViewConfig("page", "page", (0.1, 0.1))]),
+        replace(config, val_select="docunet"),
+        replace(config, epe_reference_size=(1440, 1024)),
+    )
+    for changed in different:
+        assert validation_signature(changed, val) != reference
+    assert validation_signature(config, [{**val[0], "content_sha256": "c"}]) != reference
+    limited = replace(config, val_max_batches=1)
+    assert validation_signature(replace(limited, val_batch_size=1), val) != validation_signature(
+        limited, val
+    )
+    assert memory_stats(torch.device("cpu")) == {}
 
 
 def test_scaler_restore_and_strict_json_for_non_finite_values(tmp_path):
@@ -288,16 +336,20 @@ def test_losses_are_masked_by_node_validity_and_3d_availability():
     assert "loss_recon" in losses and torch.isfinite(losses["loss"])
 
 
-def test_cli_resolves_file_relative_paths(tmp_path, capsys):
+def test_cli_resolves_file_relative_paths_and_environment_variables(tmp_path, capsys, monkeypatch):
     _spec(tmp_path)
     config = _config(tmp_path).to_dict()
-    config.update(data_spec="spec.json", output_dir="runs/a")
+    config.update(data_spec="spec.json", output_dir="${FLATTENER_TEST_RUNS}/a")
     path = tmp_path / "cfg.json"
     path.write_text(json.dumps(config))
+    monkeypatch.setenv("FLATTENER_TEST_RUNS", str(tmp_path / "runs"))
     assert main(["--config", str(path), "--print-config", "--max-steps", "3"]) == 0
     printed = json.loads(capsys.readouterr().out)
     assert printed["data_spec"] == str(tmp_path / "spec.json")
-    assert printed["output_dir"] == str(tmp_path / "runs/a") and printed["max_steps"] == 3
+    assert printed["output_dir"] == str(tmp_path / "runs" / "a") and printed["max_steps"] == 3
+    monkeypatch.delenv("FLATTENER_TEST_RUNS")
+    with pytest.raises(FlattenerError, match="FLATTENER_TEST_RUNS"):
+        main(["--config", str(path), "--print-config"])
 
 
 @pytest.mark.training
@@ -308,13 +360,16 @@ def test_two_step_cpu_training_smoke_and_exact_resume(tmp_path):
     run = tmp_path / "run"
     assert json.loads((run / "status.json").read_text())["state"] == "stopped"
     log = [json.loads(line) for line in (run / "train_log.jsonl").read_text().splitlines()]
-    assert [r["kind"] for r in log] == ["train", "train", "val"]
+    assert [r["kind"] for r in log] == ["train", "train", "val", "val"]
+    assert [(r["view"], r["selected"]) for r in log[2:]] == [("page", True), ("docunet", False)]
     assert {r["track"] for r in log} == {"release"}
     with (run / "train_log.csv").open(newline="") as stream:
         assert {row["track"] for row in csv.DictReader(stream)} == {"release"}
     assert all(np.isfinite(r["loss"]) for r in log if r["kind"] == "train")
     checkpoint = load_checkpoint(first["checkpoint"])
     assert checkpoint["track"] == "release" and checkpoint["lineage"][0]["kind"] == "scratch"
+    assert set(checkpoint["metrics"]["views"]) == {"page", "docunet"}
+    assert checkpoint["best"]["signature"] == checkpoint["metrics"]["signature"]
     manifest = checkpoint["data_sources"]
     assert [s["license_classes"] for s in manifest["train"]] == [{"clean": 4}]
     assert [s["samples"] for s in manifest["val"]] == [2]
@@ -359,3 +414,31 @@ def test_example_configs_parse_and_respect_tracks():
         spec = DataSpec.load(examples / config.data_spec)
         require_track(spec, config.track)
         assert spec.track == config.track
+
+
+@pytest.mark.training
+def test_best_found_at_the_final_validation_is_saved(tmp_path):
+    _spec(tmp_path)
+    # The last step is saved by checkpoint_every before any validation; the closing
+    # validation then finds the first best, which must be saved and pointed to.
+    result = train(_config(tmp_path, val_every=0, checkpoint_every=4))
+    assert result["state"] == "completed" and result["best"]["step"] == 4
+    directory = tmp_path / "run/checkpoints"
+    best = json.loads((directory / "best.json").read_text())
+    assert best["file"] == "step_00000004.pt" and best["metrics"]["view"] == "page"
+    assert load_checkpoint(directory / best["file"])["best"]["step"] == 4
+
+
+@pytest.mark.training
+def test_resume_with_other_validation_settings_starts_a_new_best(tmp_path):
+    _spec(tmp_path)
+    first = train(_config(tmp_path, max_steps=2))
+    old = load_checkpoint(first["checkpoint"])["best"]
+    assert old["step"] == 2
+    same = train(_config(tmp_path, max_steps=3, val_every=1))
+    assert "best_reset" not in load_checkpoint(same["checkpoint"])["resumes"][-1]
+    resumed = train(_config(tmp_path, val_max_batches=1))
+    checkpoint = load_checkpoint(resumed["checkpoint"])
+    assert checkpoint["resumes"][-1]["best_reset"]["step"] in (2, 3)
+    assert checkpoint["best"]["step"] == 4 and checkpoint["best"]["samples"] == 2
+    assert checkpoint["best"]["signature"] != old["signature"]

@@ -1,12 +1,17 @@
 """Step-based dewarp trainer: ``python -m flattener.dewarp.train --config run.json``.
 
-AMP fp16 with GradScaler on CUDA, AdamW, warmup + cosine or UVDoc-style
-linear decay, gradient clipping, deterministic data order and augmentation
-(keys derive from the step, so resume replays the exact stream), periodic
-fp32 validation (grid endpoint error in pixels of a fixed reference size,
-default 712x488), and atomic checkpoints (see ``checkpoint``; every new best
-is saved). The DataLoader setup is safe under
-Windows spawn: top-level picklable datasets, no lambdas, ``__main__`` guard.
+AMP fp16 with GradScaler on CUDA, AdamW, warmup + cosine or UVDoc-style linear decay,
+gradient clipping, deterministic data order and augmentation (keys derive from the
+step, so resume replays the exact stream) and atomic checkpoints (see ``checkpoint``).
+Loader workers return uint8 images; float conversion and colour jitter run per batch
+on the training device. The DataLoader setup is Windows-spawn safe: top-level
+picklable datasets, no lambdas, ``__main__`` guard.
+
+Validation runs in fp32 over the ``val_views`` (see ``data.ViewConfig``), logs a grid
+endpoint error per view in pixels of ``epe_reference_size`` and picks the best
+checkpoint by ``val_select``. The best metric carries a signature of everything that
+defines validation; a resume with a different signature starts a new best. Every new
+best is saved.
 
 Loss (UVDoc ``train.py`` defaults): 5 * L1(2-D grid) + 5 * L1(3-D grid, only
 samples that have one) + optional reconstruction L1 (UVDoc: 1.0 from epoch 10
@@ -27,6 +32,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import csv
+import hashlib
 import json
 import math
 import os
@@ -44,6 +50,7 @@ from torch.nn import functional as F
 from ..contracts import FlattenerError, Status
 from .checkpoint import (
     CHECKPOINT_SCHEMA,
+    checkpoint_sha256,
     code_fingerprint,
     commit_checkpoint,
     environment,
@@ -54,7 +61,18 @@ from .checkpoint import (
     write_json,
 )
 from .coords import unwarp_torch
-from .data import TRACKS, AugmentConfig, DataSpec, DewarpDataset, build_dataset, require_track
+from .data import (
+    TRACKS,
+    AugmentConfig,
+    DataSpec,
+    DewarpDataset,
+    ViewConfig,
+    build_dataset,
+    canonical_json,
+    expand_path,
+    require_track,
+    to_float_images,
+)
 from .model import (
     UVDOC_WEIGHTS_SHA256,
     DewarpModelConfig,
@@ -81,15 +99,25 @@ RESUMABLE_CHANGES = frozenset(
         "log_every",
         "val_every",
         "val_max_batches",
+        "val_batch_size",
+        "val_views",
+        "val_select",
         "checkpoint_every",
         "keep_checkpoints",
     }
 )
 EPE_REFERENCE_SIZE = (712, 488)  # UVDoc input size (height, width)
+# "page": the page box with a fixed margin; "docunet": uneven 0-10% margins like
+# DocUNet crops, the input condition of ``predict`` on benchmark crops.
+DEFAULT_VIEWS = (
+    ViewConfig("page", "page", (0.025, 0.025)),
+    ViewConfig("docunet", "page", (0.0, 0.1)),
+)
 CSV_COLUMNS = (
     "kind",
     "track",
     "step",
+    "view",
     "lr",
     "loss",
     "loss_grid2d",
@@ -101,6 +129,8 @@ CSV_COLUMNS = (
     "images_per_sec",
     "data_fraction",
     "epe_px",
+    "max_memory_gib",
+    "max_reserved_gib",
 )
 
 
@@ -143,16 +173,30 @@ class TrainConfig:
     log_every: int = 50
     val_every: int = 2000
     val_max_batches: int | None = None
+    val_batch_size: int | None = None  # None: batch_size
+    val_views: tuple[ViewConfig, ...] = DEFAULT_VIEWS
+    val_select: str | None = None  # view that picks the best checkpoint; None: the first
     checkpoint_every: int = 2000
     keep_checkpoints: int = 2
-    # Validation EPE is reported in pixels of this fixed size (not the model
-    # input size) so low- and high-resolution runs stay comparable.
+    # Fixed pixel size for the validation EPE, so runs at any input size compare.
     epe_reference_size: tuple[int, int] = EPE_REFERENCE_SIZE
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "betas", tuple(self.betas))
         if isinstance(self.epe_reference_size, list):
             object.__setattr__(self, "epe_reference_size", tuple(self.epe_reference_size))
+        try:
+            views = tuple(
+                v if isinstance(v, ViewConfig) else ViewConfig.from_dict(v) for v in self.val_views
+            )
+        except (TypeError, ValueError) as error:
+            raise _error("invalid_config", f"val_views: {error}") from error
+        object.__setattr__(self, "val_views", views)
+        names = [view.name for view in views]
+        if not names or len(set(names)) != len(names):
+            raise _error("invalid_config", "val_views needs views with unique names")
+        if self.val_select is not None and self.val_select not in names:
+            raise _error("invalid_config", f"val_select must be one of {names}")
         if self.track not in TRACKS or self.schedule not in SCHEDULES or self.init not in INITS:
             raise _error("invalid_config", f"track {TRACKS}, schedule {SCHEDULES}, init {INITS}")
         if self.init != "scratch" and not self.init_path:
@@ -176,7 +220,7 @@ class TrainConfig:
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < low:
                 raise _error("invalid_config", f"{name} must be an integer >= {low}")
-        for name in ("max_steps", "val_max_batches"):
+        for name in ("max_steps", "val_max_batches", "val_batch_size"):
             value = getattr(self, name)
             if value is not None and (
                 isinstance(value, bool) or not isinstance(value, int) or value < 1
@@ -220,6 +264,8 @@ class TrainConfig:
             value = getattr(self, item.name)
             if hasattr(value, "to_dict"):
                 value = value.to_dict()
+            elif item.name == "val_views":
+                value = [view.to_dict() for view in value]
             result[item.name] = list(value) if isinstance(value, tuple) else value
         return result
 
@@ -238,6 +284,26 @@ class TrainConfig:
     @property
     def stop_step(self) -> int:
         return min(self.max_steps or self.total_steps, self.total_steps)
+
+    @property
+    def selected_view(self) -> str:
+        return self.val_select or self.val_views[0].name
+
+
+def validation_signature(config: TrainConfig, val_sources: list[dict[str, Any]]) -> str:
+    """sha256 of everything that defines a validation result: views, selection, sample
+    limit, reference size, model sizes and the validation data (ids and contents)."""
+    batch = config.val_batch_size or config.batch_size
+    body = {
+        "views": [view.to_dict() for view in config.val_views],
+        "select": config.selected_view,
+        "sample_limit": None if config.val_max_batches is None else config.val_max_batches * batch,
+        "epe_reference_size": list(config.epe_reference_size),
+        "input_size": list(config.model.input_size),
+        "grid_size": list(config.model.grid_size),
+        "data": val_sources,
+    }
+    return hashlib.sha256(canonical_json(body)).hexdigest()
 
 
 def learning_rate(config: TrainConfig, step: int) -> float:
@@ -299,11 +365,12 @@ def _loader(
     device: torch.device,
     workers: int,
     *,
+    batch_size: int,
     drop_last: bool,
 ) -> torch.utils.data.DataLoader:
     return torch.utils.data.DataLoader(
         dataset,
-        batch_size=config.batch_size,
+        batch_size=batch_size,
         sampler=sampler,
         num_workers=workers,
         pin_memory=config.pin_memory and device.type == "cuda",
@@ -356,45 +423,85 @@ def compute_losses(
 
 
 def _to_device(batch: dict[str, Any], device: torch.device) -> dict[str, Any]:
+    """Tensors to ``device``; noise seeds stay on the CPU (read as Python ints)."""
     return {
-        key: value.to(device, non_blocking=True) if isinstance(value, torch.Tensor) else value
+        key: value.to(device, non_blocking=True)
+        if isinstance(value, torch.Tensor) and key != "noise_seed"
+        else value
         for key, value in batch.items()
+    }
+
+
+MEMORY_KEYS = ("max_memory_gib", "max_reserved_gib", "device_used_gib")
+
+
+def memory_stats(device: torch.device) -> dict[str, float]:
+    """Peak allocated and reserved CUDA memory since start, and current device use (GiB)."""
+    if device.type != "cuda":
+        return {}
+    free, total = torch.cuda.mem_get_info(device)
+    return {
+        "max_memory_gib": torch.cuda.max_memory_allocated(device) / 2**30,
+        "max_reserved_gib": torch.cuda.max_memory_reserved(device) / 2**30,
+        "device_used_gib": (total - free) / 2**30,
     }
 
 
 @torch.no_grad()
 def validate(model: UVDocNet, loader, config: TrainConfig, device: torch.device) -> dict[str, Any]:
-    """Mean grid endpoint error in pixels of ``epe_reference_size``.
+    """Mean grid endpoint error per view in pixels of ``epe_reference_size``.
 
-    The forward runs in fp32 (like ``predict``), so fp16 output quantization
-    (~0.1 px at 712x488) does not enter the metric.
+    The forward runs in fp32 like ``predict``. The CUDA cache is emptied before and after,
+    so validation batches reuse the training memory; the memory figures include the
+    validation peak.
     """
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
     height, width = config.epe_reference_size
     scale = torch.tensor([width / 2.0, height / 2.0], device=device).view(1, 2, 1, 1)
+    names = [view.name for view in config.val_views]
+    sums: dict[str, dict[str, list[float]]] = {name: {} for name in names}
+    losses = dict.fromkeys(names, 0.0)
+    batches = samples = 0
     model.eval()
-    sums: dict[str, list[float]] = {}
-    loss_sum, batches = 0.0, 0
     for batch in loader:
         batch = _to_device(batch, device)
-        grid2d, _ = model(batch["image"])
-        loss_sum += float(_masked_l1(grid2d, batch["grid2d"], batch["valid"]))
-        error = torch.linalg.vector_norm((grid2d - batch["grid2d"]) * scale, dim=1)
-        valid = batch["valid"][:, 0]
-        for index, source in enumerate(batch["source"]):
-            entry = sums.setdefault(source, [0.0, 0.0])
-            entry[0] += float((error[index] * valid[index]).sum())
-            entry[1] += float(valid[index].sum())
+        for index, name in enumerate(names):
+            grid2d, _ = model(batch["image"][:, index].float().div_(255))
+            target, valid = batch["grid2d"][:, index], batch["valid"][:, index]
+            losses[name] += float(_masked_l1(grid2d, target, valid))
+            error = torch.linalg.vector_norm((grid2d - target) * scale, dim=1) * valid[:, 0]
+            totals = torch.stack([error.flatten(1).sum(1), valid.flatten(1).sum(1)], 1).tolist()
+            for source, (error_sum, count) in zip(batch["source"], totals, strict=True):
+                entry = sums[name].setdefault(source, [0.0, 0.0])
+                entry[0] += error_sum
+                entry[1] += count
         batches += 1
+        samples += len(batch["source"])
         if config.val_max_batches is not None and batches >= config.val_max_batches:
             break
     model.train()
-    total, count = sum(v[0] for v in sums.values()), sum(v[1] for v in sums.values())
+    memory = memory_stats(device)
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+    views = {}
+    for name in names:
+        total = sum(v[0] for v in sums[name].values())
+        count = sum(v[1] for v in sums[name].values())
+        views[name] = {
+            "epe_px": total / max(count, 1.0),
+            "loss_grid2d": losses[name] / max(batches, 1),
+            "per_source_epe_px": {k: v[0] / max(v[1], 1.0) for k, v in sorted(sums[name].items())},
+        }
+    selected = config.selected_view
     return {
-        "epe_px": total / max(count, 1.0),
-        "loss_grid2d": loss_sum / max(batches, 1),
-        "per_source_epe_px": {k: v[0] / max(v[1], 1.0) for k, v in sorted(sums.items())},
+        "epe_px": views[selected]["epe_px"],
+        "view": selected,
+        "views": views,
         "reference_size": [height, width],
         "batches": batches,
+        "samples": samples,
+        **memory,
     }
 
 
@@ -438,7 +545,7 @@ def _initialize(model: UVDocNet, config: TrainConfig) -> dict[str, Any]:
                 f"{config.init_path} has {lineage['sha256']}",
             )
         return lineage
-    parent = load_checkpoint(config.init_path)
+    parent = load_checkpoint(config.init_path)  # sha256 verified against its sidecar
     if config.track == "release" and parent.get("track") != "release":
         raise _error(
             "track_violation", f"release run cannot start from {parent.get('track')} weights"
@@ -450,6 +557,7 @@ def _initialize(model: UVDocNet, config: TrainConfig) -> dict[str, Any]:
     return {
         "kind": "checkpoint",
         "path": str(config.init_path),
+        "sha256": checkpoint_sha256(config.init_path),
         "step": parent["step"],
         "track": parent["track"],
         "data_spec_sha256": parent["data_spec_sha256"],
@@ -556,8 +664,11 @@ def train(config: TrainConfig, *, resume: str = "auto") -> dict[str, Any]:
         train_set = build_dataset(spec, split="train", train=True, **dataset_args)
         if train_set is None:
             raise _error("missing_data", "data spec has no train sources")
-        val_set = build_dataset(spec, split="val", train=False, **dataset_args)
+        val_set = build_dataset(
+            spec, split="val", train=False, views=config.val_views, **dataset_args
+        )
         data_sources = _data_sources(train_set, val_set)
+        signature = validation_signature(config, data_sources["val"])
 
         if resume == "auto":
             resume_path = latest_checkpoint(checkpoints)
@@ -587,6 +698,10 @@ def train(config: TrainConfig, *, resume: str = "auto") -> dict[str, Any]:
                 *payload.get("resumes", []),
                 {"step": step, "code_sha256": code["sha256"], "utc": utc_now()},
             ]
+            if best is not None and best.get("signature") != signature:
+                # Bests compare only under one validation signature.
+                resumes[-1]["best_reset"] = {"step": best.get("step"), "epe_px": best["epe_px"]}
+                best = None
         else:
             lineage = [
                 _initialize(model, config),
@@ -616,11 +731,26 @@ def train(config: TrainConfig, *, resume: str = "auto") -> dict[str, Any]:
         sampler = StepSampler(
             train_set.sizes, train_set.weights, config.seed, step * config.batch_size
         )
-        loader = _loader(train_set, config, sampler, device, config.num_workers, drop_last=True)
+        loader = _loader(
+            train_set,
+            config,
+            sampler,
+            device,
+            config.num_workers,
+            batch_size=config.batch_size,
+            drop_last=True,
+        )
         val_loader = None
         if val_set is not None:
-            workers = min(config.num_workers, 2)
-            val_loader = _loader(val_set, config, None, device, workers, drop_last=False)
+            val_loader = _loader(
+                val_set,
+                config,
+                None,
+                device,
+                min(config.num_workers, 2),
+                batch_size=config.val_batch_size or config.batch_size,
+                drop_last=False,
+            )
         log = _Logger(output, config.track)
         parameters = count_parameters(model)
         metrics: dict[str, Any] = {} if payload is None else dict(payload.get("metrics", {}))
@@ -669,9 +799,13 @@ def train(config: TrainConfig, *, resume: str = "auto") -> dict[str, Any]:
             nonlocal best, metrics, validated_step
             if val_loader is None or validated_step == step:
                 return False
-            metrics = validate(model, val_loader, config, device)
+            metrics = {**validate(model, val_loader, config, device), "signature": signature}
             validated_step = step
-            log({"kind": "val", "step": step, **metrics})
+            memory = {k: v for k, v in metrics.items() if k in MEMORY_KEYS}
+            for name, values in metrics["views"].items():
+                selected = name == metrics["view"]
+                record = {"kind": "val", "step": step, "view": name, "selected": selected}
+                log({**record, **values, "samples": metrics["samples"], **memory})
             epe = metrics["epe_px"]
             if math.isfinite(epe) and (best is None or epe < best["epe_px"]):
                 best = {"step": step, **metrics}
@@ -695,6 +829,7 @@ def train(config: TrainConfig, *, resume: str = "auto") -> dict[str, Any]:
             waited = time.perf_counter()
             batch = _to_device(next(iterator), device)
             window["data"] += time.perf_counter() - waited
+            batch["image"] = to_float_images(batch)  # colour jitter on the device
             lr = learning_rate(config, step)
             for group in optimizer.param_groups:
                 group["lr"] = lr
@@ -742,8 +877,7 @@ def train(config: TrainConfig, *, resume: str = "auto") -> dict[str, Any]:
                     "elapsed_sec": time.perf_counter() - started,
                     **{key: value / count for key, value in sums.items()},
                 }
-                if device.type == "cuda":
-                    record["max_memory_gib"] = torch.cuda.max_memory_allocated() / 2**30
+                record.update(memory_stats(device))
                 log(record)
                 status("running", last=record)
                 window = {"images": 0, "data": 0.0, "start": time.perf_counter()}
@@ -752,18 +886,20 @@ def train(config: TrainConfig, *, resume: str = "auto") -> dict[str, Any]:
             if improved or (config.checkpoint_every and step % config.checkpoint_every == 0):
                 save()  # every new best is saved, so best.json names existing weights
         if step > first_step:
-            run_validation()
-            if saved_step != step:
+            improved = run_validation()
+            if improved or saved_step != step:  # a best from this last validation is saved too
                 save()
         final = latest_checkpoint(checkpoints)
         state = "completed" if step >= config.total_steps else "stopped"
-        status(state, reason=stop_reason, checkpoint=str(final))
+        memory = memory_stats(device)
+        status(state, reason=stop_reason, checkpoint=str(final), memory=memory)
         return {
             "state": state,
             "step": step,
             "checkpoint": str(final),
             "metrics": metrics,
             "best": best,
+            "memory": memory,
             "seconds": time.perf_counter() - started,
         }
     except BaseException as error:
@@ -804,9 +940,12 @@ def main(argv: list[str] | None = None) -> int:
         for key, value in vars(args).items()
         if value is not None and key not in ("config", "resume", "print_config")
     }
-    for key in ("data_spec", "output_dir", "init_path"):  # file paths: relative to the file
-        if data.get(key) and key not in overrides and not Path(data[key]).is_absolute():
-            data[key] = str(path.resolve().parent / data[key])
+    for key in ("data_spec", "output_dir", "init_path"):  # ${VAR}s expand; relative to the file
+        if overrides.get(key):
+            overrides[key] = str(Path(expand_path(overrides[key])))
+        elif data.get(key):
+            value = Path(expand_path(data[key]))
+            data[key] = str(value if value.is_absolute() else path.resolve().parent / value)
     config = replace(TrainConfig.from_dict(data), **overrides)
     if args.print_config:
         print(json.dumps(config.to_dict(), indent=2))

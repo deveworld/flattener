@@ -1,5 +1,6 @@
-"""Dewarp data adapters, license tracks and seeded augmentation on tiny fixtures."""
+"""Dewarp data adapters, license tracks, views and seeded augmentation on tiny fixtures."""
 
+import hashlib
 import json
 import pickle
 
@@ -12,16 +13,23 @@ from PIL import Image
 from flattener import FlattenerError
 from flattener.dewarp.coords import flattener_to_syntheticdoc, pixels_to_flattener
 from flattener.dewarp.data import (
+    COLOR_PARAMS,
+    COMPACT_SCHEMA,
+    IDENTITY_COLOR,
     SAMPLE_SCHEMA,
     SPEC_SCHEMA,
     AugmentConfig,
     DataSpec,
     RawSample,
     SourceSpec,
+    ViewConfig,
+    apply_color_batch,
     apply_geometry,
     build_dataset,
+    draw_color_params,
     license_key,
     require_track,
+    to_float_images,
 )
 
 INPUT, GRID = (48, 36), (5, 4)
@@ -47,11 +55,12 @@ def _image(size, seed=0):
     return np.random.default_rng(seed).integers(0, 256, (*size, 3), dtype=np.uint8)
 
 
-def _write_converted(root, count=3, *, track="release", license_class="clean", manifest=True):
+def _write_converted(
+    root, count=3, *, track="release", license_class="clean", manifest=True, size=(60, 44)
+):
     root.mkdir(parents=True, exist_ok=True)
     entries = []
     for index in range(count):
-        size = (60, 44)
         Image.fromarray(_image(size, index)).save(root / f"s{index}.jpg", quality=95)
         values = _center_map(_page(size), (18, 12), size).astype(np.float16)
         np.save(root / f"s{index}.npy", values)
@@ -135,6 +144,16 @@ def _build(spec, track="research", split="train", train=False, augment=EVAL, **k
     )
 
 
+def _fills_crop(grid, tolerance):
+    """Page nodes span the crop up to ``tolerance`` (whole-pixel boxes snap outward)."""
+    return (
+        -1 - 1e-4 <= grid[0].min() < -1 + tolerance
+        and 1 - tolerance < grid[0].max() <= 1 + 1e-4
+        and -1 - 1e-4 <= grid[1].min() < -1 + tolerance
+        and 1 - tolerance < grid[1].max() <= 1 + 1e-4
+    )
+
+
 def test_converted_source_items_and_relative_spec_roots(tmp_path):
     _write_converted(tmp_path / "data/conv", manifest=False)
     source = {
@@ -149,16 +168,37 @@ def test_converted_source_items_and_relative_spec_roots(tmp_path):
     described = dataset.describe()[0]
     assert len(dataset) == 3 and described["samples"] == 3 and described["track"] == "release"
     assert described["license_classes"] == {"clean": 3} and len(described["records_sha256"]) == 64
-    item = dataset[1]
-    assert item["image"].shape == (3, *INPUT) and item["image"].dtype == torch.float32
-    assert item["grid2d"].shape == (2, *GRID) and item["valid"].shape == (1, *GRID)
+    item = dataset[1]  # evaluation items stack one entry per view
+    assert item["image"].shape == (1, 3, *INPUT) and item["image"].dtype == torch.uint8
+    assert item["grid2d"].shape == (1, 2, *GRID) and item["valid"].shape == (1, 1, *GRID)
     assert item["valid"].all() and not item["has_grid3d"]
     assert (item["track"], item["source"], item["sample_id"]) == ("release", "clean", "s1")
-    # With zero margin the page fills the crop: edge nodes reach +-1.
-    grid = item["grid2d"].numpy()
-    assert abs(grid[0].min() + 1) < 0.02 and abs(grid[1].max() - 1) < 0.02
+    assert _fills_crop(item["grid2d"][0].numpy(), 0.08)  # zero margin: the page fills the crop
     moved = DataSpec.from_dict(spec.to_dict(), base_dir="/elsewhere")
     assert moved.sha256 == spec.sha256
+
+
+def test_training_items_carry_uint8_images_and_color_parameters(tmp_path):
+    _write_converted(tmp_path / "conv")
+    source = {"name": "c", "kind": "converted", "root": str(tmp_path / "conv"), "track": "research"}
+    dataset = _build(_spec(tmp_path, [source]), train=True, augment=AugmentConfig())
+    item = dataset[(0, 5)]
+    assert item["image"].shape == (3, *INPUT) and item["image"].dtype == torch.uint8
+    assert item["color"].shape == (COLOR_PARAMS,) and item["noise_seed"].dtype == torch.int64
+    batch = torch.utils.data.default_collate([dataset[(i, i)] for i in range(3)])
+    images = to_float_images(batch)
+    assert images.dtype == torch.float32 and images.shape == (3, 3, *INPUT)
+    assert 0 <= float(images.min()) and float(images.max()) <= 1
+    plain = build_dataset(
+        _spec(tmp_path, [source], name="plain"),
+        track="research",
+        split="train",
+        input_size=INPUT,
+        grid_size=GRID,
+        augment=AugmentConfig(enabled=False),
+        train=True,
+    )[(0, 5)]
+    torch.testing.assert_close(plain["color"], torch.from_numpy(IDENTITY_COLOR))
 
 
 def test_raw_syntheticdoc_and_converted_conventions_agree(tmp_path):
@@ -247,6 +287,103 @@ def test_release_track_refuses_research_sources(tmp_path):
     assert [license_key(c) for c in ("CC BY-NC-SA 4.0", "cc0-1.0")] == ["by-nc-sa", "cc0"]
 
 
+def _write_compact(root, *, track="release", count=2):
+    """A tiny copy in the layout written by tools/syntheticdoc/compact.py."""
+    root.mkdir(parents=True)
+    (root / "compact.json").write_text(json.dumps({"schema": COMPACT_SCHEMA, "track": track}))
+    lines = []
+    size = (60, 44)
+    for index in range(count):
+        Image.fromarray(_image(size, index)).save(root / f"c{index}.jpg", quality=92)
+        stored = flattener_to_syntheticdoc(_center_map(_page(size), (18, 12), size), (120, 88))
+        np.save(root / f"c{index}.npy", stored.astype(np.float16))
+        entry = {
+            "schema": SAMPLE_SCHEMA,
+            "sample_id": f"c{index}",
+            "split": "train",
+            "image": f"c{index}.jpg",
+            "backward_map": f"c{index}.npy",
+            "backward_map_convention": "syntheticdoc",
+            "original_render_size": [120, 88],  # the copy is a half-size render
+            "track": track,
+            "license_class": "clean",
+        }
+        for key, name in (("image", f"c{index}.jpg"), ("backward_map", f"c{index}.npy")):
+            data = (root / name).read_bytes()
+            entry[f"{key}_sha256"] = hashlib.sha256(data).hexdigest()
+            entry[f"{key}_bytes"] = len(data)
+        lines.append(json.dumps(entry) + "\n")
+    (root / "manifest.jsonl").write_text("".join(lines))
+
+
+def test_compact_source_checks_hashes_sizes_and_track(tmp_path):
+    _write_compact(tmp_path / "compact")
+    source = {
+        "name": "sd",
+        "kind": "syntheticdoc_compact",
+        "root": str(tmp_path / "compact"),
+        "track": "release",
+        "license": "SyntheticDoc CC BY 4.0, clean",
+    }
+    spec = _spec(tmp_path, [source], track="release")
+    dataset = _build(spec, track="release")
+    assert len(dataset) == 2 and _fills_crop(dataset[0]["grid2d"][0].numpy(), 0.08)
+    digest = dataset.describe()[0]["content_sha256"]
+    # A re-encoded file under the same id changes the content digest (resume refuses).
+    manifest = tmp_path / "compact/manifest.jsonl"
+    entries = [json.loads(line) for line in manifest.read_text().splitlines()]
+    entries[0]["image_sha256"] = "0" * 64
+    manifest.write_text("".join(json.dumps(e) + "\n" for e in entries))
+    assert _build(spec, track="release").describe()[0]["content_sha256"] != digest
+    # A file that no longer matches the manifest size is refused before training.
+    Image.fromarray(_image((60, 44), 9)).save(tmp_path / "compact/c1.jpg", quality=50)
+    with pytest.raises(FlattenerError) as error:
+        _build(spec, track="release")
+    assert error.value.reason_code == "stale_manifest"
+    del entries[1]["image_sha256"]
+    manifest.write_text("".join(json.dumps(e) + "\n" for e in entries))
+    with pytest.raises(FlattenerError, match="sha256"):
+        _build(spec, track="release")
+    _write_compact(tmp_path / "research", track="research")
+    leaky = {**source, "name": "r", "root": str(tmp_path / "research")}
+    with pytest.raises(FlattenerError) as error:
+        _build(_spec(tmp_path, [leaky], track="release", name="r"), track="release")
+    assert error.value.reason_code == "track_violation"
+
+
+def test_content_digest_follows_file_sizes_without_manifest_hashes(tmp_path):
+    _write_converted(tmp_path / "conv", count=2)
+    source = {"name": "c", "kind": "converted", "root": str(tmp_path / "conv"), "track": "research"}
+    spec = _spec(tmp_path, [source])
+    before = _build(spec).describe()[0]
+    Image.fromarray(_image((60, 44), 0)).save(tmp_path / "conv/s0.jpg", quality=40)
+    after = _build(spec).describe()[0]
+    assert after["records_sha256"] == before["records_sha256"]
+    assert after["content_sha256"] != before["content_sha256"]
+    (tmp_path / "conv/s1.npy").unlink()
+    with pytest.raises(FlattenerError) as error:
+        _build(spec)
+    assert error.value.reason_code == "missing_data"
+
+
+def test_spec_roots_expand_environment_variables(tmp_path, monkeypatch):
+    _write_converted(tmp_path / "data/conv", count=1)
+    source = {
+        "name": "c",
+        "kind": "converted",
+        "root": "${FLATTENER_TEST_DATA}/conv",
+        "track": "research",
+    }
+    spec = _spec(tmp_path, [source])
+    monkeypatch.delenv("FLATTENER_TEST_DATA", raising=False)
+    with pytest.raises(FlattenerError) as error:
+        _build(spec)
+    assert error.value.reason_code == "unset_variable"
+    monkeypatch.setenv("FLATTENER_TEST_DATA", str(tmp_path / "data"))
+    assert len(_build(spec)) == 1
+    assert spec.to_dict()["sources"][0]["root"] == "${FLATTENER_TEST_DATA}/conv"
+
+
 def test_doc3d_and_uvdoc_adapters_follow_upstream_layouts(tmp_path):
     _write_doc3d(tmp_path / "doc3d")
     _write_uvdoc(tmp_path / "uvdoc")
@@ -271,8 +408,7 @@ def test_doc3d_and_uvdoc_adapters_follow_upstream_layouts(tmp_path):
     doc3d, uvdoc = dataset[0], dataset[1]
     for item in (doc3d, uvdoc):
         assert item["has_grid3d"] and item["valid"].all() and item["grid3d"].shape == (3, *GRID)
-        grid = item["grid2d"].numpy()  # page fills the zero-margin crop
-        assert abs(grid[0].min() + 1) < 1e-4 and abs(grid[1].max() - 1) < 1e-4
+        assert _fills_crop(item["grid2d"][0].numpy(), 0.06)
     torch.testing.assert_close(doc3d["grid3d"][0], torch.ones(GRID))
     expected = torch.tensor([0.0, 0.5, 0.9, 1.0]).expand(GRID)
     torch.testing.assert_close(doc3d["grid3d"][1], expected, atol=1e-6, rtol=0)
@@ -295,38 +431,115 @@ def test_matlab_v73_grids_are_read_with_h5py(tmp_path):
     assert _build(spec)[0]["valid"].all()
 
 
-def test_geometry_keeps_image_and_grid_consistent_under_rotation():
-    size = 256
-    ramp = np.arange(size, dtype=np.uint8)
-    image = np.stack(
-        [
-            np.tile(ramp, (size, 1)),
-            np.tile(ramp[:, None], (1, size)),
-            np.zeros((size, size), np.uint8),
-        ],
+def _ramp(size, slope):
+    ramp = (np.arange(size) * slope).astype(np.uint8)
+    return np.stack(
+        [np.tile(ramp, (size, 1)), np.tile(ramp[:, None], (1, size)), np.zeros((size,) * 2)],
         axis=-1,
-    )
+    ).astype(np.uint8)
+
+
+def test_geometry_keeps_image_and_grid_consistent_under_rotation():
+    size, slope = 64, 3.0  # ramp values = slope * pixel index
     page = _page((size, size), corner=(0.25, 0.2), extent=(0.45, 0.5))
     grid = pixels_to_flattener(_grid_pixels(page, (9, 7)), (size, size))
-    sample = RawSample(image, grid, np.ones((9, 7), bool), None)
+    sample = RawSample(_ramp(size, slope), grid, np.ones((9, 7), bool), None)
     augment = AugmentConfig(margin=(0.05, 0.1), rotation_deg=25.0, rotation_prob=1.0)
     for seed in range(4):
         rng = np.random.default_rng(seed)
         output, target = apply_geometry(sample, (120, 90), augment, rng)
+        assert output.dtype == torch.uint8 and output.shape == (3, 120, 90)
         points = torch.from_numpy(target).unsqueeze(0)
-        sampled = F.grid_sample(output[None], points, align_corners=False)[0, :2].numpy()
-        expected = ((grid + 1) / 2 * size - 0.5).transpose(2, 0, 1) / 255
-        assert np.abs(sampled - expected).max() < 2e-3
+        sampled = F.grid_sample(output[None].double(), points.double(), align_corners=False)
+        expected = ((grid + 1) / 2 * size - 0.5).transpose(2, 0, 1) * slope
+        # uint8 truncation costs at most one level; a 0.1 px shift would add 0.3.
+        assert np.abs(sampled[0, :2].numpy() - expected + 0.5).max() < 0.8
     # rotation_kinds: upstream rotates UVDoc samples only.
     only_uvdoc = AugmentConfig(
         margin=(0.05, 0.1), rotation_deg=25.0, rotation_prob=1.0, rotation_kinds=["uvdoc"]
     )
     unrotated = AugmentConfig(margin=(0.05, 0.1), rotation_deg=0.0)
     for kind, rotated in (("converted", False), ("uvdoc", True)):
-        tagged = RawSample(image, grid, np.ones((9, 7), bool), None, {"kind": kind})
+        tagged = RawSample(sample.image, grid, np.ones((9, 7), bool), None, {"kind": kind})
         a = apply_geometry(tagged, (120, 90), only_uvdoc, np.random.default_rng(3))[1]
         b = apply_geometry(tagged, (120, 90), unrotated, np.random.default_rng(3))[1]
         assert np.array_equal(a, b) != rotated
+
+
+def test_jpeg_draft_decodes_less_and_keeps_the_geometry(tmp_path):
+    size = 256
+    Image.fromarray(_ramp(size, 1.0)).save(tmp_path / "ramp.jpg", quality=98)
+    page = _page((size, size), corner=(0.1, 0.1), extent=(0.8, 0.8))
+    grid = pixels_to_flattener(_grid_pixels(page, (5, 4)), (size, size))
+    outputs = {}
+    for draft in (False, True):
+        sample = RawSample(Image.open(tmp_path / "ramp.jpg"), grid, np.ones((5, 4), bool), None)
+        augment = AugmentConfig(full_frame_prob=1.0, jpeg_draft=draft)
+        outputs[draft] = apply_geometry(sample, (48, 36), augment, np.random.default_rng(0))
+        decoded = sample.image.size
+        sample.image.close()
+    assert decoded == (64, 64)  # 256 px -> 48 px output: 1/4 DCT scale
+    np.testing.assert_array_equal(outputs[True][1], outputs[False][1])
+    difference = outputs[True][0].double() - outputs[False][0].double()
+    assert difference.abs().mean() < 2.0  # same ramp values, no half-pixel shift
+
+
+def test_evaluation_views_resize_whole_pixel_crops_like_predict(tmp_path):
+    _write_converted(tmp_path / "conv", count=2, size=(120, 88))
+    source = {"name": "c", "kind": "converted", "root": str(tmp_path / "conv"), "track": "research"}
+    spec = _spec(tmp_path, [source])
+    views = (
+        ViewConfig("page", "page", (0.0, 0.0)),
+        ViewConfig("docunet", "page", (0.0, 0.1)),
+        ViewConfig("frame", "full_frame"),
+    )
+    item = _build(spec, views=views)[1]
+    assert item["image"].shape == (3, 3, *INPUT) and item["grid2d"].shape == (3, 2, *GRID)
+    again = build_dataset(
+        spec,
+        track="research",
+        split="train",
+        input_size=INPUT,
+        grid_size=GRID,
+        augment=AugmentConfig(margin=(0.2, 0.3)),
+        seed=99,
+        train=False,
+        views=views,
+    )[1]
+    assert torch.equal(again["image"], item["image"])  # views ignore the run seed and augment
+    assert not torch.equal(item["grid2d"][0], item["grid2d"][1])
+    # The full-frame view is exactly predict's input: the whole image resized.
+    source_image = torch.from_numpy(np.array(Image.open(tmp_path / "conv/s1.jpg")))
+    reference = F.interpolate(
+        source_image.permute(2, 0, 1)[None].double(),
+        size=INPUT,
+        mode="bilinear",
+        align_corners=False,
+        antialias=False,
+    )[0]
+    difference = item["image"][2].double() - reference
+    assert difference.abs().max() < 1 + 1e-6 and -0.7 < difference.mean() < 0  # PIL truncates
+    grid = item["grid2d"][2].numpy()  # page nodes relative to the whole image
+    assert grid[0].min() > -1 and grid[0].max() < 1
+
+
+def test_color_jitter_runs_per_batch_and_matches_per_sample(tmp_path):
+    augment = AugmentConfig(color_prob=1.0, grayscale_prob=0.3, blur_prob=0.5, noise_prob=0.7)
+    draws = [draw_color_params(augment, np.random.default_rng([3, i])) for i in range(6)]
+    params = torch.from_numpy(np.stack([p for p, _ in draws]))
+    seeds = torch.tensor([s for _, s in draws])
+    assert params[:, 9].any() and params[:, 11].any()  # blur and noise both occur
+    images = torch.rand(6, 3, 20, 16)
+    batch = apply_color_batch(images.clone(), params, seeds)
+    for index in range(6):
+        single = apply_color_batch(
+            images[index : index + 1].clone(), params[index : index + 1], seeds[index : index + 1]
+        )
+        torch.testing.assert_close(batch[index : index + 1], single, atol=1e-6, rtol=0)
+    torch.testing.assert_close(apply_color_batch(images.clone(), params, seeds), batch)
+    identity = torch.from_numpy(np.tile(IDENTITY_COLOR, (6, 1)))
+    torch.testing.assert_close(apply_color_batch(images.clone(), identity, [0] * 6), images)
+    assert 0 <= float(batch.min()) and float(batch.max()) <= 1
 
 
 def test_augmentation_is_seeded_by_position_and_dataset_pickles(tmp_path):
@@ -347,16 +560,17 @@ def test_augmentation_is_seeded_by_position_and_dataset_pickles(tmp_path):
     augment = AugmentConfig(rotation_deg=10.0, full_frame_prob=0.3, blur_prob=0.5)
     dataset = _build(spec, track="release", train=True, augment=augment)
     first, again, other = dataset[(1, 42)], dataset[(1, 42)], dataset[(1, 43)]
-    assert torch.equal(first["image"], again["image"])
-    assert torch.equal(first["grid2d"], again["grid2d"])
+    for key in ("image", "grid2d", "color", "noise_seed"):
+        assert torch.equal(first[key], again[key]), key
     assert not torch.equal(first["image"], other["image"])
+    assert not torch.equal(first["color"], other["color"])
     clone = pickle.loads(pickle.dumps(dataset))
     assert torch.equal(clone[(1, 42)]["image"], first["image"])
     evaluation = _build(spec, track="release", train=False, augment=augment)
     assert torch.equal(evaluation[(1, 1)]["image"], evaluation[(1, 2)]["image"])
 
 
-def test_spec_and_augment_validation(tmp_path):
+def test_spec_view_and_augment_validation(tmp_path):
     with pytest.raises(FlattenerError):
         DataSpec.from_dict({"schema": "other", "name": "x", "track": "research", "sources": []})
     with pytest.raises(FlattenerError, match="bad source"):
@@ -381,9 +595,17 @@ def test_spec_and_augment_validation(tmp_path):
         {"blur_prob": 1.5},
         {"rotation_deg": 90.0},
         {"rotation_kinds": ["doc4d"]},
+        {"jpeg_draft": 1},
     ):
         with pytest.raises(ValueError):
             AugmentConfig(**bad)
+    view = ViewConfig("docunet", "page", [0.0, 0.1])
+    assert ViewConfig.from_dict(view.to_dict()) == view
+    for bad in ({"name": ""}, {"name": "a", "crop": "tight"}, {"name": "a", "margin": (0.3, 0.1)}):
+        with pytest.raises(ValueError):
+            ViewConfig(**bad)
+    with pytest.raises(ValueError):
+        ViewConfig.from_dict({"name": "a", "seed": 1})
     _write_converted(tmp_path / "conv", count=5)
     limited = _spec(
         tmp_path,
@@ -400,3 +622,5 @@ def test_spec_and_augment_validation(tmp_path):
     )
     assert [item["sample_id"] for item in _build(limited)] == ["s0", "s4"]
     assert _build(limited, split="val") is None
+    with pytest.raises(FlattenerError, match="unique"):
+        _build(limited, views=(ViewConfig("a"), ViewConfig("a")))
