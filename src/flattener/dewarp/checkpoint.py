@@ -5,7 +5,9 @@ A checkpoint ``step_XXXXXXXX.pt`` holds tensors and plain Python data only
 every non-state field (track, configs, data spec hash, code hash, lineage,
 metrics) plus the file's sha256. ``latest.json`` is replaced only after a
 checkpoint and its sidecar are durable, so resume always finds a complete
-checkpoint.
+checkpoint. ``best.json`` names the best validation of the current validation
+signature; a resume under another signature moves it to
+``best_before_step_XXXXXXXX.json``. Pruning keeps every checkpoint a pointer names.
 """
 
 from __future__ import annotations
@@ -170,12 +172,27 @@ def commit_checkpoint(
     if is_best:
         write_json(directory / "best.json", {**pointer, "metrics": payload.get("metrics", {})})
     protected = {path.name}
-    for name in ("latest.json", "best.json"):
-        if (directory / name).is_file():
-            protected.add(json.loads((directory / name).read_text(encoding="utf-8"))["file"])
+    for pointer in (directory / "latest.json", *sorted(directory.glob("best*.json"))):
+        if pointer.is_file():
+            protected.add(json.loads(pointer.read_text(encoding="utf-8"))["file"])
     steps = sorted(directory.glob("step_*.pt"))
     for old in steps[: max(0, len(steps) - max(1, keep))]:
         if old.name not in protected:
             old.unlink(missing_ok=True)
             sidecar_path(old).unlink(missing_ok=True)
     return path
+
+
+def retire_best(directory: str | Path, step: int, note: dict[str, Any]) -> Path | None:
+    """Move ``best.json`` to ``best_before_step_<step>.json`` with ``note`` (why it was
+    dropped) when a resume starts a new best; return the new path, or ``None`` when
+    there was no ``best.json``."""
+    directory = Path(directory)
+    pointer = directory / "best.json"
+    if not pointer.is_file():
+        return None
+    retired = directory / f"best_before_step_{int(step):08d}.json"
+    record = json.loads(pointer.read_text(encoding="utf-8"))
+    write_json(retired, {**record, "retired": note})
+    pointer.unlink()
+    return retired

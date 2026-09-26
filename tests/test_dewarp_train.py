@@ -16,6 +16,7 @@ from flattener.dewarp.checkpoint import (
     commit_checkpoint,
     latest_checkpoint,
     load_checkpoint,
+    retire_best,
     save_checkpoint,
     write_json,
 )
@@ -218,6 +219,22 @@ def test_checkpoint_commit_verify_prune_and_tamper_detection(tmp_path):
     assert error.value.reason_code == "checksum_mismatch"
     with pytest.raises(FlattenerError, match="schema"):
         save_checkpoint(tmp_path / "x.pt", {"step": 1})
+
+
+def test_a_retired_best_keeps_its_checkpoint(tmp_path):
+    directory = tmp_path / "checkpoints"
+    commit_checkpoint(directory, _payload(1), keep=1, is_best=True)
+    retired = retire_best(directory, 1, {"reason": "validation signature changed"})
+    assert retired == directory / "best_before_step_00000001.json"
+    assert not (directory / "best.json").exists()
+    assert json.loads(retired.read_text())["retired"]["reason"] == "validation signature changed"
+    for step in (2, 3):
+        commit_checkpoint(directory, _payload(step), keep=1, is_best=False)
+    assert sorted(path.name for path in directory.glob("*.pt")) == [
+        "step_00000001.pt",
+        "step_00000003.pt",
+    ]
+    assert retire_best(directory, 3, {}) is None
 
 
 def test_resume_compatibility_and_initialization_lineage(tmp_path):
@@ -494,3 +511,9 @@ def test_resume_with_other_validation_settings_starts_a_new_best(tmp_path):
     assert checkpoint["resumes"][-1]["best_reset"]["step"] in (2, 3)
     assert checkpoint["best"]["step"] == 4 and checkpoint["best"]["samples"] == 2
     assert checkpoint["best"]["signature"] != old["signature"]
+    directory = tmp_path / "run/checkpoints"  # the old best.json moved aside at the resume
+    retired = json.loads((directory / "best_before_step_00000003.json").read_text())
+    assert retired["step"] == checkpoint["resumes"][-1]["best_reset"]["step"]
+    assert retired["retired"] == {"resumed_step": 3, "reason": "validation signature changed"}
+    assert (directory / retired["file"]).is_file()
+    assert json.loads((directory / "best.json").read_text())["step"] == 4

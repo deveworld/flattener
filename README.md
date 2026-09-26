@@ -56,7 +56,7 @@ python -m flattener.dewarp.predict --weights CKPT docunet --input-dir crop --out
 
 검증은 화면 종류별로 EPE를 따로 기록합니다. 기본 화면은 페이지에 꼭 맞춘 크롭(`page`), DocUNet처럼 여백을 둔 크롭(`docunet`), 사진 전체(`full_frame`), 크롭을 ±90° 돌린 화면(`rot90`, `rot270`), 무늬 있는 캔버스의 10–25%만 차지하는 작은 페이지(`small_page`)입니다. 최고 체크포인트는 `val_select`로 정한 화면 하나로 고르며, 정하지 않으면 첫 화면(`page`)을 씁니다. 정답 격자에 유효한 점이 하나도 없는 샘플은 평균에서 빼고 `not_evaluable`로 셉니다.
 
-`--print-config`는 최종 설정만 출력하고 끝냅니다. 학습은 출력 폴더의 마지막 체크포인트에서 이어 가고(`--resume auto`), 체크포인트는 `RUN/checkpoints/step_*.pt`에 쌓입니다. 가장 좋은 검증 결과는 `best.json`이 가리킵니다. `--weights`에는 UVDoc 공개 가중치 `best_model.pkl`도 넣을 수 있습니다.
+`--print-config`는 최종 설정만 출력하고 끝냅니다. 학습은 출력 폴더의 마지막 체크포인트에서 이어 가고(`--resume auto`), 체크포인트는 `RUN/checkpoints/step_*.pt`에 쌓입니다. 가장 좋은 검증 결과는 `best.json`이 가리킵니다. 검증 설정이 바뀐 채로 이어 가면 이전 `best.json`은 `best_before_step_*.json`으로 옮겨지고 새 기준으로 다시 고릅니다. `--weights`에는 UVDoc 공개 가중치 `best_model.pkl`도 넣을 수 있습니다.
 
 - `release` 트랙은 이용 조건이 확인된 데이터만 받습니다. 배포 대상은 이 트랙의 가중치입니다.
 - `research` 트랙은 Doc3D·UVDoc 데이터셋처럼 비상업 조건이 붙은 자료로 학습하며, 가중치는 로컬 비교에만 씁니다.

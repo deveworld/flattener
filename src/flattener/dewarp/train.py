@@ -62,6 +62,7 @@ from .checkpoint import (
     json_safe,
     latest_checkpoint,
     load_checkpoint,
+    retire_best,
     utc_now,
     write_json,
 )
@@ -802,6 +803,8 @@ def train(config: TrainConfig, *, resume: str = "auto") -> dict[str, Any]:
             best, dropped = carry_best(best, signature)
             if dropped is not None:
                 resumes[-1]["best_reset"] = dropped
+                note = {"resumed_step": step, "reason": "validation signature changed"}
+                retire_best(checkpoints, step, note)
         else:
             lineage = [
                 _initialize(model, config),
