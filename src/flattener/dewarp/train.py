@@ -80,6 +80,7 @@ from .model import (
     count_parameters,
     load_uvdoc_weights,
 )
+from .predict import ieee_float32
 
 SCHEDULES = ("cosine", "linear_decay", "constant")
 INITS = ("scratch", "uvdoc", "checkpoint")
@@ -451,9 +452,9 @@ def memory_stats(device: torch.device) -> dict[str, float]:
 def validate(model: UVDocNet, loader, config: TrainConfig, device: torch.device) -> dict[str, Any]:
     """Mean grid endpoint error per view in pixels of ``epe_reference_size``.
 
-    The forward runs in fp32 like ``predict``. The CUDA cache is emptied before and after,
-    so validation batches reuse the training memory; the memory figures include the
-    validation peak.
+    The forward runs in fp32 without TF32, like ``predict``. The CUDA cache is emptied
+    before and after, so validation batches reuse the training memory; the memory figures
+    include the validation peak.
     """
     if device.type == "cuda":
         torch.cuda.empty_cache()
@@ -464,22 +465,23 @@ def validate(model: UVDocNet, loader, config: TrainConfig, device: torch.device)
     losses = dict.fromkeys(names, 0.0)
     batches = samples = 0
     model.eval()
-    for batch in loader:
-        batch = _to_device(batch, device)
-        for index, name in enumerate(names):
-            grid2d, _ = model(batch["image"][:, index].float().div_(255))
-            target, valid = batch["grid2d"][:, index], batch["valid"][:, index]
-            losses[name] += float(_masked_l1(grid2d, target, valid))
-            error = torch.linalg.vector_norm((grid2d - target) * scale, dim=1) * valid[:, 0]
-            totals = torch.stack([error.flatten(1).sum(1), valid.flatten(1).sum(1)], 1).tolist()
-            for source, (error_sum, count) in zip(batch["source"], totals, strict=True):
-                entry = sums[name].setdefault(source, [0.0, 0.0])
-                entry[0] += error_sum
-                entry[1] += count
-        batches += 1
-        samples += len(batch["source"])
-        if config.val_max_batches is not None and batches >= config.val_max_batches:
-            break
+    with ieee_float32():
+        for batch in loader:
+            batch = _to_device(batch, device)
+            for index, name in enumerate(names):
+                grid2d, _ = model(batch["image"][:, index].float().div_(255))
+                target, valid = batch["grid2d"][:, index], batch["valid"][:, index]
+                losses[name] += float(_masked_l1(grid2d, target, valid))
+                error = torch.linalg.vector_norm((grid2d - target) * scale, dim=1) * valid[:, 0]
+                totals = torch.stack([error.flatten(1).sum(1), valid.flatten(1).sum(1)], 1)
+                for source, (error_sum, count) in zip(batch["source"], totals.tolist()):
+                    entry = sums[name].setdefault(source, [0.0, 0.0])
+                    entry[0] += error_sum
+                    entry[1] += count
+            batches += 1
+            samples += len(batch["source"])
+            if config.val_max_batches is not None and batches >= config.val_max_batches:
+                break
     model.train()
     memory = memory_stats(device)
     if device.type == "cuda":

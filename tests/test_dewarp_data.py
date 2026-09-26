@@ -624,3 +624,14 @@ def test_spec_view_and_augment_validation(tmp_path):
     assert _build(limited, split="val") is None
     with pytest.raises(FlattenerError, match="unique"):
         _build(limited, views=(ViewConfig("a"), ViewConfig("a")))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+def test_color_jitter_on_cuda_matches_the_cpu():
+    augment = AugmentConfig(color_prob=1.0, grayscale_prob=0.3, blur_prob=0.5, noise_prob=0.0)
+    draws = [draw_color_params(augment, np.random.default_rng([4, i])) for i in range(8)]
+    params = torch.from_numpy(np.stack([p for p, _ in draws]))
+    images = torch.rand(8, 3, 40, 32)
+    cpu = apply_color_batch(images.clone(), params, [0] * 8)
+    cuda = apply_color_batch(images.cuda(), params.cuda(), [0] * 8).cpu()
+    torch.testing.assert_close(cuda, cpu, atol=1e-5, rtol=0)

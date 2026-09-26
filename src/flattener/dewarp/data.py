@@ -463,7 +463,7 @@ class _Source:
             missing = [path for path, size in zip(files, found, strict=True) if size is None]
             if missing:
                 raise _error("missing_data", f"source {self.spec.name!r}: missing {missing[:3]}")
-            expected = record.get("bytes")
+            expected = record.pop("bytes", None)  # checked here, then dropped
             if expected is not None and tuple(found) != tuple(expected):
                 raise _error(
                     "stale_manifest",
