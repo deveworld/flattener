@@ -24,7 +24,11 @@
   "val_batch_size": 16,
   "val_views": [
     {"name": "page", "crop": "page", "margin": [0.04, 0.04]},
-    {"name": "docunet", "crop": "page", "margin": [0.02, 0.1]}
+    {"name": "docunet", "crop": "page", "margin": [0.02, 0.1]},
+    {"name": "full_frame", "crop": "full_frame"},
+    {"name": "rot90", "crop": "page", "margin": [0.02, 0.1], "rotation": 90},
+    {"name": "rot270", "crop": "page", "margin": [0.02, 0.1], "rotation": 270},
+    {"name": "small_page", "crop": "small_page", "margin": [0.02, 0.1], "page_fraction": [0.1, 0.25]}
   ],
   "val_select": "docunet",
   "checkpoint_every": 2500

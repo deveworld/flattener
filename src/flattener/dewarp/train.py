@@ -7,9 +7,12 @@ Loader workers return uint8 images; float conversion and colour jitter run per b
 on the training device. The DataLoader setup is Windows-spawn safe: top-level
 picklable datasets, no lambdas, ``__main__`` guard.
 
-Validation runs in fp32 over the ``val_views`` (see ``data.ViewConfig``), logs a grid
-endpoint error per view in pixels of ``epe_reference_size`` and picks the best
-checkpoint by ``val_select``. Samples without a valid target node are counted as
+Validation runs in fp32 over the ``val_views`` (see ``data.ViewConfig`` and
+``DEFAULT_VIEWS``: tight and DocUNet-like page crops, the full frame, quarter turns and a
+small page on a canvas) and logs a grid endpoint error per view in pixels of
+``epe_reference_size``. One view picks the best checkpoint: ``val_select``, or the
+first view (``page`` by default); the others are logged only, and the best records
+which view chose it. Samples without a valid target node are counted as
 ``not_evaluable`` and left out; a validation with nothing to evaluate picks no best.
 The best metric carries a signature of everything that defines validation; a resume
 with a different signature starts a new best. Every new best is saved.
@@ -109,11 +112,19 @@ RESUMABLE_CHANGES = frozenset(
     }
 )
 EPE_REFERENCE_SIZE = (712, 488)  # UVDoc input size (height, width)
-# "page": the page box with a fixed margin; "docunet": uneven 2-10% margins like
-# DocUNet crops, the input condition of ``predict`` on benchmark crops.
+# "page": the page box with a fixed margin (the primary view unless val_select says
+# otherwise); "docunet": uneven 2-10% margins like DocUNet crops, the input condition of
+# ``predict`` on benchmark crops; "full_frame": the whole image with its background;
+# "rot90"/"rot270": the docunet crop turned a quarter counter-clockwise/clockwise;
+# "small_page": the docunet crop shrunk to 10-25% of a textured canvas.
+DOCUNET_MARGIN = (0.02, 0.1)
 DEFAULT_VIEWS = (
     ViewConfig("page", "page", (0.025, 0.025)),
-    ViewConfig("docunet", "page", (0.02, 0.1)),
+    ViewConfig("docunet", "page", DOCUNET_MARGIN),
+    ViewConfig("full_frame", "full_frame"),
+    ViewConfig("rot90", "page", DOCUNET_MARGIN, rotation=90),
+    ViewConfig("rot270", "page", DOCUNET_MARGIN, rotation=270),
+    ViewConfig("small_page", "small_page", DOCUNET_MARGIN),
 )
 CSV_COLUMNS = (
     "kind",

@@ -120,7 +120,13 @@ COMPACT_SETTINGS_KEYS = (
     "resample",
     "backward_map",
 )
-VIEW_CROPS = ("page", "full_frame")
+VIEW_CROPS = ("page", "full_frame", "small_page")
+VIEW_ROTATIONS = (0, 90, 180, 270)  # counter-clockwise degrees
+_TURNS = {
+    90: Image.Transpose.ROTATE_90,
+    180: Image.Transpose.ROTATE_180,
+    270: Image.Transpose.ROTATE_270,
+}
 # ``color`` item layout: on, brightness, contrast, saturation, gain r/g/b, gamma,
 # grayscale, blur on, blur sigma, noise on, noise std.
 COLOR_PARAMS = 13
@@ -345,34 +351,53 @@ class ViewConfig:
     as fractions of the page extent, drawn from ``margin`` by a generator keyed by the
     view name and the sample (fixed when low == high). The box snaps outward to whole
     pixels and is clipped to the image, like a saved crop file. ``full_frame`` uses the
-    whole image. The crop is resampled bilinearly without antialiasing (values within
-    one level of ``predict``'s float resize).
+    whole image. ``small_page`` takes the ``page`` crop and shrinks it onto a plain
+    textured canvas of the model input size, covering a seeded ``page_fraction`` of its
+    area at a seeded position. ``rotation`` turns the crop counter-clockwise by 90, 180
+    or 270 degrees before resizing; the target values turn with it, so the model has to
+    return the upright page. Crops are resampled bilinearly without antialiasing
+    (values within one level of ``predict``'s float resize).
     """
 
     name: str
     crop: str = "page"
     margin: tuple[float, float] = (0.025, 0.025)
+    rotation: int = 0
+    page_fraction: tuple[float, float] = (0.1, 0.25)
 
     def __post_init__(self) -> None:
-        margin = tuple(self.margin)
+        margin, fraction = tuple(self.margin), tuple(self.page_fraction)
         object.__setattr__(self, "margin", margin)
+        object.__setattr__(self, "page_fraction", fraction)
         if not isinstance(self.name, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+", self.name):
             raise ValueError("view name must be a non-empty [A-Za-z0-9_.-] string")
         if self.crop not in VIEW_CROPS:
             raise ValueError(f"view crop must be one of {VIEW_CROPS}")
-        if (
-            len(margin) != 2
-            or any(isinstance(v, bool) or not isinstance(v, (int, float)) for v in margin)
-            or not 0 <= margin[0] <= margin[1] <= 1
-        ):
-            raise ValueError("view margin must be (low, high) with 0 <= low <= high <= 1")
+        for label, pair, low in (("margin", margin, 0), ("page_fraction", fraction, 1e-3)):
+            if (
+                len(pair) != 2
+                or any(isinstance(v, bool) or not isinstance(v, (int, float)) for v in pair)
+                or not low <= pair[0] <= pair[1] <= 1
+            ):
+                raise ValueError(f"view {label} must be (low, high) with {low} <= low <= high <= 1")
+        if isinstance(self.rotation, bool) or self.rotation not in VIEW_ROTATIONS:
+            raise ValueError(f"view rotation must be one of {VIEW_ROTATIONS}")
+        if self.crop != "small_page" and fraction != (0.1, 0.25):
+            raise ValueError("page_fraction applies to the small_page crop only")
 
     def to_dict(self) -> dict[str, Any]:
-        return {"name": self.name, "crop": self.crop, "margin": list(self.margin)}
+        """The fields that define the view; rotation and page_fraction only when used."""
+        data: dict[str, Any] = {"name": self.name, "crop": self.crop, "margin": list(self.margin)}
+        if self.rotation:
+            data["rotation"] = self.rotation
+        if self.crop == "small_page":
+            data["page_fraction"] = list(self.page_fraction)
+        return data
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ViewConfig:
-        if not isinstance(data, dict) or set(data) - {"name", "crop", "margin"}:
+        allowed = {"name", "crop", "margin", "rotation", "page_fraction"}
+        if not isinstance(data, dict) or set(data) - allowed:
             raise ValueError(f"bad view {data!r}")
         return cls(**data)
 
@@ -902,10 +927,16 @@ def resize_box(
     region = image.crop(box)
     if region.mode != "RGB":
         region = region.convert("RGB")
+    return _resize_region(region, input_size)
+
+
+def _resize_region(region: Image.Image, size: tuple[int, int]) -> torch.Tensor:
+    """RGB ``region`` as a (3, H, W) uint8 tensor of ``size`` (bilinear, no antialiasing)."""
     pixels = torch.from_numpy(np.array(region)).permute(2, 0, 1).unsqueeze(0)
-    return F.interpolate(
-        pixels, size=input_size, mode="bilinear", align_corners=False, antialias=False
-    )[0]
+    resized = F.interpolate(
+        pixels, size=size, mode="bilinear", align_corners=False, antialias=False
+    )
+    return resized[0]
 
 
 def warp_image(
@@ -983,20 +1014,52 @@ def apply_geometry(
     return pixels, used.target(_edge_points(sample))
 
 
+def _turn(values: NDArray, rotation: int) -> NDArray:
+    """Normalized (x, y) values of an image turned counter-clockwise by ``rotation``."""
+    x, y = values[..., 0], values[..., 1]
+    turned = {0: (x, y), 90: (y, -x), 180: (-x, -y), 270: (-y, x)}[rotation]
+    return np.stack(turned, axis=-1)
+
+
+def _canvas(size: tuple[int, int], rng: np.random.Generator) -> torch.Tensor:
+    """A plain surface: a grey-ish tone, smooth shading and fine grain, as (3, H, W) uint8."""
+    tone = rng.uniform(70, 190) + rng.uniform(-15, 15, size=3)
+    shading = torch.from_numpy(rng.uniform(-25, 25, size=(1, 3, 3, 4)))
+    shading = F.interpolate(shading, size=size, mode="bicubic", align_corners=True)[0]
+    grain = torch.from_numpy(rng.normal(0, 4, size=(3, *size)))
+    values = torch.from_numpy(tone).view(3, 1, 1) + shading + grain
+    return values.round().clamp(0, 255).to(torch.uint8)
+
+
 def evaluation_view(
     sample: RawSample, input_size: tuple[int, int], view: ViewConfig, key: str
 ) -> tuple[torch.Tensor, NDArray[np.float32]]:
     """``view`` of ``sample`` as a (3, H, W) uint8 image and its target grid.
 
-    ``key`` (source and sample id) seeds the view's margins, so every run and seed
-    evaluates the same crops.
+    ``key`` (source and sample id) seeds the view's margins, page size and position and
+    canvas, so every run and seed evaluates the same inputs.
     """
     rng = np.random.default_rng([zlib.crc32(view.name.encode()), zlib.crc32(key.encode())])
     left, top, right, bottom = view_box(sample, view, rng)
-    pixels = resize_box(_as_image(sample.image), (left, top, right, bottom), input_size)
     half = np.array([right - left, bottom - top], dtype=np.float64) / 2.0
     box = Crop(0.0, np.array([left, top], dtype=np.float64) + half, half)
-    return pixels, box.target(_edge_points(sample))
+    target = box.target(_edge_points(sample)).astype(np.float64)
+    region = _as_image(sample.image).crop((left, top, right, bottom))
+    if region.mode != "RGB":
+        region = region.convert("RGB")
+    if view.rotation:
+        region = region.transpose(_TURNS[view.rotation])
+        target = _turn(target, view.rotation)
+    if view.crop != "small_page":
+        return _resize_region(region, input_size), target.astype(np.float32)
+    height, width = input_size
+    scale = math.sqrt(rng.uniform(*view.page_fraction))
+    page_h, page_w = max(1, round(height * scale)), max(1, round(width * scale))
+    y0, x0 = int(rng.integers(0, height - page_h + 1)), int(rng.integers(0, width - page_w + 1))
+    canvas = _canvas(input_size, rng)
+    canvas[:, y0 : y0 + page_h, x0 : x0 + page_w] = _resize_region(region, (page_h, page_w))
+    pixels = (target + 1.0) / 2.0 * [page_w, page_h] + [x0, y0]
+    return canvas, (2.0 * pixels / [width, height] - 1.0).astype(np.float32)
 
 
 def draw_color_params(

@@ -15,7 +15,7 @@ from PIL import Image
 
 from flattener.dewarp.data import SAMPLE_SCHEMA, SPEC_SCHEMA
 from flattener.dewarp.model import DewarpModelConfig, UVDocNet
-from flattener.dewarp.train import TrainConfig, _Logger, improves, train, validate
+from flattener.dewarp.train import DEFAULT_VIEWS, TrainConfig, _Logger, improves, train, validate
 
 TINY = DewarpModelConfig(input_size=(64, 48), grid_size=(5, 4), num_filter=4)
 
@@ -28,7 +28,7 @@ def _config(**changes):
 
 def _batch(valid_samples, sources):
     """One collated evaluation batch; ``valid_samples[i]`` says whether sample i has GT."""
-    views = 2  # DEFAULT_VIEWS
+    views = len(DEFAULT_VIEWS)
     valid = torch.zeros(len(sources), views, 1, *TINY.grid_size)
     for index, has_target in enumerate(valid_samples):
         valid[index] = float(has_target)
@@ -147,7 +147,8 @@ def test_training_with_unevaluable_validation_selects_no_best(tmp_path):
     assert not (tmp_path / "run/checkpoints/best.json").exists()
     log = (tmp_path / "run/train_log.jsonl").read_text().splitlines()
     validations = [json.loads(line) for line in log if json.loads(line)["kind"] == "val"]
-    assert validations and all(record["not_evaluable"] == 2 for record in validations)
+    assert len(validations) == 2 * len(DEFAULT_VIEWS)
+    assert all(record["not_evaluable"] == 2 for record in validations)
 
 
 def test_the_csv_log_keeps_the_header_it_was_started_with(tmp_path):

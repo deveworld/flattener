@@ -302,9 +302,13 @@ def test_validation_signature_covers_what_defines_a_validation_result(tmp_path):
     assert memory_stats(torch.device("cpu")) == {}
 
 
-def test_default_views_keep_a_margin_on_every_side():
-    assert [view.name for view in DEFAULT_VIEWS] == ["page", "docunet"]
-    assert all(view.crop == "page" and view.margin[0] >= 0.02 for view in DEFAULT_VIEWS)
+def test_default_views_cover_the_validation_modes_and_page_stays_primary(tmp_path):
+    names = ["page", "docunet", "full_frame", "rot90", "rot270", "small_page"]
+    assert [view.name for view in DEFAULT_VIEWS] == names
+    crops = [view for view in DEFAULT_VIEWS if view.crop != "full_frame"]
+    assert all(view.margin[0] >= 0.02 for view in crops)  # every side keeps a margin
+    assert [view.rotation for view in DEFAULT_VIEWS] == [0, 0, 0, 90, 270, 0]
+    assert _config(tmp_path).selected_view == "page"
 
 
 def test_best_carries_over_only_under_the_same_validation_signature(tmp_path):
@@ -394,15 +398,17 @@ def test_two_step_cpu_training_smoke_and_exact_resume(tmp_path):
     run = tmp_path / "run"
     assert json.loads((run / "status.json").read_text())["state"] == "stopped"
     log = [json.loads(line) for line in (run / "train_log.jsonl").read_text().splitlines()]
-    assert [r["kind"] for r in log] == ["train", "train", "val", "val"]
-    assert [(r["view"], r["selected"]) for r in log[2:]] == [("page", True), ("docunet", False)]
+    names = [view.name for view in DEFAULT_VIEWS]
+    assert [r["kind"] for r in log] == ["train", "train"] + ["val"] * len(names)
+    assert [(r["view"], r["selected"]) for r in log[2:]] == [(n, n == "page") for n in names]
     assert {r["track"] for r in log} == {"release"}
     with (run / "train_log.csv").open(newline="") as stream:
         assert {row["track"] for row in csv.DictReader(stream)} == {"release"}
     assert all(np.isfinite(r["loss"]) for r in log if r["kind"] == "train")
     checkpoint = load_checkpoint(first["checkpoint"])
     assert checkpoint["track"] == "release" and checkpoint["lineage"][0]["kind"] == "scratch"
-    assert set(checkpoint["metrics"]["views"]) == {"page", "docunet"}
+    assert list(checkpoint["metrics"]["views"]) == names
+    assert all(checkpoint["metrics"]["views"][name]["epe_px"] > 0 for name in names)
     assert checkpoint["best"]["signature"] == checkpoint["metrics"]["signature"]
     manifest = checkpoint["data_sources"]
     assert [s["license_classes"] for s in manifest["train"]] == [{"clean": 4}]
