@@ -50,8 +50,10 @@ from .docunet import (
 )
 from .reporting import (
     environment,
+    failure_counts,
     mean,
     prediction_record,
+    prediction_status,
     report_evidence,
     sha256_file,
     utc_now,
@@ -462,6 +464,17 @@ def evaluate_ocr(
     summary: dict[str, Any] = {}
     rows: dict[str, Any] = {}
     stored_texts: dict[str, Any] = {}
+    record = prediction_record(predictions_root)
+
+    def failures(setting_documents: Sequence[int]) -> dict[str, int | None]:
+        return failure_counts(
+            [
+                prediction_status(record, format_name(pattern, fields=("k", "m"), k=k, m=m))
+                for k in setting_documents
+                for m in VIEWS
+            ]
+        )
+
     for protocol in protocols:
         references = {
             int(key): text
@@ -484,12 +497,13 @@ def evaluate_ocr(
                 summary["doctr"][setting], rows["doctr"][setting] = score_doctr(
                     references, predictions, setting_documents
                 )
+                summary["doctr"][setting].update(failures(setting_documents))
         else:
             uvdoc_summary, uvdoc_rows = score_uvdoc(references, predictions, DEWARPNET_SETTING_2)
+            uvdoc_summary.update(failures(DEWARPNET_SETTING_2))
             summary["uvdoc"] = {"uvdoc_50": uvdoc_summary}
             rows["uvdoc"] = {"uvdoc_50": uvdoc_rows}
     calibrated_engine = is_calibrated_tesseract(engine_metadata.get("version_first_line"))
-    record = prediction_record(predictions_root)
     return {
         "benchmark": "docunet-ocr",
         "comparable": calibrated_engine and verify_references,

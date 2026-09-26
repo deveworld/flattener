@@ -24,6 +24,7 @@ import numpy as np
 from . import metrics
 from .reporting import (
     environment,
+    failure_counts,
     mean,
     prediction_record,
     prediction_status,
@@ -355,18 +356,15 @@ def summarize(rows: Sequence[dict[str, Any]], conventions: Sequence[str]) -> dic
 
 
 def _means(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
-    """Means, plus ``prediction_failures``: scored images whose prediction failed its
-    checks (force-rendered), or ``None`` when the predictions carry no record."""
+    """Means, plus ``prediction_failures`` (scored images not recorded as passing their
+    checks: force-rendered failures and images ``predictions.json`` does not list) and
+    ``prediction_unrecorded`` (the latter); both ``None`` when the predictions carry no
+    record."""
     result: dict[str, Any] = {"n": len(rows)}
     for name in ("ms_ssim", "ld", "ad", "ad_exact_lstsq", "ad_lsqr_4iter"):
         values = [row[name] for row in rows]
         result[name] = None if any(value is None for value in values) else mean(values)
-    statuses = [row.get("prediction_status") for row in rows]
-    result["prediction_failures"] = (
-        None
-        if any(status is None for status in statuses)
-        else sum(s != "success" for s in statuses)
-    )
+    result.update(failure_counts([row.get("prediction_status") for row in rows]))
     return result
 
 
@@ -436,9 +434,8 @@ def evaluate_docunet(
             missing.append(names[f"{k}_{m}"])
         grouped.setdefault(k, []).append(ViewTask(m, rotated, str(path)))
     if missing:
-        failed = [
-            name for name in missing if prediction_status(record, name) not in (None, "success")
-        ]
+        recorded = [prediction_status(record, name) for name in missing]
+        failed = [status for status in recorded if status not in (None, "success", "unrecorded")]
         note = (
             f"; predictions.json records {len(failed)} of them as failed checks "
             "(predict with --force-render to score the forced images)"

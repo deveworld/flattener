@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .._version import __version__
-from ..evidence import evidence
+from ..evidence import evidence, initialization
 
 PREDICTIONS_FILE = "predictions.json"
 PREDICTIONS_SCHEMA = "flattener-dewarp-predictions-2"
@@ -97,11 +97,13 @@ def prediction_record(predictions_dir: str | os.PathLike[str]) -> dict[str, Any]
     """What ``flattener.dewarp.predict`` recorded about a predictions directory.
 
     Reads ``predictions.json`` and returns its hash, the model, the force-render flag,
-    the counts and ``failures``: output file name -> status, reason and whether a forced
-    image was written. Items of the older ``flattener-dewarp-docunet-1`` format that
-    were rendered unchecked (``fallback``) count as ``invalid_transform``; that format
-    ran no coverage check. Returns ``None`` when the directory has no record, and
-    ``failures`` is ``None`` for a record of another format.
+    ``complete`` (whether the batch finished; ``None`` for records that predate the
+    flag), ``outputs`` (the recorded output file names) and ``failures``: output file
+    name -> status, reason and whether a forced image was written. Items of the older
+    ``flattener-dewarp-docunet-1`` format that were rendered unchecked (``fallback``)
+    count as ``invalid_transform``; that format ran no coverage check. Returns ``None``
+    when the directory has no record; ``failures`` and ``outputs`` are ``None`` for a
+    record of another format.
     """
     path = Path(predictions_dir) / PREDICTIONS_FILE
     if not path.is_file():
@@ -135,25 +137,50 @@ def prediction_record(predictions_dir: str | os.PathLike[str]) -> dict[str, Any]
             if item.get("fallback")
         }
     model = payload.get("model") if isinstance(payload.get("model"), dict) else {}
+    outputs = None if failures is None else sorted({str(item.get("output")) for item in items})
     return {
         "path": str(path),
         "sha256": sha256_bytes(data),
         "schema": schema,
-        "model": {key: model.get(key) for key in ("kind", "path", "sha256", "step", "track")},
+        "model": {
+            **{key: model.get(key) for key in ("kind", "path", "sha256", "step", "track")},
+            "initialization": initialization(model),
+        },
         "force_render": payload.get("force_render"),
         "inputs": payload.get("inputs"),
+        "complete": payload.get("complete") if schema == PREDICTIONS_SCHEMA else None,
         "items": len(items),
+        "outputs": outputs,
         "failed": None if failures is None else len(failures),
         "failures": failures,
     }
 
 
 def prediction_status(record: dict[str, Any] | None, name: str) -> str | None:
-    """Recorded check status of one output file; ``None`` when nothing was recorded."""
+    """Recorded check status of one output file.
+
+    ``"unrecorded"`` when the record does not list the file (an output left from an
+    earlier or interrupted run), ``None`` when there is no usable record at all.
+    """
     if record is None or record["failures"] is None:
         return None
     failure = record["failures"].get(name)
-    return "success" if failure is None else failure["status"]
+    if failure is not None:
+        return failure["status"]
+    outputs = record.get("outputs")
+    return "unrecorded" if outputs is not None and name not in outputs else "success"
+
+
+def failure_counts(statuses: list[str | None]) -> dict[str, int | None]:
+    """``prediction_failures``: images not recorded as passing their checks (a failed
+    check or no record of the image); ``prediction_unrecorded``: those without a record.
+    Both are ``None`` when the predictions carry no record."""
+    if any(status is None for status in statuses):
+        return {"prediction_failures": None, "prediction_unrecorded": None}
+    return {
+        "prediction_failures": sum(status != "success" for status in statuses),
+        "prediction_unrecorded": sum(status == "unrecorded" for status in statuses),
+    }
 
 
 def report_evidence(record: dict[str, Any] | None) -> dict[str, Any]:

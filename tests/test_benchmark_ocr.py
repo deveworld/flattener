@@ -198,6 +198,24 @@ def test_evaluate_ocr_report_with_fake_engine(tmp_path):
     assert report["comparability"]["tesseract_version_matches"] is False
     assert report["config"]["tesseract_config"] == {"doctr": "", "uvdoc": "--oem 1"}
     assert len(report["inputs"]["crops"]) == 50
+    assert doctr["setting1_doctr_60"]["prediction_failures"] is None  # no predictions.json
+    items = [
+        {"output": f"{k}_{m}.png", "action": "written", "status": "success"}
+        for k in documents
+        for m in (1, 2)
+        if (k, m) != (2, 1)  # 2_1.png is left unrecorded
+    ]
+    items[0].update(status="invalid_transform", forced=True)  # 1_1.png
+    record = {"schema": "flattener-dewarp-predictions-2", "model": {}, "items": items}
+    (predictions / "predictions.json").write_text(json.dumps(record))
+    counted = ocr.evaluate_ocr(
+        predictions, pattern="{k}_{m}.png", engine=engine, references_dir=scans,
+        verify_references=False, workers=1,
+    )["summary"]["doctr"]  # fmt: skip
+    assert counted["setting1_doctr_60"]["prediction_failures"] == 2  # documents 1 and 2
+    assert counted["setting1_doctr_60"]["prediction_unrecorded"] == 1
+    assert counted["setting2_dewarpnet_50"]["prediction_failures"] == 1  # document 1 only
+    (predictions / "predictions.json").unlink()
     write_json_atomic(tmp_path / "ocr.json", report)
     assert json.loads((tmp_path / "ocr.json").read_text())["summary"] == report["summary"]
     (crops / "1_1 copy.png").unlink()

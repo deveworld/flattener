@@ -12,10 +12,11 @@ The model runs in full float32 precision (TF32 off) so CUDA and CPU predictions 
 
 Rendering runs the renderer's checks (source bounds, coverage, fold/Jacobian). An
 image that fails them keeps its status (``invalid_transform`` and a reason code) in
-the printed JSON and in ``predictions.json``, and no image is written for it.
-``--force-render`` writes the image anyway (published methods are scored that way)
-and still records the failure. The exit status is 0 when every image passed and 1
-when any image failed, with or without ``--force-render``.
+the printed JSON and in ``predictions.json``, and no image is written for it; the
+``image`` command also removes an earlier file at ``--output``. ``--force-render``
+writes the image anyway (published methods are scored that way) and still records
+the failure. The exit status is 0 when every image passed and 1 when any image
+failed, with or without ``--force-render``.
 """
 
 from __future__ import annotations
@@ -281,6 +282,83 @@ def _count(items: list[dict[str, Any]]) -> dict[str, int]:
     }
 
 
+def _plain(value: Any) -> Any:
+    """``value`` as it reads back from JSON (tuples become lists)."""
+    return json.loads(json.dumps(value))
+
+
+def _input_sha256(image: NDArray[np.uint8]) -> str:
+    return hashlib.sha256(np.ascontiguousarray(image).tobytes()).hexdigest()
+
+
+def _still_matches(
+    previous: dict[str, Any],
+    task: BatchInput,
+    image: NDArray[np.uint8],
+    digest: str,
+    force_render: bool,
+) -> bool:
+    """Whether an earlier item was made from this very input: same label, pixels, size
+    and output size. A forced image is kept only by a run that also forces."""
+    if previous.get("action") not in ("written", "kept"):
+        return False
+    size = list(image.shape[:2])
+    output_size = size if task.output_size is None else list(task.output_size)
+    return (
+        previous.get("input") == task.source
+        and previous.get("input_sha256") == digest
+        and previous.get("size") == size
+        and previous.get("output_size") == output_size
+        and (force_render or not previous.get("forced"))
+    )
+
+
+def _batch_item(
+    dewarper: Dewarper,
+    task: BatchInput,
+    target: Path,
+    previous: dict[str, Any] | None,
+    config: RenderConfig,
+    force_render: bool,
+) -> dict[str, Any]:
+    """Keep, render or refuse one input; the file at ``target`` always matches the item."""
+    item: dict[str, Any] = {"input": task.source, "output": task.output}
+    try:
+        image = task.load()
+        digest = _input_sha256(image)
+        if previous is not None and target.is_file():
+            if _still_matches(previous, task, image, digest, force_render):
+                return {**previous, "action": "kept"}
+        result = rectify(
+            dewarper, image, task.output_size, render_config=config, allow_unchecked=force_render
+        )
+    except (FlattenerError, OSError) as error:
+        target.unlink(missing_ok=True)  # an older image no longer matches this input
+        status = error.status if isinstance(error, FlattenerError) else Status.IO_ERROR
+        reason = error.reason_code if isinstance(error, FlattenerError) else "unreadable_input"
+        item.update(action="not_written", status=str(status), reason=reason, forced=False)
+        item["message"] = str(error)
+        return item
+    if result.image is not None:
+        atomic_write(
+            target, lambda stream, pixels=result.image: Image.fromarray(pixels).save(stream, "PNG")
+        )
+    else:
+        target.unlink(missing_ok=True)  # an older image no longer matches the record
+    item.update(
+        action="written" if result.image is not None else "not_written",
+        status=str(result.status),
+        reason=result.reason_code,
+        forced=bool(result.metadata.get("forced_render")),
+        size=list(image.shape[:2]),
+        input_sha256=digest,
+        output_size=result.metadata["dewarp"]["output_size"],
+        validation=_validation_summary(result),
+        seconds=result.metadata["dewarp"]["seconds"],
+    )
+    return item
+
+
 def rectify_batch(
     dewarper: Dewarper,
     inputs: list[BatchInput],
@@ -293,17 +371,21 @@ def rectify_batch(
 ) -> dict[str, Any]:
     """Rectify ``inputs`` into ``output_dir`` and record every item in ``predictions.json``.
 
-    Each item records the check status and reason code. An image that fails a check is
-    written only with ``force_render`` (``forced: true``). Without ``overwrite``, outputs
-    that ``predictions.json`` lists as written for the same weights are kept with their
-    recorded status, and the rest are rendered again; a directory holding predictions
-    of other weights or of an older format, or outputs without a ``predictions.json``,
-    is refused. The report names the current weights before any image is written, and
-    images are written atomically.
+    Each item records the check status and reason code and the sha256 of the decoded
+    input. An image that fails a check is written only with ``force_render``
+    (``forced: true``). Without ``overwrite``, an output that ``predictions.json`` lists
+    as written is kept with its recorded status when the weights, render settings, input
+    label, input pixels and sizes are unchanged (a forced image only by a forced run);
+    every other input is rendered again. A directory holding predictions of other weights
+    or of an older format, or outputs without a ``predictions.json``, is refused. The
+    report names the current weights before any image is written, and says
+    ``complete: false`` until the last input is done; images are written atomically.
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     report_path = output_dir / "predictions.json"
+    config = RenderConfig() if render_config is None else render_config
+    config = replace(config, on_error="return")
     previous_items: dict[str, dict[str, Any]] = {}
     if not overwrite and report_path.is_file():
         previous = json.loads(report_path.read_text(encoding="utf-8"))
@@ -317,15 +399,14 @@ def rectify_batch(
                 "output_exists",
                 f"{report_path} has an older format; use --overwrite",
             )
-        previous_items = {item["output"]: item for item in previous.get("items", [])}
+        if previous.get("render_config") == _plain(asdict(config)):
+            previous_items = {item["output"]: item for item in previous.get("items", [])}
     elif not overwrite and any((output_dir / item.output).is_file() for item in inputs):
         raise FlattenerError(
             Status.IO_ERROR,
             "output_exists",
             f"{output_dir} holds outputs without predictions.json; use --overwrite",
         )
-    config = RenderConfig() if render_config is None else render_config
-    config = replace(config, on_error="return")
     report = {
         "schema": PREDICTIONS_SCHEMA,
         "created_utc": utc_now(),
@@ -334,6 +415,7 @@ def rectify_batch(
         **(fields or {}),
         "force_render": force_render,
         "render_config": asdict(config),
+        "complete": False,
         "counts": _count([]),
         "items": [],
     }
@@ -341,49 +423,11 @@ def rectify_batch(
     for task in inputs:
         target = output_dir / task.output
         previous = previous_items.get(task.output)
-        if previous is not None and previous.get("action") in ("written", "kept"):
-            if target.is_file():
-                report["items"].append({**previous, "action": "kept"})
-                report["counts"] = _count(report["items"])
-                write_json(report_path, report)
-                continue
-        item: dict[str, Any] = {"input": task.source, "output": task.output}
-        try:
-            image = task.load()
-            result = rectify(
-                dewarper,
-                image,
-                task.output_size,
-                render_config=config,
-                allow_unchecked=force_render,
-            )
-        except (FlattenerError, OSError) as error:
-            status = error.status if isinstance(error, FlattenerError) else Status.IO_ERROR
-            reason = error.reason_code if isinstance(error, FlattenerError) else "unreadable_input"
-            item.update(action="not_written", status=str(status), reason=reason, forced=False)
-            item["message"] = str(error)
-        else:
-            if result.image is not None:
-                atomic_write(
-                    target,
-                    lambda stream, pixels=result.image: Image.fromarray(pixels).save(stream, "PNG"),
-                )
-            elif target.is_file():
-                target.unlink()  # an older image of this input no longer matches the record
-            item.update(
-                action="written" if result.image is not None else "not_written",
-                status=str(result.status),
-                reason=result.reason_code,
-                forced=bool(result.metadata.get("forced_render")),
-                size=list(image.shape[:2]),
-                input_sha256=hashlib.sha256(np.ascontiguousarray(image).tobytes()).hexdigest(),
-                output_size=result.metadata["dewarp"]["output_size"],
-                validation=_validation_summary(result),
-                seconds=result.metadata["dewarp"]["seconds"],
-            )
-        report["items"].append(item)
+        report["items"].append(_batch_item(dewarper, task, target, previous, config, force_render))
         report["counts"] = _count(report["items"])
         write_json(report_path, report)
+    report["complete"] = True
+    write_json(report_path, report)
     return report
 
 
@@ -459,10 +503,16 @@ def main(argv: list[str] | None = None) -> int:
             render_config=RenderConfig(on_error="return"),
             allow_unchecked=args.force_render,
         )
+        output = Path(args.output)
+        removed = False
         if result.image is not None:
-            Image.fromarray(result.image).save(args.output)
+            Image.fromarray(result.image).save(output)
+        elif output.is_file():  # an earlier image there is not a result of this run
+            output.unlink()
+            removed = True
         summary = {
             "output": None if result.image is None else args.output,
+            "removed_earlier_output": removed,
             "status": str(result.status),
             "reason": result.reason_code,
             "forced": bool(result.metadata.get("forced_render")),

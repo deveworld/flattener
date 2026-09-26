@@ -16,10 +16,11 @@ from PIL import Image
 
 from flattener import FlattenerError, RenderConfig
 from flattener.contracts import Status
+from flattener.dewarp import predict
 from flattener.dewarp.checkpoint import CHECKPOINT_SCHEMA, save_checkpoint
 from flattener.dewarp.coords import edge_positions
 from flattener.dewarp.model import DewarpModelConfig, UVDocNet, sha256_file
-from flattener.dewarp.predict import Dewarper, main, rectify
+from flattener.dewarp.predict import EXIT_FAILED, Dewarper, main, rectify
 
 TINY = DewarpModelConfig(input_size=(64, 48), grid_size=(5, 4), num_filter=4)
 
@@ -91,13 +92,15 @@ def test_forced_rectify_keeps_the_invalid_transform_status():
 def test_image_cli_fails_on_a_degenerate_map_by_default(tmp_path, capsys):
     weights = _degenerate_checkpoint(tmp_path / "model.pt")
     source, output = _photo(tmp_path / "in.png"), tmp_path / "out.png"
+    _photo(output)  # an image of an earlier run
     argv = ["--weights", str(weights), "image", "--input", str(source), "--output", str(output)]
     code, error = _exit_code(argv)
     captured = capsys.readouterr()
     assert code != 0
-    assert not output.exists()  # no image is written for a failed check by default
+    assert not output.exists()  # no image for a failed check, and the earlier one is gone
     shown = captured.out + captured.err + ("" if error is None else str(error.status))
     assert Status.INVALID_TRANSFORM.value in shown
+    assert json.loads(captured.out)["removed_earlier_output"] is True
 
 
 def test_image_cli_force_render_writes_the_image_and_still_fails(tmp_path, capsys):
@@ -166,3 +169,38 @@ def test_docunet_cli_refuses_predictions_of_the_older_format(tmp_path):
     with pytest.raises(FlattenerError, match="older format"):
         main(argv)
     assert main([*argv, "--overwrite", "--force-render"]) != 0
+
+
+def _folds_dark_inputs(dewarper, image):
+    """Identity grid for a bright input, the middle columns swapped for a dark one."""
+    columns = edge_positions(4)
+    if image.mean() < 128:
+        columns = columns[[0, 2, 1, 3]]
+    return np.stack(np.meshgrid(columns, edge_positions(5)), -1).astype(np.float32)
+
+
+def test_a_kept_output_must_come_from_the_same_input(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(predict, "predict_grid", _folds_dark_inputs)
+    argv, output = _docunet_args(tmp_path)
+    crop, image = tmp_path / "crop" / "1_1 copy.png", output / "1_1.png"
+
+    def run(*extra):
+        code = main([*argv, *extra])
+        return code, json.loads(capsys.readouterr().out)
+
+    Image.new("RGB", (30, 40), (200, 200, 200)).save(crop)
+    assert run() == (0, {"items": 1, "written": 1, "kept": 0, "failed": 0, "forced": 0})
+    assert run()[1]["kept"] == 1
+    Image.new("RGB", (30, 40), (20, 20, 20)).save(crop)  # same size and name, now failing
+    code, counts = run()
+    assert code == EXIT_FAILED and counts["kept"] == 0 and counts["failed"] == 1
+    assert not image.exists()
+    record = json.loads((output / "predictions.json").read_text())
+    assert record["complete"] is True
+    [item] = record["items"]
+    assert item["status"] == Status.INVALID_TRANSFORM.value and item["action"] == "not_written"
+    # A forced image is kept only by a run that forces too.
+    assert run("--force-render")[1]["forced"] == 1 and image.is_file()
+    assert run("--force-render")[1]["kept"] == 1
+    code, counts = run()
+    assert code == EXIT_FAILED and counts["kept"] == 0 and not image.exists()

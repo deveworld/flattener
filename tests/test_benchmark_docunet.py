@@ -168,6 +168,32 @@ def test_reports_count_the_recorded_prediction_failures(tiny_docunet):
     assert report["summary"]["128_excl64"]["views"]["2"]["prediction_failures"] == 1
     statuses = {row["id"]: row["prediction_status"] for row in report["rows"]}
     assert statuses["3_1"] == "invalid_transform" and statuses["3_2"] == "success"
+    assert report["summary"]["130_raw"]["prediction_unrecorded"] == 0
+
+
+def test_outputs_the_record_does_not_list_count_as_failures(tiny_docunet):
+    scans, predictions = tiny_docunet
+    _record(predictions, {})
+    record = json.loads((predictions / "predictions.json").read_text())
+    record["items"] = [item for item in record["items"] if item["output"] != "3_1.png"]
+    record["complete"] = False  # an interrupted run, with 3_1.png left from an earlier one
+    (predictions / "predictions.json").write_text(json.dumps(record))
+    found = prediction_record(predictions)
+    assert found["complete"] is False and "3_1.png" not in found["outputs"]
+    assert prediction_status(found, "3_1.png") == "unrecorded"
+    assert prediction_status(found, "3_2.png") == "success"
+    report = docunet.evaluate_docunet(
+        predictions,
+        pattern="{k}_{m}.png",
+        conventions=["128_excl64"],
+        build=None,
+        references_dir=scans,
+        verify_references=False,
+        workers=1,
+    )
+    means = report["summary"]["128_excl64"]
+    assert means["prediction_failures"] == 1 and means["prediction_unrecorded"] == 1
+    assert means["views"]["2"]["prediction_failures"] == 0
 
 
 def test_worker_initializer_limits_torch_to_one_thread():
