@@ -303,8 +303,8 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--verify-remote", type=int, default=6)
         p.add_argument("--skip-download", action="store_true")
     args = parser.parse_args(argv)
-    if not 1 <= args.connections <= 16:
-        parser.error("--connections must be in 1..16")
+    if not 1 <= args.connections <= 32:
+        parser.error("--connections must be in 1..32")
     layout = _layout(args)
     for path in (layout.research, layout.release, layout.reports, layout.tables):
         path.mkdir(parents=True, exist_ok=True)
