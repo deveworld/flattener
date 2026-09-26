@@ -6,7 +6,7 @@
     {
       "name": "doc3d-train",
       "kind": "doc3d",
-      "root": "D:/flattener-sota/data/research/doc3d",
+      "root": "${FLATTENER_DATA}/research/doc3d",
       "track": "research",
       "split": "train",
       "weight": 0.5,
@@ -15,7 +15,7 @@
     {
       "name": "uvdoc-train",
       "kind": "uvdoc",
-      "root": "D:/flattener-sota/data/research/UVDoc_final",
+      "root": "${FLATTENER_DATA}/research/uvdoc_final",
       "track": "research",
       "split": "train",
       "weight": 0.5,
@@ -24,7 +24,7 @@
     {
       "name": "doc3d-val",
       "kind": "doc3d",
-      "root": "D:/flattener-sota/data/research/doc3d",
+      "root": "${FLATTENER_DATA}/research/doc3d",
       "track": "research",
       "split": "val",
       "max_samples": 2000,

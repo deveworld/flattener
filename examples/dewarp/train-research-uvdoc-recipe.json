@@ -1,6 +1,6 @@
 {
   "data_spec": "data-research-doc3d-uvdoc.json",
-  "output_dir": "D:/flattener-sota/runs/research-uvdoc-recipe-s0",
+  "output_dir": "${FLATTENER_RUNS}/research-uvdoc-recipe-s0",
   "track": "research",
   "model": {"input_size": [712, 488], "grid_size": [45, 31]},
   "init": "scratch",
@@ -21,5 +21,11 @@
   "num_workers": 6,
   "device": "cuda",
   "val_every": 10000,
+  "val_batch_size": 16,
+  "val_views": [
+    {"name": "page", "crop": "page", "margin": [0.025, 0.025]},
+    {"name": "docunet", "crop": "page", "margin": [0.0, 0.1]}
+  ],
+  "val_select": "docunet",
   "checkpoint_every": 10000
 }

@@ -1,34 +1,24 @@
 {
   "schema": "flattener-dewarp-data-1",
-  "name": "release-clean-v1",
+  "name": "release-clean-v2",
   "track": "release",
   "sources": [
     {
       "name": "syntheticdoc-clean-train",
-      "kind": "converted",
-      "root": "D:/flattener-sota/data/release/syntheticdoc",
+      "kind": "syntheticdoc_compact",
+      "root": "${FLATTENER_CACHE}/syntheticdoc-release",
       "track": "release",
       "split": "train",
-      "weight": 0.9,
-      "license": "SyntheticDoc CC BY 4.0, clean sub-sources only (no NC/ND/SA/unclear)"
-    },
-    {
-      "name": "own-synthetic-train",
-      "kind": "converted",
-      "root": "D:/flattener-sota/data/release/own-synthetic",
-      "track": "release",
-      "split": "train",
-      "weight": 0.1,
-      "license": "flattener synthetic data, Apache-2.0 (+ SmartDoc CC BY 4.0 if converted here)"
+      "license": "SyntheticDoc CC BY 4.0; documents CC BY, CC0 or ODC-BY, backgrounds CC0 or CC BY, meshes CC BY"
     },
     {
       "name": "syntheticdoc-clean-val",
-      "kind": "converted",
-      "root": "D:/flattener-sota/data/release/syntheticdoc",
+      "kind": "syntheticdoc_compact",
+      "root": "${FLATTENER_CACHE}/syntheticdoc-release",
       "track": "release",
       "split": "val",
       "max_samples": 2000,
-      "license": "SyntheticDoc CC BY 4.0, clean sub-sources only (no NC/ND/SA/unclear)"
+      "license": "SyntheticDoc CC BY 4.0; documents CC BY, CC0 or ODC-BY, backgrounds CC0 or CC BY, meshes CC BY"
     }
   ]
 }

@@ -1,10 +1,10 @@
 {
   "data_spec": "data-release.json",
-  "output_dir": "D:/flattener-sota/runs/release-b1-uvdoc-init-s0",
+  "output_dir": "${FLATTENER_RUNS}/release-b1-uvdoc-init-s0",
   "track": "release",
   "model": {"input_size": [712, 488], "grid_size": [45, 31]},
   "init": "uvdoc",
-  "init_path": "D:/flattener-sota/tools/UVDoc/model/best_model.pkl",
+  "init_path": "${FLATTENER_UVDOC_WEIGHTS}",
   "seed": 0,
   "batch_size": 32,
   "total_steps": 62500,
@@ -18,8 +18,14 @@
   "loss_recon": 1.0,
   "recon_start_step": 31250,
   "augment": {"margin": [0.0, 0.08], "full_frame_prob": 0.1, "rotation_deg": 15.0, "rotation_prob": 0.3},
-  "num_workers": 6,
+  "num_workers": 8,
   "device": "cuda",
   "val_every": 2500,
+  "val_batch_size": 16,
+  "val_views": [
+    {"name": "page", "crop": "page", "margin": [0.04, 0.04]},
+    {"name": "docunet", "crop": "page", "margin": [0.0, 0.1]}
+  ],
+  "val_select": "docunet",
   "checkpoint_every": 2500
 }
