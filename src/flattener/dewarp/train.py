@@ -76,6 +76,7 @@ from .data import (
     canonical_json,
     expand_path,
     require_track,
+    target_code_sha256,
     to_float_images,
 )
 from .model import (
@@ -664,11 +665,23 @@ class _Logger:
         print(json.dumps({k: record[k] for k in CSV_COLUMNS if k in record}), flush=True)
 
 
+def code_record() -> dict[str, Any]:
+    """The checkpoint's ``code``: file hashes (``code_fingerprint``) and the target-code
+    digest (``target_code_sha256``)."""
+    return {**code_fingerprint(), "targets_sha256": target_code_sha256()}
+
+
 def _check_resume(
-    config: TrainConfig, payload: dict[str, Any], spec: DataSpec, sources: dict[str, Any]
+    config: TrainConfig,
+    payload: dict[str, Any],
+    spec: DataSpec,
+    sources: dict[str, Any],
+    code: dict[str, Any],
 ) -> None:
-    """Refuse a resume whose config, track, data spec, indexed samples or target
-    conventions (``DewarpDataset.describe``) changed."""
+    """Refuse a resume whose config, track, data spec, indexed samples, target
+    conventions (``DewarpDataset.describe``) or target code (``target_code_sha256``)
+    changed. A checkpoint without the target-code digest must have the same
+    ``coords.py`` bytes."""
     saved = payload["train_config"]
     current = config.to_dict()
     changed = sorted(
@@ -683,6 +696,12 @@ def _check_resume(
         changed.append("data sources (the checkpoint predates the target-convention signature)")
     elif saved_sources != sources:  # re-converted, re-split, relabelled or reinterpreted data
         changed.append("data sources (samples, license classes or target conventions)")
+    saved_code = payload.get("code") or {}
+    if "targets_sha256" in saved_code:
+        if saved_code["targets_sha256"] != code["targets_sha256"]:
+            changed.append("target code (coords.py, grid readers, loaders or crop mapping)")
+    elif (saved_code.get("files") or {}).get("coords.py") != code["files"].get("coords.py"):
+        changed.append("coords.py (the checkpoint predates the target-code digest)")
     if changed:
         raise _error("resume_mismatch", f"resume differs in {changed}; use a new output_dir")
 
@@ -765,14 +784,14 @@ def train(config: TrainConfig, *, resume: str = "auto") -> dict[str, Any]:
 
         torch.manual_seed(config.seed)
         model = UVDocNet(config.model)
-        code = code_fingerprint()
+        code = code_record()
         best: dict[str, Any] | None = None
         resumes: list[dict[str, Any]] = []
         counters = {"skipped": 0, "overflow_steps": 0}
         payload = None
         if resume_path is not None:
             payload = load_checkpoint(resume_path)
-            _check_resume(config, payload, spec, data_sources)
+            _check_resume(config, payload, spec, data_sources, code)
             model.load_state_dict(payload["model_state"])
             lineage, step, best = payload["lineage"], payload["step"], payload.get("best")
             counters.update(payload.get("counters", {}))

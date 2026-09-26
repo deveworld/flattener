@@ -469,6 +469,25 @@ def test_uvdoc_digest_covers_the_shared_geometry_files(tmp_path):
     assert error.value.reason_code == "stale_cache"
 
 
+def test_uvdoc_geometry_names_enter_the_target_digest(tmp_path):
+    root = tmp_path / "uvdoc"
+    _write_uvdoc(root)
+    np.save(root / "grid2d/gemo.npy", np.load(root / "grid2d/geom.npy")[::-1].copy())
+    np.save(root / "grid3d/gemo.npy", np.load(root / "grid3d/geom.npy"))
+    source = {"name": "u", "kind": "uvdoc", "root": str(root), "track": "research"}
+    spec = _spec(tmp_path, [source])
+    before, grid = _build(spec).describe()[0], _build(spec)[0]["grid2d"]
+    meta = root / "metadata_sample/0001.json"
+    meta.write_text(json.dumps({"geom_name": "gemo"}))  # same length: same file sizes
+    after = _build(spec).describe()[0]
+    assert after["content_sha256"] == before["content_sha256"]
+    assert after["targets_sha256"] != before["targets_sha256"]
+    assert not torch.equal(_build(spec)[0]["grid2d"], grid)
+    meta.write_text(json.dumps({"geom": "gemo"}))
+    with pytest.raises(FlattenerError, match="geom_name"):
+        _build(spec)
+
+
 def test_matlab_v73_grids_are_read_with_h5py(tmp_path):
     h5py = pytest.importorskip("h5py")
     _write_doc3d(tmp_path / "doc3d")

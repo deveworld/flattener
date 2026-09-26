@@ -8,6 +8,7 @@ refused and the validation signature changes.
 """
 
 import hashlib
+import inspect
 import json
 
 import numpy as np
@@ -15,7 +16,7 @@ import pytest
 from PIL import Image
 
 from flattener import FlattenerError
-from flattener.dewarp import data
+from flattener.dewarp import coords, data
 from flattener.dewarp.data import (
     COMPACT_SCHEMA,
     SAMPLE_SCHEMA,
@@ -24,10 +25,17 @@ from flattener.dewarp.data import (
     build_dataset,
 )
 from flattener.dewarp.model import DewarpModelConfig
-from flattener.dewarp.train import TrainConfig, _check_resume, _data_sources, validation_signature
+from flattener.dewarp.train import (
+    TrainConfig,
+    _check_resume,
+    _data_sources,
+    code_record,
+    validation_signature,
+)
 
 TINY = DewarpModelConfig(input_size=(64, 48), grid_size=(5, 4), num_filter=4)
 SIZE = (60, 44)
+CODE = code_record()
 
 
 def _write_samples(root, *, compact=False):
@@ -148,12 +156,13 @@ def test_resume_refuses_records_read_in_another_coordinate_convention(tmp_path, 
         "track": "release",
         "data_spec_sha256": spec.sha256,
         "data_sources": before,
+        "code": CODE,
     }
-    _check_resume(config, payload, spec, _sources(spec, config))  # unchanged data resumes
+    _check_resume(config, payload, spec, _sources(spec, config), CODE)  # unchanged data resumes
     change(tmp_path / "data")
     after = _sources(spec, config)
     with pytest.raises(FlattenerError, match="resume") as error:
-        _check_resume(config, payload, spec, after)
+        _check_resume(config, payload, spec, after, CODE)
     assert error.value.reason_code == "resume_mismatch"
     assert validation_signature(config, after["val"]) != validation_signature(config, before["val"])
 
@@ -204,3 +213,44 @@ def test_the_compact_creation_time_leaves_the_signature(tmp_path):
     settings.write_text(json.dumps(stamped))
     after = _sources(spec, _config(tmp_path))
     assert after == before and after["train"][0]["settings"]["scale"] == 0.5
+
+
+def test_target_code_counts_tokens_only():
+    plain = "def f(x):\n    return (x + 1) * 2\n"
+    noted = (
+        'def f(x):\n    """Double x plus one."""\n    # note\n'
+        "    return (x +\n            1) * 2  # end\n"
+    )
+    assert data._code_tokens(plain) == data._code_tokens(noted)
+    assert data._code_tokens(plain) != data._code_tokens(plain.replace("+ 1", "- 1"))
+
+
+def test_resume_refuses_other_target_code(tmp_path, monkeypatch):
+    _write_samples(tmp_path / "data")
+    spec = _spec(tmp_path, "converted")
+    config = _config(tmp_path)
+    sources = _sources(spec, config)
+    payload = {
+        "train_config": config.to_dict(),
+        "track": "release",
+        "data_spec_sha256": spec.sha256,
+        "data_sources": sources,
+        "code": CODE,
+    }
+    _check_resume(config, payload, spec, sources, code_record())
+    source = inspect.getsource
+
+    def edited(part):  # coords.py with one more statement
+        return source(part) + "\nEXTRA = 1\n" if part is coords else source(part)
+
+    monkeypatch.setattr(inspect, "getsource", edited)
+    changed = code_record()
+    assert changed["targets_sha256"] != CODE["targets_sha256"]
+    with pytest.raises(FlattenerError, match="target code"):
+        _check_resume(config, payload, spec, sources, changed)
+    # A checkpoint written before the digest resumes only with the same coords.py bytes.
+    older = {key: value for key, value in CODE.items() if key != "targets_sha256"}
+    _check_resume(config, {**payload, "code": older}, spec, sources, changed)
+    files = {**older["files"], "coords.py": "0" * 64}
+    with pytest.raises(FlattenerError, match="predates the target-code digest"):
+        _check_resume(config, {**payload, "code": {**older, "files": files}}, spec, sources, CODE)

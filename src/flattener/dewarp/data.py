@@ -47,10 +47,14 @@ from __future__ import annotations
 
 import bisect
 import hashlib
+import inspect
+import io
 import json
 import math
 import os
 import re
+import textwrap
+import tokenize
 import zlib
 from collections import Counter
 from dataclasses import asdict, dataclass, field, fields
@@ -64,6 +68,7 @@ from PIL import Image
 from torch.nn import functional as F
 
 from ..contracts import FlattenerError, Status
+from . import coords
 from .coords import (
     map_to_grid,
     pixels_to_flattener,
@@ -100,7 +105,8 @@ DOC3D_GRID3D_RANGE = (1.2539363, -1.2442188, 1.2396319, -1.2289206, 0.6436657, -
 UVDOC_GRID3D_RANGE = (0.11433014, -0.12551452, 0.12401487, -0.12401487, 0.1952378, -0.1952378)
 # How stored values become targets, as defined in code (``coords`` and the adapters).
 # Every source description carries its digest; raise the version when a conversion
-# changes, so resumes and best checkpoints of the old targets are refused.
+# changes, so resumes and best checkpoints of the old targets are refused. The code
+# itself is digested by ``target_code_sha256`` and checked on resume as well.
 TARGET_CONVENTIONS = {
     "version": 1,
     "values": "flattener align_corners=False; syntheticdoc q = b + 1/render_size; "
@@ -521,6 +527,7 @@ class _Source:
         self.records = records
         self.content_sha256 = self._content_digest()
         self.hashes = {}  # pickled into loader workers; the digest is enough
+        self._read_target_details(records)
 
     def __len__(self) -> int:
         return len(self.records)
@@ -538,6 +545,10 @@ class _Source:
     def shared_files(self, sizes: _FileSizes) -> list[str]:
         """Files that samples share (digested once per source)."""
         return []
+
+    def _read_target_details(self, records: list[dict[str, Any]]) -> None:
+        """Add per-record fields that decide which stored values a sample's targets come
+        from (they enter ``targets_sha256``)."""
 
     def _content_digest(self) -> str:
         sizes = _FileSizes()
@@ -580,15 +591,21 @@ class _Source:
         """Name, track, license manifest (sample counts per license class), a digest of the
         sample list (ids, tracks, license classes; paths excluded), the content digest and
         what decides how targets are read: the grid size, the code conventions
-        (``TARGET_CONVENTIONS``), each record's map convention and render size
-        (``targets_sha256``) and the copy settings."""
+        (``TARGET_CONVENTIONS``), each record's map convention and render size and, for
+        UVDoc, its geometry name (``targets_sha256``) and the copy settings."""
         fallback = self.spec.license or self.spec.kind
         classes = Counter(r.get("license_class") or fallback for r in self.records)
         listing = "\n".join(
             f"{r['sample_id']}\t{r.get('track', '')}\t{r.get('license_class', '')}"
             for r in self.records
         )
-        targets = "\n".join(f"{r['sample_id']}\t{r.get('render_size')}" for r in self.records)
+        targets = "\n".join(
+            "\t".join(
+                [r["sample_id"], str(r.get("render_size"))]
+                + ([r["geometry"]] if "geometry" in r else [])
+            )
+            for r in self.records
+        )
         return {
             "name": self.spec.name,
             "kind": self.spec.kind,
@@ -793,7 +810,8 @@ class UVDocSource(_Source):
     """Upstream ``data_UVDoc.py`` layout: ``img/<id>.png``, ``metadata_sample/<id>.json``
     (``geom_name``), ``grid2d/<geom>.mat`` (89x61 pixel coordinates), ``grid3d/<geom>.mat``.
 
-    The content digest covers every geometry file, since samples share them.
+    The content digest covers every geometry file, since samples share them. Each
+    sample's ``geom_name`` is read once at indexing and enters ``targets_sha256``.
     """
 
     def _index(self) -> list[dict[str, Any]]:
@@ -819,11 +837,17 @@ class UVDocSource(_Source):
                 files.extend(_matrix_files(directory / stem, sizes))
         return files
 
+    def _read_target_details(self, records: list[dict[str, Any]]) -> None:
+        for record in records:
+            path = self.root / "metadata_sample" / f"{record['sample_id']}.json"
+            geometry = json.loads(path.read_text(encoding="utf-8")).get("geom_name")
+            if not isinstance(geometry, str) or not geometry:
+                raise _error("invalid_data", f"{path}: geom_name missing")
+            record["geometry"] = geometry
+
     def load(self, index: int) -> RawSample:
         record = self.records[index]
-        sample_id = record["sample_id"]
-        meta_path = self.root / "metadata_sample" / f"{sample_id}.json"
-        geometry = json.loads(meta_path.read_text(encoding="utf-8"))["geom_name"]
+        sample_id, geometry = record["sample_id"], record["geometry"]
         image = Image.open(self.root / "img" / f"{sample_id}.png")
         pixels = _read_matrix(self.root / "grid2d" / geometry, "grid2d")
         grid, valid = self._grid(pixels_to_flattener(pixels, (image.size[1], image.size[0])))
@@ -1299,3 +1323,47 @@ def build_dataset(
         track=track,
         views=tuple(views),
     )
+
+
+def _code_tokens(source: str) -> str:
+    """The tokens of ``source``, one logical line per text line, without comments, blank
+    lines, line breaks inside brackets and docstrings (lines that are only a string)."""
+    lines, line = [], []
+    for token in tokenize.generate_tokens(io.StringIO(textwrap.dedent(source)).readline):
+        if token.type in (tokenize.COMMENT, tokenize.NL):
+            continue
+        if token.type in (tokenize.INDENT, tokenize.DEDENT):
+            lines.append(tokenize.tok_name[token.type])
+        elif token.type in (tokenize.NEWLINE, tokenize.ENDMARKER):
+            if line and not (len(line) == 1 and line[0][0] == tokenize.STRING):
+                lines.append(" ".join(text for _, text in line))
+            line = []
+        else:
+            line.append((token.type, token.string))
+    return "\n".join(lines)
+
+
+def target_code_sha256() -> str:
+    """sha256 of the code that turns stored values into targets and pairs them with the
+    image: ``coords`` and here the grid readers, the source loaders, the crop mapping,
+    the image warp and the target masking. Only tokens count, so comment, docstring and
+    layout edits leave it unchanged."""
+    parts = (
+        coords,
+        _read_matrix,
+        _normalize_3d,
+        _Source._grid,
+        ConvertedSource.load,
+        SyntheticDocRawSource.load,
+        Doc3DSource.load,
+        UVDocSource._read_target_details,
+        UVDocSource.load,
+        Crop,
+        _edge_points,
+        warp_image,
+        DewarpDataset._target,
+    )
+    digest = hashlib.sha256()
+    for part in parts:
+        digest.update(_code_tokens(inspect.getsource(part)).encode("utf-8") + b"\0")
+    return digest.hexdigest()

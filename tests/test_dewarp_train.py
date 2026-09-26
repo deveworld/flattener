@@ -28,6 +28,7 @@ from flattener.dewarp.train import (
     _check_resume,
     _initialize,
     carry_best,
+    code_record,
     compute_losses,
     improves,
     learning_rate,
@@ -225,29 +226,35 @@ def test_resume_compatibility_and_initialization_lineage(tmp_path):
     config = _config(tmp_path)
     source = {"name": "own-train", "samples": 4, "records_sha256": "a", "targets_sha256": "t"}
     sources = {"train": [source], "val": []}
+    code = code_record()
     payload = {
         "train_config": config.to_dict(),
         "track": "release",
         "data_spec_sha256": spec.sha256,
         "data_sources": sources,
+        "code": code,
     }
     _check_resume(
-        replace(config, max_steps=2, num_workers=3, device="cuda"), payload, spec, sources
+        replace(config, max_steps=2, num_workers=3, device="cuda"), payload, spec, sources, code
     )
     _check_resume(  # validation settings may change; they start a new best instead
-        replace(config, val_max_batches=1, val_views=[ViewConfig("x")]), payload, spec, sources
+        replace(config, val_max_batches=1, val_views=[ViewConfig("x")]),
+        payload,
+        spec,
+        sources,
+        code,
     )
     for changed in (replace(config, lr=1e-3), replace(config, seed=1)):
         with pytest.raises(FlattenerError, match="resume"):
-            _check_resume(changed, payload, spec, sources)
+            _check_resume(changed, payload, spec, sources, code)
     with pytest.raises(FlattenerError, match="resume"):
-        _check_resume(config, {**payload, "data_spec_sha256": "x"}, spec, sources)
+        _check_resume(config, {**payload, "data_spec_sha256": "x"}, spec, sources, code)
     reconverted = {"train": [{**sources["train"][0], "records_sha256": "b"}], "val": []}
     with pytest.raises(FlattenerError, match="data sources"):
-        _check_resume(config, payload, spec, reconverted)
+        _check_resume(config, payload, spec, reconverted, code)
     legacy = {"train": [{k: v for k, v in source.items() if k != "targets_sha256"}], "val": []}
     with pytest.raises(FlattenerError, match="predates the target-convention signature"):
-        _check_resume(config, {**payload, "data_sources": legacy}, spec, sources)
+        _check_resume(config, {**payload, "data_sources": legacy}, spec, sources, code)
     research = tmp_path / "research.pt"
     save_checkpoint(research, _payload(7, track="research"))
     with pytest.raises(FlattenerError) as error:
