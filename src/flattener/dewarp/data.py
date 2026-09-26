@@ -807,11 +807,15 @@ def resize_box(
     """Whole-pixel ``box`` of ``image`` resized to a (3, H, W) uint8 tensor.
 
     Bilinear without antialiasing, as ``predict`` resizes a crop file (torch's uint8
-    kernel rounds, so values stay within one level of the float resize).
+    kernel rounds, so values stay within one level of the float resize). Other modes
+    (RGBA, L, P) are converted to RGB.
     """
-    region = torch.from_numpy(np.array(image.crop(box))).permute(2, 0, 1).unsqueeze(0)
+    region = image.crop(box)
+    if region.mode != "RGB":
+        region = region.convert("RGB")
+    pixels = torch.from_numpy(np.array(region)).permute(2, 0, 1).unsqueeze(0)
     return F.interpolate(
-        region, size=input_size, mode="bilinear", align_corners=False, antialias=False
+        pixels, size=input_size, mode="bilinear", align_corners=False, antialias=False
     )[0]
 
 

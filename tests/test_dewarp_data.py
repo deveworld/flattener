@@ -103,7 +103,7 @@ def _write_doc3d(root):
     (root / "grid2D/1").mkdir(parents=True)
     (root / "grid3D/1").mkdir(parents=True)
     size = (64, 64)
-    Image.fromarray(_image(size, 3)).save(root / "img/1/a.png")
+    Image.fromarray(_image(size, 3)).convert("RGBA").save(root / "img/1/a.png")  # as upstream
     np.save(root / "grid2D/1/a.npy", _grid_pixels(_page(size), GRID))
     grid3d = np.zeros((*GRID, 3), np.float32)
     grid3d[..., 0] = 0.6436657  # z max -> channel 0 == 1
@@ -409,6 +409,9 @@ def test_doc3d_and_uvdoc_adapters_follow_upstream_layouts(tmp_path):
     for item in (doc3d, uvdoc):
         assert item["has_grid3d"] and item["valid"].all() and item["grid3d"].shape == (3, *GRID)
         assert _fills_crop(item["grid2d"][0].numpy(), 0.06)
+        assert item["image"].shape == (1, 3, *INPUT)  # the RGBA Doc3D image as RGB
+    trained = _build(spec, train=True, augment=AugmentConfig())
+    assert trained[(0, 3)]["image"].shape == (3, *INPUT)
     torch.testing.assert_close(doc3d["grid3d"][0], torch.ones(GRID))
     expected = torch.tensor([0.0, 0.5, 0.9, 1.0]).expand(GRID)
     torch.testing.assert_close(doc3d["grid3d"][1], expected, atol=1e-6, rtol=0)
@@ -529,6 +532,30 @@ def test_evaluation_views_resize_whole_pixel_crops_like_predict(tmp_path):
     assert difference.abs().max() < 1 + 1e-6 and abs(float(difference.mean())) < 0.25
     grid = item["grid2d"][2].numpy()  # page nodes relative to the whole image
     assert grid[0].min() > -1 and grid[0].max() < 1
+
+
+def test_images_of_other_modes_load_as_rgb_in_every_view(tmp_path):
+    root = tmp_path / "modes"
+    _write_converted(root, count=3, size=(60, 44))
+    entries = [json.loads(line) for line in (root / "manifest.jsonl").read_text().splitlines()]
+    for entry, mode in zip(entries, ("RGBA", "L", "P"), strict=True):
+        with Image.open(root / entry["image"]) as opened:
+            opened.convert(mode).save(root / f"{entry['sample_id']}.png")
+        entry["image"] = f"{entry['sample_id']}.png"
+    (root / "manifest.jsonl").write_text("".join(json.dumps(e) + "\n" for e in entries))
+    source = {"name": "m", "kind": "converted", "root": str(root), "track": "research"}
+    spec = _spec(tmp_path, [source])
+    views = (ViewConfig("page"), ViewConfig("frame", "full_frame"))
+    dataset = _build(spec, views=views)
+    trained = _build(spec, train=True, augment=AugmentConfig(rotation_deg=20, rotation_prob=1))
+    for index, entry in enumerate(entries):
+        item = dataset[index]
+        assert item["image"].shape == (2, 3, *INPUT)
+        with Image.open(root / entry["image"]) as opened:
+            rgb = torch.from_numpy(np.array(opened.convert("RGB"))).permute(2, 0, 1)
+        reference = F.interpolate(rgb[None].double(), size=INPUT, mode="bilinear")[0]
+        assert (item["image"][1].double() - reference).abs().max() <= 1
+        assert trained[(index, index)]["image"].shape == (3, *INPUT)
 
 
 def test_color_jitter_runs_per_batch_and_matches_per_sample(tmp_path):
