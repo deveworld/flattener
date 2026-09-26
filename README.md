@@ -85,10 +85,11 @@ python -m flattener.benchmark calibrate --reports-dir reports/calibration \
 python -m flattener.benchmark docunet-stress --weights CKPT --output-dir OUT --force-render --device cuda
 ```
 
-- 변형은 `crop`(표준 크롭, 같은 실행 안의 기준), `full_frame`(배경까지 담긴 원본 사진 `docunet-photo-{k}_{m}.jpg`), `rot90`·`rot270`(크롭을 ±90° 돌림), `small_page`(무늬 캔버스 면적의 10–25%를 차지하는 크롭)입니다. 출력은 모두 똑바로 선 크롭의 크기로 렌더링합니다.
+- 변형은 `crop`(표준 크롭, 같은 실행 안의 기준), `full_frame`(배경까지 담긴 원본 사진 `docunet-photo-{k}_{m}.jpg`, EXIF 방향 적용), `rot90`·`rot270`(크롭을 ±90° 돌림), `small_page`(무늬 캔버스 면적의 10–25%를 차지하는 크롭)입니다. 출력은 모두 똑바로 선 크롭의 크기로 렌더링합니다.
 - 스캔은 똑바로 둔 채 채점하므로 돌아간 페이지를 그대로 돌려주는 모델은 `rot90`·`rot270` 점수가 낮게 나옵니다.
-- 결과는 `OUT/stress.json`과 변형별 `OUT/<변형>/docunet.json`에 남습니다. 검사에 실패한 예측 수도 변형별로 셉니다.
-- UVDoc 공개 가중치의 기준선은 `outputs/benchmarks/docunet/stress/uvdoc-mit/`에 있습니다(`external_pretrained`). 130_raw MS-SSIM/LD는 `crop` 0.540/7.10, `full_frame` 0.204/51.9, `rot90` 0.307/32.3, `rot270` 0.307/30.1, `small_page` 0.310/43.4이고, 검사에 실패한 예측은 없었습니다.
+- 결과는 `OUT/stress.json`과 변형별 `OUT/<변형>/docunet.json`에 남습니다. 검사에 실패한 예측 수와 기록에 없는 예측 수도 변형별로 셉니다.
+- 다시 실행하면 가중치와 입력 픽셀이 같은 예측만 남기고 나머지는 새로 만듭니다. 이미지별 점수는 예측 해시, 규약, SIFT flow 빌드, 스캔 해시가 모두 같을 때만 재사용합니다.
+- UVDoc 공개 가중치의 기준선은 `outputs/benchmarks/docunet/stress/uvdoc-mit/`에 있습니다(`external_pretrained`). 130_raw MS-SSIM/LD는 `crop` 0.540/7.10, `rot90` 0.307/32.3, `rot270` 0.307/30.1, `small_page` 0.310/43.4이고, 검사에 실패한 예측은 없었습니다. `full_frame`의 0.204/51.9는 EXIF 방향을 적용하기 전 값입니다. 사진 30장(방향 태그 6)이 옆으로 누운 채 들어가 있어 다시 채점해야 합니다.
 
 ## 결과의 근거 구분
 
