@@ -27,11 +27,14 @@ from flattener.dewarp.train import (
     TrainConfig,
     _check_resume,
     _initialize,
+    carry_best,
     compute_losses,
+    improves,
     learning_rate,
     main,
     memory_stats,
     restore_scaler,
+    save_due,
     train,
     validation_signature,
 )
@@ -298,6 +301,28 @@ def test_validation_signature_covers_what_defines_a_validation_result(tmp_path):
 def test_default_views_keep_a_margin_on_every_side():
     assert [view.name for view in DEFAULT_VIEWS] == ["page", "docunet"]
     assert all(view.crop == "page" and view.margin[0] >= 0.02 for view in DEFAULT_VIEWS)
+
+
+def test_best_carries_over_only_under_the_same_validation_signature(tmp_path):
+    config = _config(tmp_path)
+    val = [{"name": "own-val", "records_sha256": "a", "content_sha256": "b"}]
+    signature = validation_signature(config, val)
+    best = {"step": 2, "epe_px": 3.5, "signature": signature}
+    assert carry_best(best, signature) == (best, None)
+    assert carry_best(None, signature) == (None, None)
+    fewer = validation_signature(replace(config, val_max_batches=1), val)
+    assert carry_best(best, fewer) == (None, {"step": 2, "epe_px": 3.5})
+    assert improves(None, 4.0) and improves(best, 3.0)
+    assert not improves(best, 3.5) and not improves(None, float("nan"))
+
+
+def test_every_new_best_and_the_last_step_are_saved():
+    # A new best at the closing validation of an already saved step is saved again.
+    assert save_due(4, True, 4, 4, last=True)
+    assert not save_due(4, False, 4, 4, last=True)
+    assert save_due(3, False, 2, 2, last=True)
+    assert save_due(2, False, 0, 2) and not save_due(3, False, 2, 2)
+    assert save_due(3, True, 2, 0) and not save_due(4, False, 2, 0)
 
 
 def test_scaler_restore_and_strict_json_for_non_finite_values(tmp_path):

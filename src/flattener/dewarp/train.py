@@ -307,6 +307,35 @@ def validation_signature(config: TrainConfig, val_sources: list[dict[str, Any]])
     return hashlib.sha256(canonical_json(body)).hexdigest()
 
 
+def carry_best(
+    best: dict[str, Any] | None, signature: str
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """A resumed best and the note of a dropped one.
+
+    The best carries over when it was measured under ``signature``; otherwise the run
+    starts a new best and the note records the old step and EPE.
+    """
+    if best is None or best.get("signature") == signature:
+        return best, None
+    return None, {"step": best.get("step"), "epe_px": best.get("epe_px")}
+
+
+def improves(best: dict[str, Any] | None, epe: float) -> bool:
+    return math.isfinite(epe) and (best is None or epe < best["epe_px"])
+
+
+def save_due(
+    step: int, improved: bool, saved_step: int, checkpoint_every: int, *, last: bool = False
+) -> bool:
+    """Save every new best (so best.json names existing weights), every
+    ``checkpoint_every`` steps and the last step once."""
+    if improved:
+        return True
+    if last:
+        return saved_step != step
+    return bool(checkpoint_every) and step % checkpoint_every == 0
+
+
 def learning_rate(config: TrainConfig, step: int) -> float:
     """Learning rate for the optimizer step with index ``step`` (0-based)."""
     if step < config.warmup_steps:
@@ -700,10 +729,9 @@ def train(config: TrainConfig, *, resume: str = "auto") -> dict[str, Any]:
                 *payload.get("resumes", []),
                 {"step": step, "code_sha256": code["sha256"], "utc": utc_now()},
             ]
-            if best is not None and best.get("signature") != signature:
-                # Bests compare only under one validation signature.
-                resumes[-1]["best_reset"] = {"step": best.get("step"), "epe_px": best["epe_px"]}
-                best = None
+            best, dropped = carry_best(best, signature)
+            if dropped is not None:
+                resumes[-1]["best_reset"] = dropped
         else:
             lineage = [
                 _initialize(model, config),
@@ -808,8 +836,7 @@ def train(config: TrainConfig, *, resume: str = "auto") -> dict[str, Any]:
                 selected = name == metrics["view"]
                 record = {"kind": "val", "step": step, "view": name, "selected": selected}
                 log({**record, **values, "samples": metrics["samples"], **memory})
-            epe = metrics["epe_px"]
-            if math.isfinite(epe) and (best is None or epe < best["epe_px"]):
+            if improves(best, metrics["epe_px"]):
                 best = {"step": step, **metrics}
                 return True
             return False
@@ -885,11 +912,11 @@ def train(config: TrainConfig, *, resume: str = "auto") -> dict[str, Any]:
                 window = {"images": 0, "data": 0.0, "start": time.perf_counter()}
                 sums = {}
             improved = bool(config.val_every) and step % config.val_every == 0 and run_validation()
-            if improved or (config.checkpoint_every and step % config.checkpoint_every == 0):
-                save()  # every new best is saved, so best.json names existing weights
+            if save_due(step, improved, saved_step, config.checkpoint_every):
+                save()
         if step > first_step:
             improved = run_validation()
-            if improved or saved_step != step:  # a best from this last validation is saved too
+            if save_due(step, improved, saved_step, config.checkpoint_every, last=True):
                 save()
         final = latest_checkpoint(checkpoints)
         state = "completed" if step >= config.total_steps else "stopped"
