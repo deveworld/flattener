@@ -193,7 +193,9 @@ def test_docunet_batch_writes_crop_sized_outputs(tmp_path, capsys, monkeypatch):
             assert written.size == size[::-1]
     report = json.loads((output / "predictions.json").read_text())
     assert [item["output"] for item in report["items"]] == ["1_1.png", "10_2.png"]
-    assert report["model"]["track"] == "release"
+    assert report["model"]["track"] == "release" and report["inputs"] == "docunet_crop"
+    assert report["evidence"]["evidence_kind"] == "smoke_training"  # a 3-step checkpoint
+    assert report["evidence"]["measurement"] == "predictions"
     assert main(arguments) == 0 and json.loads(capsys.readouterr().out)["written"] == 0
     kept = json.loads((output / "predictions.json").read_text())["items"]
     assert [(item["action"], item["status"], item["size"]) for item in kept] == [

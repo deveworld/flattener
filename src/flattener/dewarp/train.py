@@ -52,6 +52,7 @@ import torch
 from torch.nn import functional as F
 
 from ..contracts import FlattenerError, Status
+from ..evidence import evidence
 from .checkpoint import (
     CHECKPOINT_SCHEMA,
     checkpoint_sha256,
@@ -881,6 +882,13 @@ def train(config: TrainConfig, *, resume: str = "auto") -> dict[str, Any]:
                 return False
             metrics = {**validate(model, val_loader, config, device), "signature": signature}
             validated_step = step
+            own = {"kind": "checkpoint", "step": step}
+            for view in config.val_views:
+                crop = "gt_full_frame_validation" if view.crop == "full_frame" else None
+                metrics["views"][view.name]["evidence"] = evidence(
+                    crop or "gt_crop_validation", own
+                )
+            metrics["evidence"] = metrics["views"][metrics["view"]]["evidence"]
             memory = {k: v for k, v in metrics.items() if k in MEMORY_KEYS}
             for name, values in metrics["views"].items():
                 selected = name == metrics["view"]
@@ -971,11 +979,13 @@ def train(config: TrainConfig, *, resume: str = "auto") -> dict[str, Any]:
         final = latest_checkpoint(checkpoints)
         state = "completed" if step >= config.total_steps else "stopped"
         memory = memory_stats(device)
-        status(state, reason=stop_reason, checkpoint=str(final), memory=memory)
+        label = metrics.get("evidence")
+        status(state, reason=stop_reason, checkpoint=str(final), memory=memory, evidence=label)
         return {
             "state": state,
             "step": step,
             "checkpoint": str(final),
+            "evidence": label,
             "metrics": metrics,
             "best": best,
             "memory": memory,

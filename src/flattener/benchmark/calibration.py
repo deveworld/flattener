@@ -25,6 +25,7 @@ from typing import Any
 
 import numpy as np
 
+from ..evidence import evidence
 from . import docunet, ocr
 from .reporting import environment, mean, sha256_file, utc_now, write_json_atomic
 from .siftflow import SiftFlowBuild
@@ -378,6 +379,10 @@ def evaluate_gates(reports_dir: str | os.PathLike[str]) -> list[dict[str, Any]]:
     ]
 
 
+# Published PaperEdge and UVDoc outputs scored to check the evaluator.
+CALIBRATION_EVIDENCE = evidence("evaluator_calibration", {"provenance": "external_pretrained"})
+
+
 def run_calibration(
     reports_dir: str | os.PathLike[str],
     *,
@@ -448,6 +453,7 @@ def run_calibration(
                 workers=workers,
                 progress=ocr_progress,
             )
+        report["evidence"] = CALIBRATION_EVIDENCE
         write_json_atomic(path, report, overwrite=True)
         status[name] = "written"
     return status
@@ -489,6 +495,7 @@ def summarize_calibration(
         "archives": ARCHIVES,
         "created_utc": utc_now(),
         "evaluation_environment": evaluation_environment,
+        "evidence": CALIBRATION_EVIDENCE,
         "gates": gates,
         "other_reports": other_reports,
         "reports": reports,

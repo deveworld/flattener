@@ -38,6 +38,7 @@ from PIL import Image
 from torch.nn import functional as F
 
 from ..contracts import FlattenerError, RenderConfig, RenderResult, Status
+from ..evidence import evidence
 from ..renderer import render
 from .checkpoint import CHECKPOINT_SCHEMA, atomic_write, read_checkpoint, utc_now, write_json
 from .coords import grid_to_map, uvdoc_dense_map
@@ -328,6 +329,7 @@ def rectify_batch(
         "schema": PREDICTIONS_SCHEMA,
         "created_utc": utc_now(),
         "model": dewarper.info,
+        "evidence": evidence("predictions", dewarper.info),
         **(fields or {}),
         "force_render": force_render,
         "render_config": asdict(config),
@@ -419,7 +421,7 @@ def rectify_docunet(
         output_dir,
         overwrite=overwrite,
         force_render=force_render,
-        fields={"input_dir": str(Path(input_dir))},
+        fields={"input_dir": str(Path(input_dir)), "inputs": "docunet_crop"},
     )
 
 
@@ -462,6 +464,7 @@ def main(argv: list[str] | None = None) -> int:
             "status": str(result.status),
             "reason": result.reason_code,
             "forced": bool(result.metadata.get("forced_render")),
+            "evidence": evidence("predictions", dewarper.info),
         }
         print(json.dumps(summary))
         return 0 if result.status == Status.SUCCESS else EXIT_FAILED

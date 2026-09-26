@@ -201,3 +201,23 @@ def mutable_paper(paper_source, tmp_path):
         yield directory
     finally:
         shutil.rmtree(directory)
+
+
+@pytest.fixture
+def tiny_docunet(tmp_path, monkeypatch):
+    """65 tiny scans and 130 predictions; the metric area is shrunk to keep it fast."""
+    from flattener.benchmark import metrics
+
+    monkeypatch.setattr(metrics, "METRIC_AREA", 300)
+    rng = np.random.default_rng(7)
+    scans = tmp_path / "scans"
+    predictions = tmp_path / "pred"
+    scans.mkdir()
+    predictions.mkdir()
+    for k in range(1, 66):
+        scan = rng.integers(0, 256, size=(24, 18, 4), dtype=np.uint8)
+        Image.fromarray(scan, "RGBA").save(scans / f"docunet-reference-{k}.png")
+        for m in (1, 2):
+            prediction = rng.integers(0, 256, size=(20, 16, 3), dtype=np.uint8)
+            Image.fromarray(prediction).save(predictions / f"{k}_{m}.png")
+    return scans, predictions

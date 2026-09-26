@@ -48,7 +48,14 @@ from .docunet import (
     format_name,
     hash_references,
 )
-from .reporting import environment, mean, prediction_record, sha256_file, utc_now
+from .reporting import (
+    environment,
+    mean,
+    prediction_record,
+    report_evidence,
+    sha256_file,
+    utc_now,
+)
 
 REPORT_SCHEMA = "flattener-benchmark-ocr-1.0"
 DEFAULT_WORKERS = 2
@@ -482,6 +489,7 @@ def evaluate_ocr(
             summary["uvdoc"] = {"uvdoc_50": uvdoc_summary}
             rows["uvdoc"] = {"uvdoc_50": uvdoc_rows}
     calibrated_engine = is_calibrated_tesseract(engine_metadata.get("version_first_line"))
+    record = prediction_record(predictions_root)
     return {
         "benchmark": "docunet-ocr",
         "comparable": calibrated_engine and verify_references,
@@ -501,6 +509,7 @@ def evaluate_ocr(
         },
         "created_utc": utc_now(),
         "environment": environment(),
+        "evidence": report_evidence(record),
         "inputs": {
             "crops": crop_hashes,
             "crops_dir": str(crop_root) if "uvdoc" in protocols else None,
@@ -509,7 +518,7 @@ def evaluate_ocr(
             "references": {str(k): digest for k, digest in reference_hashes.items()},
             "references_dir": str(references_root),
         },
-        "predictions_record": prediction_record(predictions_root),
+        "predictions_record": record,
         "protocol": {name: PROTOCOL_DESCRIPTION[name] for name in protocols}
         | {"alpha_composite": PROTOCOL_DESCRIPTION["alpha_composite"]},
         "rows": rows,

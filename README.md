@@ -54,6 +54,8 @@ python -m flattener.dewarp.predict --weights CKPT docunet --input-dir crop --out
 
 예측은 `flattener.render`의 검사(좌표 범위, 덮는 비율, 접힘)를 거칩니다. 검사에 실패한 사진은 저장하지 않고 상태(`invalid_transform`과 이유)를 출력과 `predictions.json`에 남기며, 명령은 종료 코드 1로 끝납니다. `--force-render`를 붙이면 실패한 사진도 저장합니다. 공개 방법들과 같은 방식으로 벤치마크를 채점할 때 씁니다. 이때도 실패 기록과 종료 코드 1은 그대로이고, `flattener.benchmark` 보고서의 `prediction_failures`가 실패한 사진 수를 셉니다.
 
+검증은 화면 종류별로 EPE를 따로 기록합니다. 기본 화면은 페이지에 꼭 맞춘 크롭(`page`), DocUNet처럼 여백을 둔 크롭(`docunet`), 사진 전체(`full_frame`), 크롭을 ±90° 돌린 화면(`rot90`, `rot270`), 무늬 있는 캔버스의 10–25%만 차지하는 작은 페이지(`small_page`)입니다. 최고 체크포인트는 `val_select`로 정한 화면 하나로 고르며, 정하지 않으면 첫 화면(`page`)을 씁니다. 정답 격자에 유효한 점이 하나도 없는 샘플은 평균에서 빼고 `not_evaluable`로 셉니다.
+
 `--print-config`는 최종 설정만 출력하고 끝냅니다. 학습은 출력 폴더의 마지막 체크포인트에서 이어 가고(`--resume auto`), 체크포인트는 `RUN/checkpoints/step_*.pt`에 쌓입니다. 가장 좋은 검증 결과는 `best.json`이 가리킵니다. `--weights`에는 UVDoc 공개 가중치 `best_model.pkl`도 넣을 수 있습니다.
 
 - `release` 트랙은 이용 조건이 확인된 데이터만 받습니다. 배포 대상은 이 트랙의 가중치입니다.
@@ -76,6 +78,19 @@ python -m flattener.benchmark calibrate --reports-dir reports/calibration \
 - AD는 MATLAB `lsqr` 기본값을 따르는 `lsqr_4iter`로 보고하고, 정확한 최소제곱 값 `exact_lstsq`도 함께 저장합니다.
 - OCR 보고서의 `comparable`은 Tesseract 5.0.1이고 스캔 해시가 맞을 때만 `true`입니다.
 - G1–G4 보정 결과는 `outputs/benchmarks/docunet/calibration.json`에 있습니다.
+
+## 결과의 근거 구분
+
+`predictions.json`, 학습 로그와 `best.json`, `flattener.benchmark` 보고서에는 `evidence` 항목이 들어갑니다. `evidence_kind` 하나로 결과의 종류를 구분합니다.
+
+- `new_model_real_photo`: 직접 학습한 체크포인트(1만 스텝 이상)로 DocUNet 실사진(표준 크롭 또는 스트레스 변형)을 보정하고 채점한 결과입니다. 새 모델의 실사진 성능 향상으로 세는 결과는 이것 하나입니다.
+- `gt_crop_validation`, `gt_full_frame_validation`: 학습 중 검증입니다. 정답이 있는 샘플을 정답 페이지 영역에 맞춰 자르거나 전체 화면으로 넣어 잽니다. 학습 상태를 확인하는 용도입니다.
+- `external_pretrained`: UVDoc 공개 가중치, 논문 저자가 공개한 결과처럼 밖에서 학습한 모델의 결과입니다. 위 예제의 UVDoc 가중치와 기준선이 여기에 들어가며, 비교 기준으로 씁니다.
+- `smoke_training`: 1만 스텝 미만으로 학습한 체크포인트의 결과입니다. 코드가 도는지 확인하는 용도입니다.
+- `docunet_standard`, `docunet_stress`: 예측 폴더에 `predictions.json`이 없어 모델 출처를 모르는 채점 결과입니다.
+- `evaluator_calibration`은 평가기 보정(G1–G4) 보고서, `predictions`는 점수 없이 예측만 담은 기록입니다.
+
+`measurement`(무엇을 쟀는지), `model_provenance`(`own_checkpoint`, `external_pretrained`), `checkpoint_step`도 함께 기록합니다.
 
 ## 데이터와 내부 평가
 

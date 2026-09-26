@@ -409,6 +409,11 @@ def test_two_step_cpu_training_smoke_and_exact_resume(tmp_path):
     assert checkpoint["track"] == "release" and checkpoint["lineage"][0]["kind"] == "scratch"
     assert list(checkpoint["metrics"]["views"]) == names
     assert all(checkpoint["metrics"]["views"][name]["epe_px"] > 0 for name in names)
+    views = checkpoint["metrics"]["views"]
+    assert views["full_frame"]["evidence"]["measurement"] == "gt_full_frame_validation"
+    assert views["rot90"]["evidence"]["measurement"] == "gt_crop_validation"
+    assert checkpoint["metrics"]["evidence"] == views["page"]["evidence"]
+    assert first["evidence"]["evidence_kind"] == "smoke_training"
     assert checkpoint["best"]["signature"] == checkpoint["metrics"]["signature"]
     manifest = checkpoint["data_sources"]
     assert [s["license_classes"] for s in manifest["train"]] == [{"clean": 4}]

@@ -27,6 +27,7 @@ from .reporting import (
     mean,
     prediction_record,
     prediction_status,
+    report_evidence,
     sha256_bytes,
     sha256_file,
     utc_now,
@@ -481,6 +482,7 @@ def evaluate_docunet(
         },
         "created_utc": utc_now(),
         "environment": environment(),
+        "evidence": report_evidence(record),
         "inputs": {
             "predictions": {row["id"]: row["prediction_sha256"] for row in rows},
             "predictions_dir": str(predictions_root),

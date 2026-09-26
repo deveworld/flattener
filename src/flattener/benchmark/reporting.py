@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .._version import __version__
+from ..evidence import evidence
 
 PREDICTIONS_FILE = "predictions.json"
 PREDICTIONS_SCHEMA = "flattener-dewarp-predictions-2"
@@ -140,6 +141,7 @@ def prediction_record(predictions_dir: str | os.PathLike[str]) -> dict[str, Any]
         "schema": schema,
         "model": {key: model.get(key) for key in ("kind", "path", "sha256", "step", "track")},
         "force_render": payload.get("force_render"),
+        "inputs": payload.get("inputs"),
         "items": len(items),
         "failed": None if failures is None else len(failures),
         "failures": failures,
@@ -152,3 +154,14 @@ def prediction_status(record: dict[str, Any] | None, name: str) -> str | None:
         return None
     failure = record["failures"].get(name)
     return "success" if failure is None else failure["status"]
+
+
+def report_evidence(record: dict[str, Any] | None) -> dict[str, Any]:
+    """Evidence of a DocUNet report from the predictions record (``prediction_record``).
+
+    Stress-variant inputs make it ``docunet_stress``; anything else is scored as the
+    standard benchmark. Without a record the model provenance is ``unknown``.
+    """
+    inputs = "" if record is None else str(record.get("inputs") or "")
+    measurement = "docunet_stress" if inputs.startswith("docunet_stress") else "docunet_standard"
+    return evidence(measurement, None if record is None else record["model"])
