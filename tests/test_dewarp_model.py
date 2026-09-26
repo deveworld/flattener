@@ -18,12 +18,14 @@ from flattener.dewarp.model import (
     uvdoc_model,
 )
 
-DEFAULT_UVDOC_REPO = Path.home() / ".cache/flattener-sota-20260926/repos/UVDoc"
 TINY = DewarpModelConfig(input_size=(64, 48), grid_size=(4, 3), num_filter=4)
 
 
 def _uvdoc_repo() -> Path:
-    repo = Path(os.environ.get("FLATTENER_UVDOC_REPO", DEFAULT_UVDOC_REPO))
+    """The upstream UVDoc checkout named by ``FLATTENER_UVDOC_REPO``."""
+    if not os.environ.get("FLATTENER_UVDOC_REPO"):
+        pytest.skip("set FLATTENER_UVDOC_REPO to an upstream UVDoc checkout")
+    repo = Path(os.environ["FLATTENER_UVDOC_REPO"])
     if not (repo / "model.py").is_file() or not (repo / "model/best_model.pkl").is_file():
         pytest.skip(f"UVDoc reference repository not found at {repo}")
     return repo

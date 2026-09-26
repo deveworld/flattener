@@ -24,7 +24,6 @@ from flattener.dewarp.predict import (
 )
 
 TINY = DewarpModelConfig(input_size=(64, 48), grid_size=(5, 4), num_filter=4)
-DEFAULT_UVDOC_REPO = Path.home() / ".cache/flattener-sota-20260926/repos/UVDoc"
 
 
 class _IdentityGrid(torch.nn.Module):
@@ -107,7 +106,9 @@ def test_prediction_runs_without_tf32_and_restores_the_flags():
 
 
 def _upstream_weights():
-    repo = Path(os.environ.get("FLATTENER_UVDOC_REPO", DEFAULT_UVDOC_REPO))
+    if not os.environ.get("FLATTENER_UVDOC_REPO"):
+        pytest.skip("set FLATTENER_UVDOC_REPO to an upstream UVDoc checkout")
+    repo = Path(os.environ["FLATTENER_UVDOC_REPO"])
     weights = repo / "model/best_model.pkl"
     if not weights.is_file():
         pytest.skip(f"UVDoc weights not found at {weights}")
