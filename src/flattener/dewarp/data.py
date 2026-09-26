@@ -38,6 +38,9 @@ sha256 and ``*_bytes`` fields feed the content digest and the size check.
 ``kind: "syntheticdoc_compact"`` reads the training copy written by
 ``tools/syntheticdoc/compact.py``: the converted layout plus ``compact.json`` and
 required per-file sha256 and sizes.
+
+Doc3D and UVDoc read MATLAB grids (``<name>.mat``) or a ``<name>.npy`` converted from
+one. Indexing refuses a ``.mat`` newer than the ``.npy`` next to it.
 """
 
 from __future__ import annotations
@@ -369,7 +372,10 @@ class RawSample:
 
 
 def _read_matrix(path_without_suffix: Path, key: str) -> NDArray:
-    """Upstream ``np.array(h5py.File(mat)[key][:].T)``, or the same array saved as .npy."""
+    """Upstream ``np.array(h5py.File(mat)[key][:].T)``, or the same array saved as .npy.
+
+    Indexing checks the .npy against its .mat (``_matrix_files``).
+    """
     npy = path_without_suffix.with_name(path_without_suffix.name + ".npy")
     if npy.is_file():
         return np.load(npy, allow_pickle=False)
@@ -395,13 +401,14 @@ def _normalize_3d(grid3d: NDArray, ranges: tuple[float, ...], order: str) -> NDA
 
 
 class _FileSizes:
-    """File sizes from one ``os.scandir`` per directory (cheap on NTFS and NVMe)."""
+    """File sizes and mtimes from one ``os.scandir`` per directory (cheap on NTFS and NVMe)."""
 
     def __init__(self) -> None:
-        self.listings: dict[str, dict[str, int]] = {}
+        self.listings: dict[str, dict[str, tuple[int, int]]] = {}
 
-    def __call__(self, path: str | Path) -> int | None:
-        directory, name = os.path.split(os.fspath(path))
+    def listing(self, directory: str | Path) -> dict[str, tuple[int, int]]:
+        """``{name: (size, mtime_ns)}`` of the files in ``directory``."""
+        directory = os.fspath(directory)
         listing = self.listings.get(directory)
         if listing is None:
             listing = {}
@@ -409,18 +416,44 @@ class _FileSizes:
                 with os.scandir(directory or ".") as entries:
                     for entry in entries:
                         if entry.is_file():
-                            listing[entry.name] = entry.stat().st_size
+                            stat = entry.stat()
+                            listing[entry.name] = (stat.st_size, stat.st_mtime_ns)
             except FileNotFoundError:
                 pass
             self.listings[directory] = listing
-        return listing.get(name)
+        return listing
+
+    def stat(self, path: str | Path) -> tuple[int, int] | None:
+        directory, name = os.path.split(os.fspath(path))
+        return self.listing(directory).get(name)
+
+    def __call__(self, path: str | Path) -> int | None:
+        found = self.stat(path)
+        return None if found is None else found[0]
+
+
+def _matrix_files(path_without_suffix: Path, sizes: _FileSizes) -> list[str]:
+    """The ``.npy`` and ``.mat`` files of one grid that exist (the .mat when neither does).
+
+    Raises ``stale_cache`` when the .mat is newer than its .npy stand-in.
+    """
+    npy = path_without_suffix.with_name(path_without_suffix.name + ".npy")
+    mat = npy.with_suffix(".mat")
+    found = {npy: sizes.stat(npy), mat: sizes.stat(mat)}
+    if found[npy] is not None and found[mat] is not None and found[mat][1] > found[npy][1]:
+        raise _error(
+            "stale_cache", f"{npy} is older than {mat.name}; convert it again or delete it"
+        )
+    existing = [str(path) for path, stat in found.items() if stat is not None]
+    return existing or [str(mat)]
 
 
 class _Source:
     """One spec source: indexes records on construction; ``load`` opens one sample.
 
-    Construction also digests the sample contents (manifest sha256 where given, file
-    sizes otherwise) so a resume can refuse re-encoded data that keeps its ids.
+    Construction also digests the sample contents (file sizes, plus the manifest sha256
+    where given, plus ``shared_files``) so a resume can refuse re-encoded data that keeps
+    its ids.
     """
 
     def __init__(self, spec: SourceSpec, root: Path, grid_size: tuple[int, int]) -> None:
@@ -454,6 +487,10 @@ class _Source:
         """Files whose sizes identify the sample (with the manifest hashes, if any)."""
         raise NotImplementedError
 
+    def shared_files(self, sizes: _FileSizes) -> list[str]:
+        """Files that samples share (digested once per source)."""
+        return []
+
     def _content_digest(self) -> str:
         sizes = _FileSizes()
         digest = hashlib.sha256()
@@ -473,6 +510,9 @@ class _Source:
             hashes = self.hashes.get(record["sample_id"], ())
             line = "\t".join([record["sample_id"], *hashes, *map(str, found)])
             digest.update(line.encode("utf-8") + b"\n")
+        for path in self.shared_files(sizes):
+            name = os.path.relpath(path, self.root).replace(os.sep, "/")
+            digest.update(f"{name}\t{sizes(path)}\n".encode())
         return digest.hexdigest()
 
     def _meta(self, record: dict[str, Any], track: str, license_text: str) -> dict[str, str]:
@@ -511,6 +551,7 @@ class _Source:
 class ConvertedSource(_Source):
     require_manifest = False
     require_hashes = False
+    require_sizes = False
 
     def _documents(self) -> list[tuple[Any, Path]]:
         manifest = self.root / "manifest.jsonl"
@@ -564,6 +605,9 @@ class ConvertedSource(_Source):
             elif self.require_hashes:
                 raise _error("invalid_data", f"{sample_id}: image/backward_map sha256 missing")
             sizes = tuple(entry.get(k) for k in ("image_bytes", "backward_map_bytes"))
+            known_sizes = all(isinstance(s, int) and not isinstance(s, bool) for s in sizes)
+            if self.require_sizes and not known_sizes:
+                raise _error("invalid_data", f"{sample_id}: image/backward_map bytes missing")
             records.append(  # compact: records are pickled into every loader worker
                 {
                     "sample_id": sample_id,
@@ -572,7 +616,7 @@ class ConvertedSource(_Source):
                     "track": track,
                     "license_class": license_class,
                     "render_size": tuple(render_size) if convention == "syntheticdoc" else None,
-                    "bytes": sizes if all(isinstance(s, int) for s in sizes) else None,
+                    "bytes": sizes if known_sizes else None,
                 }
             )
         return records
@@ -596,6 +640,7 @@ class SyntheticDocCompactSource(ConvertedSource):
 
     require_manifest = True
     require_hashes = True
+    require_sizes = True
 
     def _index(self) -> list[dict[str, Any]]:
         path = self.root / "compact.json"
@@ -650,11 +695,6 @@ class SyntheticDocRawSource(_Source):
         return RawSample(image, grid, np.isfinite(grid).all(axis=-1), None, meta)
 
 
-def _matrix_file(path_without_suffix: Path, sizes: _FileSizes) -> str:
-    npy = path_without_suffix.with_name(path_without_suffix.name + ".npy")
-    return str(npy if sizes(npy) is not None else npy.with_suffix(".mat"))
-
-
 class Doc3DSource(_Source):
     """Upstream ``data_doc3D.py`` layout: ``img/<id>.png``, ``grid2D/<id>.mat`` (pixel
     coordinates of the 448x448 image), ``grid3D/<id>.mat``; ids from ``traindoc.txt``
@@ -673,8 +713,8 @@ class Doc3DSource(_Source):
         sample_id = record["sample_id"]
         return [
             str(self.root / "img" / f"{sample_id}.png"),
-            _matrix_file(self.root / "grid2D" / sample_id, sizes),
-            _matrix_file(self.root / "grid3D" / sample_id, sizes),
+            *_matrix_files(self.root / "grid2D" / sample_id, sizes),
+            *_matrix_files(self.root / "grid3D" / sample_id, sizes),
         ]
 
     def load(self, index: int) -> RawSample:
@@ -693,7 +733,10 @@ class Doc3DSource(_Source):
 
 class UVDocSource(_Source):
     """Upstream ``data_UVDoc.py`` layout: ``img/<id>.png``, ``metadata_sample/<id>.json``
-    (``geom_name``), ``grid2d/<geom>.mat`` (89x61 pixel coordinates), ``grid3d/<geom>.mat``."""
+    (``geom_name``), ``grid2d/<geom>.mat`` (89x61 pixel coordinates), ``grid3d/<geom>.mat``.
+
+    The content digest covers every geometry file, since samples share them.
+    """
 
     def _index(self) -> list[dict[str, Any]]:
         return [{"sample_id": p.stem} for p in sorted((self.root / "img").glob("*.png"))]
@@ -704,6 +747,19 @@ class UVDocSource(_Source):
             str(self.root / "img" / f"{sample_id}.png"),
             str(self.root / "metadata_sample" / f"{sample_id}.json"),
         ]
+
+    def shared_files(self, sizes: _FileSizes) -> list[str]:
+        files = []
+        for name in ("grid2d", "grid3d"):
+            directory = self.root / name
+            stems = {
+                Path(entry).stem
+                for entry in sizes.listing(directory)
+                if entry.endswith((".mat", ".npy"))
+            }
+            for stem in sorted(stems):
+                files.extend(_matrix_files(directory / stem, sizes))
+        return files
 
     def load(self, index: int) -> RawSample:
         record = self.records[index]

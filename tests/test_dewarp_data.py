@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import os
 import pickle
 
 import numpy as np
@@ -344,6 +345,11 @@ def test_compact_source_checks_hashes_sizes_and_track(tmp_path):
     manifest.write_text("".join(json.dumps(e) + "\n" for e in entries))
     with pytest.raises(FlattenerError, match="sha256"):
         _build(spec, track="release")
+    entries[1]["image_sha256"] = "0" * 64
+    del entries[1]["backward_map_bytes"]
+    manifest.write_text("".join(json.dumps(e) + "\n" for e in entries))
+    with pytest.raises(FlattenerError, match="bytes missing"):
+        _build(spec, track="release")
     _write_compact(tmp_path / "research", track="research")
     leaky = {**source, "name": "r", "root": str(tmp_path / "research")}
     with pytest.raises(FlattenerError) as error:
@@ -417,6 +423,50 @@ def test_doc3d_and_uvdoc_adapters_follow_upstream_layouts(tmp_path):
     torch.testing.assert_close(doc3d["grid3d"][1], expected, atol=1e-6, rtol=0)
     torch.testing.assert_close(uvdoc["grid3d"][0], torch.zeros(GRID), atol=1e-6, rtol=0)
     assert uvdoc["sample_id"] == "0001" and uvdoc["kind"] == "uvdoc"
+
+
+def _digest(spec):
+    return _build(spec).describe()[0]["content_sha256"]
+
+
+def _touch(path, seconds):
+    os.utime(path, ns=(seconds * 10**9, seconds * 10**9))
+
+
+def test_npy_grids_are_checked_against_their_mat_files(tmp_path):
+    _write_doc3d(tmp_path / "doc3d")
+    grid2d = tmp_path / "doc3d/grid2D/1"
+    source = {"name": "d", "kind": "doc3d", "root": str(tmp_path / "doc3d"), "track": "research"}
+    spec = _spec(tmp_path, [source])
+    npy_only = _digest(spec)
+    _touch(grid2d / "a.npy", 2_000_000_000)
+    (grid2d / "a.mat").write_bytes(b"x" * 100)  # the .mat the .npy was converted from
+    _touch(grid2d / "a.mat", 1_900_000_000)
+    with_mat = _digest(spec)
+    assert with_mat != npy_only
+    (grid2d / "a.mat").write_bytes(b"x" * 120)  # re-fetched with another size
+    _touch(grid2d / "a.mat", 1_900_000_000)
+    assert _digest(spec) != with_mat
+    _touch(grid2d / "a.mat", 2_100_000_000)  # re-fetched after the conversion
+    with pytest.raises(FlattenerError) as error:
+        _build(spec)
+    assert error.value.reason_code == "stale_cache"
+
+
+def test_uvdoc_digest_covers_the_shared_geometry_files(tmp_path):
+    _write_uvdoc(tmp_path / "uvdoc")
+    source = {"name": "u", "kind": "uvdoc", "root": str(tmp_path / "uvdoc"), "track": "research"}
+    spec = _spec(tmp_path, [source])
+    before = _digest(spec)
+    grid3d = tmp_path / "uvdoc/grid3d/geom.npy"
+    np.save(grid3d, np.full((9, 7, 3), -0.12551452, np.float64))  # replaced geometry
+    assert _digest(spec) != before
+    _touch(grid3d, 2_000_000_000)
+    (grid3d.with_suffix(".mat")).write_bytes(b"x")
+    _touch(grid3d.with_suffix(".mat"), 2_100_000_000)
+    with pytest.raises(FlattenerError) as error:
+        _build(spec)
+    assert error.value.reason_code == "stale_cache"
 
 
 def test_matlab_v73_grids_are_read_with_h5py(tmp_path):
