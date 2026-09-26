@@ -18,7 +18,7 @@ from flattener.synthetic.paired_scenes import (
     validate_paired_scene_dataset,
 )
 from flattener.synthetic.scene_v2 import SIZE_BINS, generate_scene_v2
-from flattener.synthetic.scenes import generate_scene
+from flattener.synthetic.scenes import BACKGROUND_TYPES, generate_background, generate_scene
 
 SMALL = PairedSceneConfig(
     train_documents=3, validation_documents=3, test_documents=3, image_size=(128, 128)
@@ -391,3 +391,17 @@ def test_blank_mask_cannot_become_physical_surface_gt(dataset):
     record["sha256"]["mask.png"] = hashlib.sha256(target.read_bytes()).hexdigest()
     with pytest.raises(FlattenerError, match="presence/area/bbox"):
         load_paired_scene(dataset, record)
+
+
+@pytest.mark.parametrize("kind", BACKGROUND_TYPES)
+def test_backgrounds_are_deterministic_and_nonconstant(kind):
+    first, first_meta = generate_background((128, 144), 47, kind)
+    second, second_meta = generate_background((128, 144), 47, kind)
+    np.testing.assert_array_equal(first, second)
+    assert first_meta == second_meta
+    assert first.shape == (128, 144, 3) and first.dtype == np.uint8
+    assert first.std() > 5
+    assert first_meta["type"] == kind
+    assert "not a photograph" in first_meta["source"]
+    changed, _ = generate_background((128, 144), 48, kind)
+    assert not np.array_equal(first, changed)

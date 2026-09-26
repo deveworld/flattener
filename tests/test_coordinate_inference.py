@@ -16,7 +16,7 @@ from PIL import Image
 from flattener import RenderConfig, identity_map, render
 from flattener.contracts import FlattenerError
 from flattener.learning import coordinate_study as study
-from flattener.learning.coordinate_inference import load_coordinate_predictor
+from flattener.learning.coordinate_study import load_coordinate_predictor
 from flattener.learning.inference import LoadedPredictor, unwarp
 from flattener.learning.model import ModelConfig, coarse_identity
 from flattener.learning.spatial import make_coordinate_model

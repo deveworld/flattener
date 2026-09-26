@@ -1,5 +1,6 @@
 """Admission checks plus explicitly marked tiny initialization/resume tests."""
 
+import importlib
 import json
 import math
 import os
@@ -3111,3 +3112,90 @@ def test_page_and_gt_differential_supervision_have_gradients_without_optimizer()
     objective.backward()
     assert all(p.grad is not None and torch.isfinite(p.grad).all() for p in model.parameters())
     assert model.head[-1].weight.grad.abs().max() > 0
+
+
+@pytest.fixture(scope="module")
+def coordinate_training_data(tmp_path_factory):
+    from flattener.synthetic.paired_scenes import PairedSceneConfig, generate_paired_scene_dataset
+
+    directory = tmp_path_factory.mktemp("coordinate-training") / "scenes"
+    generate_paired_scene_dataset(directory, PairedSceneConfig(
+        seed=509, train_documents=1, validation_documents=1, test_documents=1,
+        image_size=(128, 128)))
+    return directory
+
+
+@pytest.mark.training
+def test_coordinate_cpu_resume_matches_uninterrupted_training(
+        coordinate_training_data, tmp_path, monkeypatch):
+    config = study.StudyConfig(
+        device="cpu", epochs=2, batch_size=2, output_size=(32, 32),
+        model_config=ModelConfig(input_size=(16, 16), grid_size=(5, 5),
+                                 channels=(2, 4, 4), hidden=8))
+    source = study.SceneCoordinateDataset
+    opened_splits = []
+
+    def training_data_only(directory, split, *args, **kwargs):
+        assert split in ("train", "validation")
+        opened_splits.append(split)
+        return source(directory, split, *args, **kwargs)
+
+    def no_cuda(*args, **kwargs):
+        pytest.fail("explicit CPU training attempted CUDA access")
+
+    # Adam lazily registers torch functions; initialize those before replacing APIs.
+    importlib.import_module("torch._dynamo")
+    monkeypatch.setattr(study, "SceneCoordinateDataset", training_data_only)
+    for name in ("is_available", "manual_seed", "get_rng_state", "set_rng_state", "device"):
+        monkeypatch.setattr(torch.cuda, name, no_cuda)
+    rng = torch.get_rng_state().clone()
+    threads = torch.get_num_threads()
+    uninterrupted = tmp_path / "full"
+    staged = tmp_path / "staged"
+    full = study.train_coordinate_study(coordinate_training_data, uninterrupted, config)
+    short = study.train_coordinate_study(
+        coordinate_training_data, staged, config, stop_after_epoch=1)
+    assert not short["complete"] and short["epochs_completed"] == 1
+    assert short["stop_reason"] == "stop_after_epoch"
+    resumed = study.train_coordinate_study(
+        coordinate_training_data, staged, config, resume=staged / "last.pt")
+    assert full["complete"] and resumed["complete"] and resumed["epochs_completed"] == 2
+    expected = study.coordinate_checkpoint(uninterrupted / "last.pt")
+    actual = study.coordinate_checkpoint(staged / "last.pt")
+    for key in ("model_state", "optimizer_state", "history", "epoch", "best_epoch",
+                "best_validation_epe_pixels", "torch_rng_state", "shuffle_rng_state",
+                "cuda_rng_state"):
+        assert study._same_state(actual[key], expected[key]), key
+    assert actual["cuda_rng_state"] is None and actual["device_info"]["device"] == "cpu"
+    assert torch.equal(torch.get_rng_state(), rng)
+    assert torch.get_num_threads() == threads
+    assert opened_splits == ["train", "validation"] * 3
+
+
+@pytest.mark.training
+def test_coordinate_cpu_budget_keeps_last_complete_epoch(
+        coordinate_training_data, tmp_path, monkeypatch):
+    config = study.StudyConfig(
+        device="cpu", architecture="spatial", epochs=2, batch_size=2, output_size=(32, 32),
+        model_config=ModelConfig(input_size=(16, 16), grid_size=(5, 5),
+                                 channels=(2, 4, 4), hidden=8))
+    clock = [0.0]
+    monkeypatch.setattr(study, "perf_counter", lambda: clock[0])
+    step = study._training_step
+    calls = []
+
+    def one_step_then_deadline(*args, **kwargs):
+        result = step(*args, **kwargs)
+        calls.append(1)
+        clock[0] = 100.0
+        return result
+
+    monkeypatch.setattr(study, "_training_step", one_step_then_deadline)
+    output = tmp_path / "timed"
+    report = study.train_coordinate_study(coordinate_training_data, output, config, max_seconds=10)
+    assert calls == [1]
+    assert report["stop_reason"] == "max_seconds" and report["epochs_completed"] == 0
+    assert not report["complete"]
+    checkpoint = study.coordinate_checkpoint(output / "last.pt")
+    assert checkpoint["epoch"] == 0 and checkpoint["optimizer_state"]["state"] == {}
+    assert not (output / ".training.lock").exists()

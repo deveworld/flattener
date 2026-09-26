@@ -76,6 +76,6 @@ CPU `float32`로 RGB를 [0,1]에 변환하고 `grid_sample(mode="bilinear", padd
 
 `crop_page(image, output_size, *, region=None, segmenter=None, region_config=None, config=None)`는 사각형 크롭을 수행합니다. `unwarp_page(image, predictor, output_size, *, region=None, segmenter=None, region_config=None, config=None)`는 영역 조건부 곡면 보정을 수행합니다.
 
-`region` 또는 `segmenter` 중 하나를 지정합니다. 분할기는 `load_region_model(checkpoint)`로 읽고 인쇄 페이지를 검출합니다. `estimate_page_region(image, segmenter, config=...)`는 영역 추정 결과를 반환합니다. 자동 분할 품질은 기준 미달입니다.
+`region` 또는 `segmenter` 중 하나를 지정합니다. 분할기는 `load_segmenter(checkpoint)`로 읽고 인쇄 페이지를 검출합니다. `estimate_page_region(image, segmenter, config=...)`는 영역 추정 결과를 반환합니다. 자동 분할 품질은 기준 미달입니다.
 
 영역 경로는 미리보기 좌표를 원본에 합성한 뒤 한 번 샘플링합니다. 기본 추정 마스크 coverage는 98%이며 부족하면 최대 20%까지 확대 후 재검사합니다. 반환 마스크의 정의는 위 렌더러 규약을 따릅니다. 출력 종횡비는 호출자가 정하고 실제 글자 보존은 결과 이미지에서 확인합니다.

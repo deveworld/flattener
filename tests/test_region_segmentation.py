@@ -1,5 +1,6 @@
 """Region segmentation contracts, binary-target preprocessing, and safe loading."""
 
+import hashlib
 from dataclasses import asdict
 
 import numpy as np
@@ -16,9 +17,14 @@ from flattener.regions.segmentation import (
     preprocess_mask,
     read_checkpoint,
 )
-from flattener.regions.training import RegionTrainConfig, _save_checkpoint
 
 pytestmark = pytest.mark.training
+
+
+def _save_checkpoint(path, state):
+    torch.save(state, path)
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    path.with_suffix(path.suffix + ".sha256").write_text(digest + "\n")
 
 
 @pytest.fixture
@@ -129,7 +135,7 @@ def checkpoint(tmp_path, model_config):
     path = tmp_path / "region.pt"
     state = {
         "schema_version": CHECKPOINT_SCHEMA,
-        "config": asdict(RegionTrainConfig(model_config=model_config)),
+        "config": {"model_config": asdict(model_config)},
         "model_state": model.state_dict(),
         "optimizer_state": {},
         "epoch": 0,

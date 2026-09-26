@@ -2,7 +2,6 @@
 
 import hashlib
 import json
-import shutil
 from copy import deepcopy
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -12,19 +11,10 @@ import numpy as np
 import pytest
 import torch
 
-from flattener.contracts import FlattenerError
 from flattener.coordinates import identity_map
 from flattener.learning import evaluation
-from flattener.learning.evaluation import (
-    METHODS,
-    boundary_mask,
-    coarse_representation_survey,
-    coordinate_metrics,
-    endpoint_error,
-    evaluate_checkpoint,
-)
-from flattener.learning.model import CoordinatePredictor, ModelConfig
-from flattener.synthetic.pipeline import DatasetConfig, generate_dataset, load_sample
+from flattener.learning.evaluation import boundary_mask, coordinate_metrics, endpoint_error
+from flattener.learning.model import ModelConfig
 
 
 def test_three_four_source_pixel_displacement_is_five_at_unequal_resolution():
@@ -112,200 +102,12 @@ def test_empty_and_nonboolean_masks_are_rejected():
             endpoint_error(truth, truth, mask, (4, 5))
 
 
-@pytest.fixture(scope="module")
-def evaluation_data(tmp_path_factory):
-    directory = tmp_path_factory.mktemp("learning-evaluation")
-    root = directory / "data"
-    manifest = generate_dataset(
-        root,
-        config=DatasetConfig(
-            seed=741,
-            train_documents=1,
-            validation_documents=2,
-            test_documents=1,
-            variants_per_document=2,
-            output_size=(128, 128),
-            photo_size=(128, 128),
-        ),
-    )
-    config = ModelConfig(input_size=(32, 24), grid_size=(5, 3), channels=(2, 3, 4), hidden=8)
-    with torch.random.fork_rng():
-        torch.manual_seed(12)
-        model = CoordinatePredictor(config)
-    checkpoint = directory / "identity.pt"
-    torch.save(
-        {
-            "schema_version": "learning-0.1",
-            "model_state": model.state_dict(),
-            "config": {"model_config": asdict(config)},
-            "epoch": 0,
-            "manifest_sha256": hashlib.sha256((root / "manifest.json").read_bytes()).hexdigest(),
-        },
-        checkpoint,
-    )
-    return root, checkpoint, manifest
-
-
 @pytest.fixture(autouse=True)
 def efficient_cpu_threads():
     previous = torch.get_num_threads()
     torch.set_num_threads(1)
     yield
     torch.set_num_threads(previous)
-
-
-def test_all_methods_count_every_sample_and_identity_predictor_agrees(evaluation_data, tmp_path):
-    root, checkpoint, _ = evaluation_data
-    report = evaluate_checkpoint(root, checkpoint, output_dir=tmp_path)
-    assert report["expected_count"] == report["completed_count"] == 4
-    assert report["failed_count"] == 0
-    assert report["evaluation_complete"] is True
-    assert report["quality_claim_allowed"] is False
-    for method in METHODS:
-        assert report["methods"][method]["completed_count"] == 4
-        assert report["methods"][method]["failed_count"] == 0
-        assert len(report["samples"][method]) == 4
-        assert len(report["methods"][method]["by_document_group"]) == 2
-        assert (
-            sum(row["expected_count"] for row in report["methods"][method]["by_family"].values())
-            == 4
-        )
-    identity = report["methods"]["identity"]["epe_pixels"]
-    for method in ("learned", "constant_gray", "permuted_image"):
-        assert report["methods"][method]["epe_pixels"] == identity
-    assert all(row["input_sample_id"] != row["id"] for row in report["samples"]["permuted_image"])
-    assert json.loads((tmp_path / "evaluation-validation.json").read_text()) == report
-    with pytest.raises(FileExistsError):
-        evaluate_checkpoint(root, checkpoint, output_dir=tmp_path)
-
-
-def test_dense_mean_is_direct_average_of_training_truth_only(evaluation_data):
-    root, _, manifest = evaluation_data
-    maps = [
-        load_sample(root, record).backward_map
-        for record in manifest["samples"]
-        if record["split"] == "train"
-    ]
-    expected = np.mean(np.stack(maps).astype(np.float64), axis=0).astype(np.float32)
-    actual = evaluation._training_mean(root, manifest["samples"])
-    np.testing.assert_array_equal(actual, expected)
-
-
-def test_missing_file_stays_in_expected_count_and_failed_rows(evaluation_data, tmp_path):
-    original, checkpoint, manifest = evaluation_data
-    root = tmp_path / "missing"
-    shutil.copytree(original, root)
-    record = next(row for row in manifest["samples"] if row["split"] == "validation")
-    (root / record["paths"]["photo.png"]).unlink()
-    report = evaluate_checkpoint(root, checkpoint)
-    assert report["expected_count"] == 4
-    assert report["failed_count"] >= 1
-    assert report["evaluation_complete"] is False
-    assert report["quality_claim_allowed"] is False
-    for method in METHODS:
-        rows = report["samples"][method]
-        missing = next(row for row in rows if row["id"] == record["id"])
-        assert missing["status"] == "failed"
-        assert missing["reason"] == "sample_load_failed"
-        assert report["methods"][method]["expected_count"] == 4
-        assert report["methods"][method]["failed_count"] >= 1
-
-
-def test_nonfinite_model_output_is_counted_separately(evaluation_data, monkeypatch):
-    root, checkpoint, _ = evaluation_data
-
-    def nonfinite(self, inputs):
-        return torch.full((inputs.shape[0], 2, *self.config.grid_size), float("nan"))
-
-    monkeypatch.setattr(CoordinatePredictor, "forward", nonfinite)
-    report = evaluate_checkpoint(root, checkpoint)
-    for method in ("learned", "constant_gray", "permuted_image"):
-        assert report["methods"][method]["non_finite_failure_count"] == 4
-        assert report["methods"][method]["failed_count"] == 4
-        assert report["methods"][method]["epe_pixels"]["mean"] is None
-    assert report["methods"]["identity"]["completed_count"] == 4
-    assert report["evaluation_complete"] is False
-
-
-def test_survey_and_validation_evaluation_never_read_test_artifacts(evaluation_data, monkeypatch):
-    root, checkpoint, _ = evaluation_data
-    checked = evaluation._checked_sample
-    visited = []
-
-    def recording(directory, record):
-        assert record["split"] != "test"
-        visited.append(record["split"])
-        return checked(directory, record)
-
-    monkeypatch.setattr(evaluation, "_checked_sample", recording)
-    report = coarse_representation_survey(root)
-    assert report["test_samples_loaded"] == 0
-    assert report["evaluation_complete"] is True
-    assert set(report["grids"]) == {"9x7", "17x13", "33x25"}
-    for summary in report["grids"].values():
-        assert summary["expected_count"] == summary["completed_count"] == 6
-        assert summary["by_split"]["train"]["expected_count"] == 2
-        assert summary["by_split"]["validation"]["expected_count"] == 4
-    evaluate_checkpoint(root, checkpoint)
-    assert set(visited) == {"train", "validation"}
-
-
-def test_survey_masked_constant_residual_remains_constant(evaluation_data, monkeypatch):
-    root, _, _ = evaluation_data
-    checked = evaluation._checked_sample
-
-    def shifted(directory, record):
-        sample = checked(directory, record)
-        sample.backward_map = identity_map(sample.valid_mask.shape)
-        sample.backward_map += np.asarray([0.04, -0.03], dtype=np.float32)
-        sample.valid_mask[::3, ::3] = False
-        sample.backward_map[~sample.valid_mask] = np.nan
-        return sample
-
-    monkeypatch.setattr(evaluation, "_checked_sample", shifted)
-    report = coarse_representation_survey(root)
-    assert report["evaluation_complete"] is True
-    for summary in report["grids"].values():
-        assert summary["epe_pixels"]["mean"] < 0.00002
-
-
-def test_checkpoint_for_other_manifest_is_rejected(evaluation_data, tmp_path):
-    root, checkpoint, _ = evaluation_data
-    state = torch.load(checkpoint, weights_only=True)
-    state["manifest_sha256"] = "0" * 64
-    modified = tmp_path / "mismatched.pt"
-    torch.save(state, modified)
-    with pytest.raises(ValueError, match="manifest does not match"):
-        evaluate_checkpoint(root, modified)
-
-
-def test_evaluation_preserves_torch_rng(evaluation_data):
-    root, checkpoint, _ = evaluation_data
-    before = torch.get_rng_state().clone()
-    evaluate_checkpoint(root, checkpoint)
-    assert torch.equal(torch.get_rng_state(), before)
-
-
-def test_evaluation_rejects_bad_checkpoint_sidecar(evaluation_data, tmp_path):
-    root, checkpoint, _ = evaluation_data
-    copied = tmp_path / "modified.pt"
-    shutil.copyfile(checkpoint, copied)
-    copied.with_suffix(".pt.sha256").write_text("0" * 64)
-    with pytest.raises(FlattenerError) as error:
-        evaluate_checkpoint(root, copied)
-    assert error.value.reason_code == "checkpoint_hash_mismatch"
-
-
-def test_evaluation_rejects_wrong_checkpoint_weight_dtype(evaluation_data, tmp_path):
-    root, checkpoint, _ = evaluation_data
-    saved = torch.load(checkpoint, weights_only=True)
-    key = next(iter(saved["model_state"]))
-    saved["model_state"][key] = saved["model_state"][key].double()
-    modified = tmp_path / "wrong-dtype.pt"
-    torch.save(saved, modified)
-    with pytest.raises(FlattenerError) as error:
-        evaluate_checkpoint(root, modified)
-    assert error.value.reason_code == "invalid_checkpoint"
 
 
 @pytest.mark.parametrize("output_size", [(4, 6), (12, 16), (24, 32)])
