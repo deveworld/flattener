@@ -204,3 +204,51 @@ def test_a_kept_output_must_come_from_the_same_input(tmp_path, capsys, monkeypat
     assert run("--force-render")[1]["kept"] == 1
     code, counts = run()
     assert code == EXIT_FAILED and counts["kept"] == 0 and not image.exists()
+
+
+def test_truncate_keeps_every_failure_rule():
+    image = np.random.default_rng(0).integers(0, 256, (40, 30, 3), dtype=np.uint8)
+    dewarper = Dewarper(_FoldGrid(), TINY, torch.device("cpu"))
+    with pytest.raises(FlattenerError) as error:
+        rectify(dewarper, image, quantize="truncate")
+    assert error.value.status == Status.INVALID_TRANSFORM
+    config = RenderConfig(on_error="return")
+    returned = rectify(dewarper, image, render_config=config, quantize="truncate")
+    assert returned.status == Status.INVALID_TRANSFORM and returned.image is None
+    forced = rectify(dewarper, image, allow_unchecked=True, quantize="truncate")
+    assert forced.status == Status.INVALID_TRANSFORM and forced.reason_code == "fold_or_degenerate"
+    assert forced.used_fallback and forced.metadata["forced_render"]
+    gap = rectify(dewarper, image, allow_unchecked=True).image.astype(int) - forced.image
+    assert gap.min() >= 0 and gap.max() <= 1
+    with pytest.raises(FlattenerError, match="quantize"):
+        rectify(dewarper, image, quantize="nearest")
+
+
+def test_truncate_cli_failures_still_fail(tmp_path, capsys):
+    weights = _degenerate_checkpoint(tmp_path / "model.pt")
+    source, output = _photo(tmp_path / "in.png"), tmp_path / "out.png"
+    _photo(output)  # an image of an earlier run
+    argv = ["--weights", str(weights), "image", "--input", str(source), "--output", str(output)]
+    assert main([*argv, "--quantize", "truncate"]) == EXIT_FAILED and not output.exists()
+    printed = json.loads(capsys.readouterr().out)
+    assert printed["status"] == Status.INVALID_TRANSFORM.value
+    assert printed["quantize"] == printed["evidence"]["quantize"] == "truncate"
+    assert main([*argv, "--quantize", "truncate", "--force-render"]) == EXIT_FAILED
+    assert output.is_file() and json.loads(capsys.readouterr().out)["forced"] is True
+
+    argv, output = _docunet_args(tmp_path)
+    assert main([*argv, "--quantize", "truncate"]) == EXIT_FAILED
+    assert not (output / "1_1.png").exists()
+    assert json.loads(capsys.readouterr().out)["failed"] == 1
+    assert main([*argv, "--quantize", "truncate", "--force-render"]) == EXIT_FAILED
+    assert (output / "1_1.png").is_file()
+    record = json.loads((output / "predictions.json").read_text())
+    [item] = record["items"]
+    assert record["quantize"] == "truncate" and _records_invalid_transform(item) and item["forced"]
+    assert json.loads(capsys.readouterr().out) == {
+        "items": 1,
+        "written": 1,
+        "kept": 0,
+        "failed": 1,
+        "forced": 1,
+    }

@@ -97,8 +97,10 @@ def prediction_record(predictions_dir: str | os.PathLike[str]) -> dict[str, Any]
     """What ``flattener.dewarp.predict`` recorded about a predictions directory.
 
     Reads ``predictions.json`` and returns its hash, the model, the force-render flag,
-    ``complete`` (whether the batch finished; ``None`` for records that predate the
-    flag), ``outputs`` (the recorded output file names) and ``failures``: output file
+    ``quantize`` (how the images became uint8: ``round`` or ``truncate``; a current-format
+    record without the field predates the option and was rounded; ``None`` for other
+    formats), ``complete`` (whether the batch finished; ``None`` for records that predate
+    the flag), ``outputs`` (the recorded output file names) and ``failures``: output file
     name -> status, reason and whether a forced image was written. Items of the older
     ``flattener-dewarp-docunet-1`` format that were rendered unchecked (``fallback``)
     count as ``invalid_transform``; that format ran no coverage check. Returns ``None``
@@ -147,6 +149,7 @@ def prediction_record(predictions_dir: str | os.PathLike[str]) -> dict[str, Any]
             "initialization": initialization(model),
         },
         "force_render": payload.get("force_render"),
+        "quantize": payload.get("quantize", "round" if schema == PREDICTIONS_SCHEMA else None),
         "inputs": payload.get("inputs"),
         "complete": payload.get("complete") if schema == PREDICTIONS_SCHEMA else None,
         "items": len(items),
@@ -188,7 +191,11 @@ def report_evidence(record: dict[str, Any] | None) -> dict[str, Any]:
 
     Stress-variant inputs make it ``docunet_stress``; anything else is scored as the
     standard benchmark. Without a record the model provenance is ``unknown``.
+    ``quantize`` is the record's output quantization (``None`` when unknown).
     """
     inputs = "" if record is None else str(record.get("inputs") or "")
     measurement = "docunet_stress" if inputs.startswith("docunet_stress") else "docunet_standard"
-    return evidence(measurement, None if record is None else record["model"])
+    return {
+        **evidence(measurement, None if record is None else record["model"]),
+        "quantize": None if record is None else record.get("quantize"),
+    }

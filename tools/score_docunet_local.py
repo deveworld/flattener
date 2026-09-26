@@ -2,22 +2,33 @@
 
 Usage (from any directory; put --stress after CHECKPOINT and RUN):
   .venv/bin/python tools/score_docunet_local.py CHECKPOINT RUN [--stress [VARIANT ...]]
+  .venv/bin/python tools/score_docunet_local.py CHECKPOINT RUN \
+      --quantize truncate --ref-resize uvdoc_view2_double    # the published protocol
 
 Steps:
   1. ``flattener.dewarp.predict docunet`` rectifies the 130 crops with ``--force-render``
-     (published methods are scored that way) into CACHE/pred/RUN. Images that
-     predictions.json lists for the same weights and inputs are kept.
+     (published methods are scored that way) and ``--quantize Q`` into CACHE/pred/RUN
+     (Q=round, the default) or CACHE/pred-Q/RUN. Images that predictions.json lists for
+     the same weights, quantization and inputs are kept.
   2. ``flattener.benchmark docunet`` scores them with all three conventions and
-     ``--ref-resize once`` into outputs/dewarp-runs/RUN/docunet-once.json. An existing
-     report is kept when its prediction hashes match the current images; a report of
-     other images stops the script, and --overwrite replaces it.
-  3. With ``--stress``: ``flattener.benchmark docunet-stress`` predicts and scores the
+     ``--ref-resize R`` into outputs/dewarp-runs/RUN/docunet-R.json, or
+     docunet-R-truncate.json for Q=truncate (default: docunet-once.json). An existing
+     report is kept when its prediction hashes, ref-resize and quantization match; a
+     report of other images or settings stops the script, and --overwrite replaces it.
+  3. With ``--stress`` (default --quantize and --ref-resize only):
+     ``flattener.benchmark docunet-stress`` predicts and scores the
      stress variants (default: full_frame, rot90, rot270, small_page) into
      CACHE/stress/RUN and copies stress.json and each variant's docunet.json and
      predictions.json to outputs/dewarp-runs/RUN/stress/.
 
-outputs/dewarp-runs/RUN/ also gets predictions.json (the prediction record, no images).
+outputs/dewarp-runs/RUN/ also gets predictions.json, or predictions-truncate.json for
+Q=truncate (the prediction record, no images). Each quantization and ref-resize has its
+own file names, so one setting never overwrites another's images or reports.
 Images stay under CACHE: $FLATTENER_CACHE_DIR, default ~/.cache/flattener.
+
+Published DocUNet numbers (UVDoc, SyntheticDoc) come from outputs saved with truncation
+and scored with the UVDoc script (``--quantize truncate --ref-resize uvdoc_view2_double``);
+truncation instead of rounding alone moves LD by about 0.3.
 
 CPU limits: the script and its children run at nice 19. Prediction uses 2 threads
 (OMP_NUM_THREADS, MKL_NUM_THREADS). Scoring uses at most 2 worker processes with one
@@ -48,6 +59,9 @@ CROP_DIR = REPO / "outputs/benchmarks/docunet/crop"
 RUNS_DIR = REPO / "outputs/dewarp-runs"
 CONVENTIONS = ("128_excl64", "130_raw", "130_rot64")
 STRESS_VARIANTS = ("crop", "full_frame", "rot90", "rot270", "small_page")
+QUANTIZE_MODES = ("round", "truncate")  # flattener.dewarp.predict --quantize
+REF_RESIZE_MODES = ("once", "uvdoc_view2_double")  # flattener.benchmark docunet --ref-resize
+DEFAULT_QUANTIZE, DEFAULT_REF_RESIZE = "round", "once"
 DEFAULT_STRESS = ("full_frame", "rot90", "rot270", "small_page")
 MAX_WORKERS = 2
 MAX_THREADS = 2
@@ -83,6 +97,20 @@ def build_parser() -> argparse.ArgumentParser:
         type=_bounded(MAX_WORKERS),
         default=MAX_WORKERS,
         help="scoring worker processes; default %(default)s",
+    )
+    parser.add_argument(
+        "--quantize",
+        choices=QUANTIZE_MODES,
+        default=DEFAULT_QUANTIZE,
+        help="uint8 conversion of the rectified images: round (flattener.render) or "
+        "truncate (floor(x*255), as published outputs were saved); default %(default)s",
+    )
+    parser.add_argument(
+        "--ref-resize",
+        choices=REF_RESIZE_MODES,
+        default=DEFAULT_REF_RESIZE,
+        help="scan resize of the scorer: once (DocUNet/DocTr/PaperEdge) or "
+        "uvdoc_view2_double (UVDoc script); default %(default)s",
     )
     parser.add_argument(
         "--stress",
@@ -153,12 +181,41 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def report_matches(report_path: Path, pred_dir: Path, source_sha256: str) -> bool:
-    """Whether the report scored exactly the current images with the standard settings
-    and the same SIFT-flow sources."""
+def prediction_dir(cache: Path, run_name: str, quantize: str) -> Path:
+    """Prediction images of RUN: CACHE/pred/RUN for round, CACHE/pred-Q/RUN otherwise."""
+    base = "pred" if quantize == DEFAULT_QUANTIZE else f"pred-{quantize}"
+    return cache / base / run_name
+
+
+def report_name(ref_resize: str, quantize: str) -> str:
+    """docunet-R.json, with -Q before .json unless Q is round (default docunet-once.json)."""
+    suffix = "" if quantize == DEFAULT_QUANTIZE else f"-{quantize}"
+    return f"docunet-{ref_resize}{suffix}.json"
+
+
+def record_name(quantize: str) -> str:
+    """predictions.json for round, predictions-Q.json otherwise."""
+    return "predictions.json" if quantize == DEFAULT_QUANTIZE else f"predictions-{quantize}.json"
+
+
+def report_matches(
+    report_path: Path,
+    pred_dir: Path,
+    source_sha256: str,
+    ref_resize: str = DEFAULT_REF_RESIZE,
+    quantize: str = DEFAULT_QUANTIZE,
+) -> bool:
+    """Whether the report scored exactly the current images with these settings (all
+    conventions, ``ref_resize``, images quantized by ``quantize``) and the same SIFT-flow
+    sources."""
     report = json.loads(report_path.read_text(encoding="utf-8"))
     config = report.get("config", {})
-    if config.get("ref_resize") != "once" or set(config.get("conventions", ())) != set(CONVENTIONS):
+    if config.get("ref_resize") != ref_resize:
+        return False
+    if set(config.get("conventions", ())) != set(CONVENTIONS):
+        return False
+    # Reports made before predictions recorded the quantization scored rounded images.
+    if (report.get("predictions_record") or {}).get("quantize", DEFAULT_QUANTIZE) != quantize:
         return False
     if not report.get("comparable"):
         return False
@@ -172,35 +229,38 @@ def report_matches(report_path: Path, pred_dir: Path, source_sha256: str) -> boo
 
 
 def predict(args, cache: Path, env: dict[str, str]) -> tuple[dict, float]:
-    pred_dir = cache / "pred" / args.run
+    images = prediction_dir(cache, args.run, args.quantize)
     command = [
         sys.executable, "-m", "flattener.dewarp.predict",
         "--weights", str(args.checkpoint), "--device", args.device,
-        "docunet", "--input-dir", str(CROP_DIR), "--output-dir", str(pred_dir),
-        "--force-render",
+        "docunet", "--input-dir", str(CROP_DIR), "--output-dir", str(images),
+        "--force-render", "--quantize", args.quantize,
     ]  # fmt: skip
     if args.overwrite:
         command.append("--overwrite")
     started = time.perf_counter()
     run(command, env, ok=(0, 1))  # 1: some map failed its checks and was force-rendered
     wall = time.perf_counter() - started
-    record = json.loads((pred_dir / "predictions.json").read_text(encoding="utf-8"))
+    record = json.loads((images / "predictions.json").read_text(encoding="utf-8"))
     if not record.get("complete") or record["counts"]["items"] != 130:
-        raise SystemExit(f"error: {pred_dir}/predictions.json is incomplete")
+        raise SystemExit(f"error: {images}/predictions.json is incomplete")
+    if record.get("quantize", DEFAULT_QUANTIZE) != args.quantize:
+        raise SystemExit(f"error: {images}/predictions.json holds other quantization")
     return record, wall
 
 
 def score(args, cache: Path, env: dict[str, str], out_dir: Path) -> tuple[dict, str]:
-    pred_dir = cache / "pred" / args.run
-    report_path = out_dir / "docunet-once.json"
+    images = prediction_dir(cache, args.run, args.quantize)
+    report_path = out_dir / report_name(args.ref_resize, args.quantize)
     if report_path.is_file() and not args.overwrite:
         source = siftflow.resolve_source_dir(env["FLATTENER_SIFTFLOW_SOURCE"])
-        if report_matches(report_path, pred_dir, siftflow.source_tree_sha256(source)):
+        digest = siftflow.source_tree_sha256(source)
+        if report_matches(report_path, images, digest, args.ref_resize, args.quantize):
             return json.loads(report_path.read_text(encoding="utf-8")), "kept"
         raise SystemExit(f"error: {report_path} scores other images or settings; pass --overwrite")
     command = [
-        sys.executable, "-m", "flattener.benchmark", "docunet", str(pred_dir),
-        "--ref-resize", "once", "--workers", str(args.workers),
+        sys.executable, "-m", "flattener.benchmark", "docunet", str(images),
+        "--ref-resize", args.ref_resize, "--workers", str(args.workers),
         "--output", str(report_path), "--overwrite",
     ]  # fmt: skip
     if args.quiet:
@@ -249,6 +309,9 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(f"error: no checkpoint at {args.checkpoint}")
     if args.siftflow_source is None and not os.environ.get("FLATTENER_SIFTFLOW_SOURCE"):
         raise SystemExit("error: pass --siftflow-source DIR or set FLATTENER_SIFTFLOW_SOURCE")
+    default_protocol = (args.quantize, args.ref_resize) == (DEFAULT_QUANTIZE, DEFAULT_REF_RESIZE)
+    if args.stress is not None and not default_protocol:
+        raise SystemExit("error: --stress runs with the default --quantize and --ref-resize only")
     lower_priority()
     cache_value = args.cache_dir or os.environ.get("FLATTENER_CACHE_DIR") or "~/.cache/flattener"
     cache = Path(cache_value).expanduser().resolve()
@@ -263,11 +326,15 @@ def main(argv: list[str] | None = None) -> int:
     written = [item for item in record["items"] if item["action"] == "written"]
     per_image = sum(item["seconds"] for item in written) / len(written) if written else None
     report, score_state = score(args, cache, env, out_dir)
-    shutil.copyfile(cache / "pred" / args.run / "predictions.json", out_dir / "predictions.json")
+    shutil.copyfile(
+        prediction_dir(cache, args.run, args.quantize) / "predictions.json",
+        out_dir / record_name(args.quantize),
+    )
 
     counts = record["counts"]
+    settings = "" if default_protocol else f" quantize={args.quantize} ref_resize={args.ref_resize}"
     parts = [
-        f"{args.run} step={record['model'].get('step')}",
+        f"{args.run} step={record['model'].get('step')}{settings}",
         f"128_excl64 {metric_text(report['summary']['128_excl64'])}",
         f"130_raw {metric_text(report['summary']['130_raw'])}",
         f"predict {args.device} "

@@ -10,7 +10,9 @@ import torch
 import torch.nn.functional as F
 from PIL import Image
 
-from flattener import FlattenerError
+from flattener import FlattenerError, RenderConfig
+from flattener.benchmark.reporting import prediction_record, report_evidence
+from flattener.contracts import Status
 from flattener.dewarp import predict
 from flattener.dewarp.checkpoint import CHECKPOINT_SCHEMA, save_checkpoint
 from flattener.dewarp.coords import edge_positions
@@ -21,8 +23,11 @@ from flattener.dewarp.predict import (
     load_dewarper,
     main,
     predict_grid,
+    quantize_rgb,
     rectify,
+    sample_rgb,
 )
+from flattener.renderer import render
 
 TINY = DewarpModelConfig(input_size=(64, 48), grid_size=(5, 4), num_filter=4)
 
@@ -234,3 +239,88 @@ def test_upstream_weights_match_the_upstream_unwarping():
     inside = (dense[0].abs() <= 0.999).all(0).numpy()
     assert inside.mean() > 0.5
     assert np.abs(result.image[inside].astype(int) - expected[inside]).max() <= 1
+
+
+def test_truncate_is_floor_of_x_times_255_on_a_known_sample():
+    # Source columns a and b; a 4-wide output samples 1/4 and 3/4 of the way between them.
+    image = np.zeros((4, 2, 3), np.uint8)
+    image[:, 0], image[:, 1] = (0, 10, 200), (101, 31, 253)
+    dewarper = Dewarper(_IdentityGrid(), TINY, torch.device("cpu"))
+    exact = np.array([[0, 10, 200], [25.25, 15.25, 213.25], [75.75, 25.75, 239.75], image[0, 1]])
+    truncated = rectify(dewarper, image, (4, 4), quantize="truncate")
+    rounded = rectify(dewarper, image, (4, 4))
+    assert truncated.status == rounded.status == Status.SUCCESS
+    np.testing.assert_array_equal(truncated.image, np.broadcast_to(np.floor(exact), (4, 4, 3)))
+    np.testing.assert_array_equal(rounded.image, np.broadcast_to(np.floor(exact + 0.5), (4, 4, 3)))
+    assert truncated.metadata["dewarp"]["quantize"] == "truncate"
+    assert rounded.metadata["dewarp"]["quantize"] == "round"
+    values = np.array([0, 0.1, 0.5, 0.7, 0.999, 1, 1.25, -0.5], np.float32)
+    assert quantize_rgb(values, "truncate").tolist() == [0, 25, 127, 178, 254, 255, 255, 0]
+    assert quantize_rgb(values, "round").tolist() == [0, 26, 128, 179, 255, 255, 255, 0]
+    inside = values[(values >= 0) & (values <= 1)]  # the paper's (x * 255).astype(uint8)
+    np.testing.assert_array_equal(quantize_rgb(inside, "truncate"), (inside * 255).astype(np.uint8))
+
+
+def test_truncate_samples_what_flattener_render_rounds():
+    image = np.random.default_rng(4).integers(0, 256, (30, 20, 3), dtype=np.uint8)
+    yy, xx = np.meshgrid(np.linspace(-1.1, 0.9, 25), np.linspace(-0.8, 1.05, 18), indexing="ij")
+    backward_map = np.stack([xx, yy], -1).astype(np.float32)  # some pixels outside the source
+    fill = (1, 2, 3)
+    checked = render(image, backward_map, config=RenderConfig(fill_rgb=fill))
+    assert checked.status == Status.SUCCESS and not checked.valid_mask.all()
+    rounded = sample_rgb(image, backward_map, checked.valid_mask, fill, "round")
+    np.testing.assert_array_equal(rounded, checked.image)
+    truncated = sample_rgb(image, backward_map, checked.valid_mask, fill, "truncate")
+    gap = checked.image.astype(int) - truncated
+    assert gap.min() == 0 and gap.max() == 1  # truncation is at most one level lower
+    assert (truncated[~checked.valid_mask] == fill).all()
+    with pytest.raises(FlattenerError, match="quantize"):
+        quantize_rgb(np.zeros(3, np.float32), "nearest")
+
+
+def test_truncate_differs_from_round_by_at_most_one_level():
+    image = np.random.default_rng(5).integers(0, 256, (37, 29, 3), dtype=np.uint8)
+    dewarper = Dewarper(_IdentityGrid(), TINY, torch.device("cpu"))
+    rounded = rectify(dewarper, image, (50, 41))
+    truncated = rectify(dewarper, image, (50, 41), quantize="truncate")
+    gap = rounded.image.astype(int) - truncated.image
+    assert gap.min() == 0 and gap.max() == 1
+    assert truncated.metadata["validation"] == rounded.metadata["validation"]
+
+
+def test_docunet_batch_never_keeps_outputs_of_another_quantization(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(predict, "predict_grid", _identity_grid)
+    crops, output = tmp_path / "crop", tmp_path / "out"
+    crops.mkdir()
+    pixels = np.random.default_rng(6).integers(0, 256, (45, 33, 3), dtype=np.uint8)
+    Image.fromarray(pixels).save(crops / "1_1 copy.png")
+    weights = tmp_path / "model.pt"
+    _checkpoint(weights)
+    record_path = output / "predictions.json"
+    arguments = ["--weights", str(weights), "docunet", "--input-dir", str(crops)]
+    arguments += ["--output-dir", str(output)]
+
+    def run(quantize):
+        assert main([*arguments, "--quantize", quantize]) == 0
+        counts = json.loads(capsys.readouterr().out)
+        record = json.loads(record_path.read_text())
+        assert record["quantize"] == record["evidence"]["quantize"] == quantize
+        return counts["written"], counts["kept"]
+
+    assert run("round") == (1, 0)
+    assert run("round") == (0, 1)
+    assert run("truncate") == (1, 0)  # a rounded image is never kept for truncation
+    assert run("truncate") == (0, 1)
+    found = prediction_record(output)
+    assert found["quantize"] == report_evidence(found)["quantize"] == "truncate"
+    assert run("round") == (1, 0)
+    # A record without the field predates the option; its images were rounded.
+    record = json.loads(record_path.read_text())
+    del record["quantize"]
+    record_path.write_text(json.dumps(record))
+    assert prediction_record(output)["quantize"] == "round"
+    assert run("round") == (0, 1)
+    record = json.loads(record_path.read_text())
+    del record["quantize"]
+    record_path.write_text(json.dumps(record))
+    assert run("truncate") == (1, 0)

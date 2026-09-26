@@ -54,6 +54,8 @@ python -m flattener.dewarp.predict --weights CKPT docunet --input-dir crop --out
 
 예측은 `flattener.render`의 검사(좌표 범위, 덮는 비율, 접힘)를 거칩니다. 검사에 실패한 사진은 저장하지 않고 상태(`invalid_transform`과 이유)를 출력과 `predictions.json`에 남기며, 명령은 종료 코드 1로 끝납니다. `--force-render`를 붙이면 실패한 사진도 저장합니다. 공개 방법들과 같은 방식으로 벤치마크를 채점할 때 씁니다. 이때도 실패 기록과 종료 코드 1은 그대로이고, `flattener.benchmark` 보고서의 `prediction_failures`가 실패한 사진 수를 셉니다.
 
+`--quantize truncate`는 샘플링한 값을 반올림하지 않고 `floor(x*255)`로 저장합니다. UVDoc·SyntheticDoc 논문 수치는 이렇게 저장한 결과를 UVDoc 스크립트 방식(`--ref-resize uvdoc_view2_double`)으로 채점한 값이므로, 논문과 비교할 때 씁니다. 반올림과 내림만 바꿔도 LD가 0.3 정도 달라집니다. 검사, 실패 기록, 종료 코드는 기본값 `round`와 같고, 방식은 `predictions.json`과 `evidence`의 `quantize`에 남습니다. 다른 방식으로 만든 예측은 다시 쓰지 않습니다. `tools/score_docunet_local.py CKPT RUN --quantize truncate --ref-resize uvdoc_view2_double`는 이 방식으로 예측과 채점을 한 번에 하고, 설정마다 다른 파일 이름(`docunet-uvdoc_view2_double-truncate.json`)으로 저장합니다.
+
 검증은 화면 종류별로 EPE를 따로 기록합니다. 기본 화면은 페이지에 꼭 맞춘 크롭(`page`), DocUNet처럼 여백을 둔 크롭(`docunet`), 사진 전체(`full_frame`), 크롭을 ±90° 돌린 화면(`rot90`, `rot270`), 무늬 있는 캔버스의 10–25%만 차지하는 작은 페이지(`small_page`)입니다. 최고 체크포인트는 `val_select`로 정한 화면 하나로 고르며, 정하지 않으면 첫 화면(`page`)을 씁니다. 정답 격자에 유효한 점이 하나도 없는 샘플은 평균에서 빼고 `not_evaluable`로 셉니다.
 
 `--print-config`는 최종 설정만 출력하고 끝냅니다. 학습은 출력 폴더의 마지막 체크포인트에서 이어 가고(`--resume auto`), 체크포인트는 `RUN/checkpoints/step_*.pt`에 쌓입니다. 가장 좋은 검증 결과는 `best.json`이 가리킵니다. 검증 설정이 바뀐 채로 이어 가면 이전 `best.json`은 `best_before_step_*.json`으로 옮겨지고 새 기준으로 다시 고릅니다. `--weights`에는 UVDoc 공개 가중치 `best_model.pkl`도 넣을 수 있습니다.

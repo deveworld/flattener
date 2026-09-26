@@ -18,6 +18,14 @@ the printed JSON and in ``predictions.json``, and no image is written for it; th
 writes the image anyway (published methods are scored that way) and still records
 the failure. The exit status is 0 when every image passed and 1 when any image
 failed, with or without ``--force-render``.
+
+``--quantize`` sets how the sampled float image becomes uint8: ``round`` (default) keeps
+the image of ``flattener.render``, ``floor(clip(x, 0, 1) * 255 + 0.5)``; ``truncate``
+samples the same float image and stores ``floor(clip(x, 0, 1) * 255)``, as published
+DocUNet outputs were saved (``(x * 255).astype(uint8)``, the paper protocol). Checks,
+failure statuses, ``--force-render`` and the exit status are the same in both modes. The
+mode is recorded in the printed JSON, in ``predictions.json`` and in their evidence
+block, and an output of one mode is never kept by a run of the other.
 """
 
 from __future__ import annotations
@@ -57,6 +65,7 @@ from .model import (
 
 DOCUNET_INPUT = re.compile(r"^(\d+)_(\d+) copy\.png$")
 PREDICTIONS_SCHEMA = "flattener-dewarp-predictions-2"
+QUANTIZE_MODES = ("round", "truncate")  # round: flattener.render; truncate: paper protocol
 EXIT_FAILED = 1  # some image failed its checks (also when it was force-rendered)
 
 
@@ -185,22 +194,65 @@ def dense_backward_map(
     return grid_to_map(grid, output_size)
 
 
-def render_unchecked(
-    image: NDArray[np.uint8], backward_map: NDArray[np.float32], fill_rgb: tuple[int, int, int]
-) -> NDArray[np.uint8]:
-    """``flattener.render`` sampling without its fold/coverage rejection."""
+def check_quantize(quantize: str) -> None:
+    if quantize not in QUANTIZE_MODES:
+        raise FlattenerError(
+            Status.INPUT_ERROR,
+            "invalid_config",
+            f"quantize must be one of {QUANTIZE_MODES}, got {quantize!r}",
+        )
+
+
+def quantize_rgb(values: NDArray[np.float32], quantize: str) -> NDArray[np.uint8]:
+    """Sampled float RGB as uint8, computed in float32 like the renderer.
+
+    ``round``: ``floor(clip(x, 0, 1) * 255 + 0.5)``, exactly ``flattener.render``.
+    ``truncate``: ``floor(clip(x, 0, 1) * 255)``, which is ``(x * 255).astype(uint8)``
+    for sampled values (the way published DocUNet outputs were saved).
+    """
+    check_quantize(quantize)
+    scaled = np.clip(values, 0, 1).astype(np.float32, copy=False) * np.float32(255)
+    if quantize == "round":
+        scaled += np.float32(0.5)
+    return np.floor(scaled).astype(np.uint8)
+
+
+def source_inside(backward_map: NDArray[np.float32]) -> NDArray[np.bool_]:
+    """Output pixels whose finite map position lies in the source: the renderer's
+    valid pixels when no target mask is given."""
     finite = np.isfinite(backward_map).all(axis=-1)
-    inside = finite & (np.abs(np.where(finite[..., None], backward_map, 0)) <= 1).all(axis=-1)
-    grid = torch.from_numpy(np.where(inside[..., None], backward_map, 0).astype(np.float32))
+    return finite & (np.abs(np.where(finite[..., None], backward_map, 0)) <= 1).all(axis=-1)
+
+
+def sample_rgb(
+    image: NDArray[np.uint8],
+    backward_map: NDArray[np.float32],
+    valid: NDArray[np.bool_],
+    fill_rgb: tuple[int, int, int],
+    quantize: str,
+) -> NDArray[np.uint8]:
+    """``flattener.render``'s sampling (bilinear, border padding, align_corners=False,
+    positions outside ``valid`` read at 0 and filled with ``fill_rgb``), quantized by
+    ``quantize``. With ``round`` and the renderer's valid mask it equals its image."""
+    grid = torch.from_numpy(np.where(valid[..., None], backward_map, 0).astype(np.float32))
     source = torch.tensor(image).permute(2, 0, 1).unsqueeze(0).float() / 255
     with torch.inference_mode():
         sampled = F.grid_sample(
             source, grid.unsqueeze(0), mode="bilinear", padding_mode="border", align_corners=False
         )
-    values = np.floor(np.clip(sampled[0].permute(1, 2, 0).numpy(), 0, 1) * 255 + 0.5)
-    output = values.astype(np.uint8)
-    output[~inside] = fill_rgb
+    output = quantize_rgb(sampled[0].permute(1, 2, 0).numpy(), quantize)
+    output[~valid] = fill_rgb
     return output
+
+
+def render_unchecked(
+    image: NDArray[np.uint8],
+    backward_map: NDArray[np.float32],
+    fill_rgb: tuple[int, int, int],
+    quantize: str = "round",
+) -> NDArray[np.uint8]:
+    """``flattener.render`` sampling without its fold/coverage rejection."""
+    return sample_rgb(image, backward_map, source_inside(backward_map), fill_rgb, quantize)
 
 
 def rectify(
@@ -210,6 +262,7 @@ def rectify(
     *,
     render_config: RenderConfig | None = None,
     allow_unchecked: bool = False,
+    quantize: str = "round",
 ) -> RenderResult:
     """Predict and render through ``flattener.render`` and its checks.
 
@@ -218,6 +271,12 @@ def rectify(
     (``invalid_transform``) is sampled anyway: the result keeps the failed status and
     reason code, carries the image and sets ``used_fallback`` and
     ``metadata["forced_render"]``. Out-of-source output pixels get ``fill_rgb``.
+
+    ``quantize`` (``QUANTIZE_MODES``) only sets how the sampled image becomes uint8:
+    ``round`` keeps ``flattener.render``'s image; ``truncate`` samples the same float
+    image over the same valid pixels and stores ``floor(clip(x, 0, 1) * 255)``. Checks,
+    statuses and the failure policy are the same; ``metadata["dewarp"]["quantize"]``
+    records the mode.
     """
     started = time.perf_counter()
     config = RenderConfig() if render_config is None else render_config
@@ -225,13 +284,14 @@ def rectify(
         raise FlattenerError(
             Status.INPUT_ERROR, "invalid_config", "render_config must be RenderConfig"
         )
+    check_quantize(quantize)
     size = tuple(image.shape[:2]) if output_size is None else tuple(output_size)
     grid = predict_grid(dewarper, image)
     backward_map = dense_backward_map(grid, dewarper.config.grid_convention, size, image.shape[:2])
     result = render(image, backward_map, config=replace(config, on_error="return"))
     if result.status != Status.SUCCESS:
         if allow_unchecked and result.status == Status.INVALID_TRANSFORM:
-            result.image = render_unchecked(image, backward_map, config.fill_rgb)
+            result.image = render_unchecked(image, backward_map, config.fill_rgb, quantize)
             result.used_fallback = True
             result.metadata["forced_render"] = True
         elif config.on_error == "raise":
@@ -240,11 +300,14 @@ def rectify(
             )
         elif config.on_error == "original":
             result.image, result.used_fallback = image.copy(), True
+    elif quantize != "round":  # the checked image's samples, quantized the other way
+        result.image = sample_rgb(image, backward_map, result.valid_mask, config.fill_rgb, quantize)
     result.metadata["dewarp"] = {
         "model_sha256": dewarper.info.get("sha256"),
         "grid_convention": dewarper.config.grid_convention,
         "grid_size": list(grid.shape[:2]),
         "output_size": list(size),
+        "quantize": quantize,
         "seconds": time.perf_counter() - started,
     }
     return result
@@ -322,8 +385,11 @@ def _batch_item(
     previous: dict[str, Any] | None,
     config: RenderConfig,
     force_render: bool,
+    quantize: str,
 ) -> dict[str, Any]:
-    """Keep, render or refuse one input; the file at ``target`` always matches the item."""
+    """Keep, render or refuse one input; the file at ``target`` always matches the item.
+
+    ``previous`` comes only from a record of the same render settings and quantization."""
     item: dict[str, Any] = {"input": task.source, "output": task.output}
     try:
         image = task.load()
@@ -332,7 +398,12 @@ def _batch_item(
             if _still_matches(previous, task, image, digest, force_render):
                 return {**previous, "action": "kept"}
         result = rectify(
-            dewarper, image, task.output_size, render_config=config, allow_unchecked=force_render
+            dewarper,
+            image,
+            task.output_size,
+            render_config=config,
+            allow_unchecked=force_render,
+            quantize=quantize,
         )
     except (FlattenerError, OSError) as error:
         target.unlink(missing_ok=True)  # an older image no longer matches this input
@@ -361,6 +432,11 @@ def _batch_item(
     return item
 
 
+def prediction_evidence(dewarper: Dewarper, quantize: str) -> dict[str, Any]:
+    """The evidence block of a prediction record, with its output quantization."""
+    return {**evidence("predictions", dewarper.info), "quantize": quantize}
+
+
 def rectify_batch(
     dewarper: Dewarper,
     inputs: list[BatchInput],
@@ -370,19 +446,23 @@ def rectify_batch(
     force_render: bool = False,
     render_config: RenderConfig | None = None,
     fields: dict[str, Any] | None = None,
+    quantize: str = "round",
 ) -> dict[str, Any]:
     """Rectify ``inputs`` into ``output_dir`` and record every item in ``predictions.json``.
 
     Each item records the check status and reason code and the sha256 of the decoded
     input. An image that fails a check is written only with ``force_render``
     (``forced: true``). Without ``overwrite``, an output that ``predictions.json`` lists
-    as written is kept with its recorded status when the weights, render settings, input
-    label, input pixels and sizes are unchanged (a forced image only by a forced run);
-    every other input is rendered again. A directory holding predictions of other weights
-    or of an older format, or outputs without a ``predictions.json``, is refused. The
-    report names the current weights before any image is written, and says
-    ``complete: false`` until the last input is done; images are written atomically.
+    as written is kept with its recorded status when the weights, render settings,
+    quantization, input label, input pixels and sizes are unchanged (a forced image only
+    by a forced run); every other input is rendered again. A record without ``quantize``
+    predates the option and holds rounded images. A directory holding predictions of
+    other weights or of an older format, or outputs without a ``predictions.json``, is
+    refused. The report names the current weights and quantization before any image is
+    written, and says ``complete: false`` until the last input is done; images are
+    written atomically.
     """
+    check_quantize(quantize)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     report_path = output_dir / "predictions.json"
@@ -401,7 +481,8 @@ def rectify_batch(
                 "output_exists",
                 f"{report_path} has an older format; use --overwrite",
             )
-        if previous.get("render_config") == _plain(asdict(config)):
+        same_quantize = previous.get("quantize", "round") == quantize
+        if previous.get("render_config") == _plain(asdict(config)) and same_quantize:
             previous_items = {item["output"]: item for item in previous.get("items", [])}
     elif not overwrite and any((output_dir / item.output).is_file() for item in inputs):
         raise FlattenerError(
@@ -413,9 +494,10 @@ def rectify_batch(
         "schema": PREDICTIONS_SCHEMA,
         "created_utc": utc_now(),
         "model": dewarper.info,
-        "evidence": evidence("predictions", dewarper.info),
+        "evidence": prediction_evidence(dewarper, quantize),
         **(fields or {}),
         "force_render": force_render,
+        "quantize": quantize,
         "render_config": asdict(config),
         "complete": False,
         "counts": _count([]),
@@ -425,7 +507,8 @@ def rectify_batch(
     for task in inputs:
         target = output_dir / task.output
         previous = previous_items.get(task.output)
-        report["items"].append(_batch_item(dewarper, task, target, previous, config, force_render))
+        item = _batch_item(dewarper, task, target, previous, config, force_render, quantize)
+        report["items"].append(item)
         report["counts"] = _count(report["items"])
         write_json(report_path, report)
     report["complete"] = True
@@ -458,6 +541,7 @@ def rectify_docunet(
     *,
     overwrite: bool = False,
     force_render: bool = False,
+    quantize: str = "round",
 ) -> dict[str, Any]:
     """Rectify every ``{k}_{m} copy.png`` into ``{k}_{m}.png`` at the crop's own size.
 
@@ -470,6 +554,7 @@ def rectify_docunet(
         overwrite=overwrite,
         force_render=force_render,
         fields={"input_dir": str(Path(input_dir)), "inputs": "docunet_crop"},
+        quantize=quantize,
     )
 
 
@@ -484,16 +569,22 @@ def main(argv: list[str] | None = None) -> int:
         "write the image even when the map fails the geometry checks; the failure is "
         "still recorded and the exit status is 1"
     )
+    quantize_help = (
+        "uint8 conversion of the sampled image: round (default, flattener.render) or "
+        "truncate (floor(x*255), the paper protocol); checks and exit status are the same"
+    )
     single = commands.add_parser("image")
     single.add_argument("--input", required=True)
     single.add_argument("--output", required=True)
     single.add_argument("--output-size", type=int, nargs=2, metavar=("HEIGHT", "WIDTH"))
     single.add_argument("--force-render", action="store_true", help=force_help)
+    single.add_argument("--quantize", choices=QUANTIZE_MODES, default="round", help=quantize_help)
     batch = commands.add_parser("docunet")
     batch.add_argument("--input-dir", required=True)
     batch.add_argument("--output-dir", required=True)
     batch.add_argument("--overwrite", action="store_true")
     batch.add_argument("--force-render", action="store_true", help=force_help)
+    batch.add_argument("--quantize", choices=QUANTIZE_MODES, default="round", help=quantize_help)
     args = parser.parse_args(argv)
     dewarper = load_dewarper(args.weights, device=args.device)
     if args.command == "image":
@@ -504,6 +595,7 @@ def main(argv: list[str] | None = None) -> int:
             size,
             render_config=RenderConfig(on_error="return"),
             allow_unchecked=args.force_render,
+            quantize=args.quantize,
         )
         output = Path(args.output)
         removed = False
@@ -518,7 +610,8 @@ def main(argv: list[str] | None = None) -> int:
             "status": str(result.status),
             "reason": result.reason_code,
             "forced": bool(result.metadata.get("forced_render")),
-            "evidence": evidence("predictions", dewarper.info),
+            "quantize": args.quantize,
+            "evidence": prediction_evidence(dewarper, args.quantize),
         }
         print(json.dumps(summary))
         return 0 if result.status == Status.SUCCESS else EXIT_FAILED
@@ -528,6 +621,7 @@ def main(argv: list[str] | None = None) -> int:
         args.output_dir,
         overwrite=args.overwrite,
         force_render=args.force_render,
+        quantize=args.quantize,
     )
     print(json.dumps(report["counts"]))
     return 0 if report["counts"]["failed"] == 0 else EXIT_FAILED
