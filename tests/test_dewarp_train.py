@@ -153,11 +153,12 @@ def test_train_config_round_trip_and_validation(tmp_path):
         {"val_views": [ViewConfig("a"), ViewConfig("a")]},
         {"val_views": [{"name": "a", "crop": "tight"}]},
         {"val_select": "missing"},
+        {"channels_last": 1},
     ):
         with pytest.raises(FlattenerError):
             replace(config, **bad)
     with pytest.raises(FlattenerError, match="unknown"):
-        TrainConfig.from_dict({**data, "channels_last": True})
+        TrainConfig.from_dict({**data, "memory_format": "channels_last"})
 
 
 def test_learning_rate_schedules():
@@ -283,6 +284,18 @@ def test_resume_compatibility_and_initialization_lineage(tmp_path):
     )
     assert lineage["kind"] == "checkpoint" and lineage["track"] == "research"
     assert lineage["sha256"] == json.loads((tmp_path / "research.pt.json").read_text())["sha256"]
+    # The weights do not depend on the sizes: a checkpoint trained at another input and
+    # grid size initializes a larger model, and the lineage keeps the parent's sizes.
+    larger = UVDocNet(DewarpModelConfig(input_size=(96, 64), grid_size=(6, 4), num_filter=4))
+    lineage = _initialize(
+        larger, replace(config, track="research", init="checkpoint", init_path=str(research))
+    )
+    assert lineage["model_config"] == TINY.to_dict()
+    parent = load_checkpoint(research)["model_state"]
+    assert all(torch.equal(v, parent[k]) for k, v in larger.state_dict().items())
+    with torch.no_grad():
+        grid2d, _ = larger.eval()(torch.rand(1, 3, 96, 64))
+    assert grid2d.shape == (1, 2, 6, 4)
     # init="uvdoc": a release run needs the published upstream file (sha256), and a
     # dewarp checkpoint (research weights) is never accepted as upstream weights.
     fake_uvdoc = tmp_path / "best_model.pkl"
@@ -461,6 +474,18 @@ def test_two_step_cpu_training_smoke_and_exact_resume(tmp_path):
         assert torch.equal(value, b["model_state"][key]), key
     with pytest.raises(FlattenerError, match="checkpoints"):
         train(_config(tmp_path), resume="none")
+
+
+@pytest.mark.training
+def test_channels_last_training_saves_contiguous_weights(tmp_path):
+    _spec(tmp_path)
+    result = train(_config(tmp_path, max_steps=2, channels_last=True))
+    assert result["state"] == "stopped" and result["step"] == 2
+    checkpoint = load_checkpoint(result["checkpoint"])
+    assert all(v.is_contiguous() for v in checkpoint["model_state"].values())
+    assert np.isfinite(checkpoint["metrics"]["epe_px"])
+    resumed = train(_config(tmp_path, max_steps=3))  # the layout may change on resume
+    assert resumed["step"] == 3
 
 
 @pytest.mark.training

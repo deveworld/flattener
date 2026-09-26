@@ -104,6 +104,7 @@ RESUMABLE_CHANGES = frozenset(
         "prefetch_factor",
         "pin_memory",
         "device",
+        "channels_last",
         "log_every",
         "val_every",
         "val_max_batches",
@@ -186,6 +187,9 @@ class TrainConfig:
     prefetch_factor: int = 4
     pin_memory: bool = True
     device: str = "auto"
+    # Training memory layout: channels_last suits RTX 50-series GPUs but ran ~4x slower
+    # on an RTX 3060 Ti. Checkpoints hold contiguous (NCHW) weights either way.
+    channels_last: bool = False
     deterministic: bool = False
     log_every: int = 50
     val_every: int = 2000
@@ -263,10 +267,9 @@ class TrainConfig:
             raise _error("invalid_config", "max_seconds must be positive or null")
         if len(self.betas) != 2 or not all(0 <= b < 1 for b in self.betas):
             raise _error("invalid_config", "betas must be two numbers in [0, 1)")
-        if not all(
-            isinstance(getattr(self, k), bool) for k in ("amp", "pin_memory", "deterministic")
-        ):
-            raise _error("invalid_config", "amp, pin_memory and deterministic must be booleans")
+        flags = ("amp", "pin_memory", "channels_last", "deterministic")
+        if not all(isinstance(getattr(self, k), bool) for k in flags):
+            raise _error("invalid_config", f"{', '.join(flags)} must be booleans")
         reference = self.epe_reference_size
         if (
             not isinstance(reference, tuple)
@@ -471,6 +474,13 @@ def compute_losses(
     return losses
 
 
+def _layout(images: torch.Tensor, config: TrainConfig) -> torch.Tensor:
+    """``images`` in the training memory layout (``TrainConfig.channels_last``)."""
+    if config.channels_last:
+        return images.contiguous(memory_format=torch.channels_last)
+    return images
+
+
 def _to_device(batch: dict[str, Any], device: torch.device) -> dict[str, Any]:
     """Tensors to ``device``; noise seeds stay on the CPU (read as Python ints)."""
     return {
@@ -524,7 +534,7 @@ def validate(model: UVDocNet, loader, config: TrainConfig, device: torch.device)
         for batch in loader:
             batch = _to_device(batch, device)
             for index, name in enumerate(names):
-                grid2d, _ = model(batch["image"][:, index].float().div_(255))
+                grid2d, _ = model(_layout(batch["image"][:, index].float().div_(255), config))
                 target, valid = batch["grid2d"][:, index], batch["valid"][:, index]
                 weight = valid.expand_as(target)
                 losses[name][0] += float(((grid2d - target).abs() * weight).sum())
@@ -603,6 +613,11 @@ def _parameter_groups(model: torch.nn.Module, weight_decay: float) -> list[dict[
 
 
 def _initialize(model: UVDocNet, config: TrainConfig) -> dict[str, Any]:
+    """Load the initial weights and return their lineage record.
+
+    The weights do not depend on the input or grid size, so a checkpoint trained at
+    another size initializes this model; the record keeps the parent's model config.
+    """
     if config.init == "scratch":
         return {"kind": "scratch", "seed": config.seed}
     if config.init == "uvdoc":
@@ -632,6 +647,7 @@ def _initialize(model: UVDocNet, config: TrainConfig) -> dict[str, Any]:
         "sha256": checkpoint_sha256(config.init_path),
         "step": parent["step"],
         "track": parent["track"],
+        "model_config": parent.get("model_config"),
         "data_spec_sha256": parent["data_spec_sha256"],
         "code_sha256": parent["code"]["sha256"],
         "lineage": parent["lineage"],
@@ -823,6 +839,8 @@ def train(config: TrainConfig, *, resume: str = "auto") -> dict[str, Any]:
                 },
             ]
         model.to(device).train()
+        if config.channels_last:
+            model.to(memory_format=torch.channels_last)
         optimizer = torch.optim.AdamW(
             _parameter_groups(model, config.weight_decay), lr=config.lr, betas=config.betas
         )
@@ -892,7 +910,7 @@ def train(config: TrainConfig, *, resume: str = "auto") -> dict[str, Any]:
                     "best": best,
                     "environment": environment(),
                     "created_utc": utc_now(),
-                    "model_state": model.state_dict(),
+                    "model_state": {k: v.contiguous() for k, v in model.state_dict().items()},
                     "optimizer_state": optimizer.state_dict(),
                     "scaler_state": scaler.state_dict(),
                     "rng_state": rng,
@@ -941,7 +959,7 @@ def train(config: TrainConfig, *, resume: str = "auto") -> dict[str, Any]:
             waited = time.perf_counter()
             batch = _to_device(next(iterator), device)
             window["data"] += time.perf_counter() - waited
-            batch["image"] = to_float_images(batch)  # colour jitter on the device
+            batch["image"] = _layout(to_float_images(batch), config)  # colour jitter on device
             lr = learning_rate(config, step)
             for group in optimizer.param_groups:
                 group["lr"] = lr

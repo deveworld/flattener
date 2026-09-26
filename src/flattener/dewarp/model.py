@@ -208,8 +208,8 @@ class UVDocNet(nn.Module):
     """Returns ``(grid2d, grid3d)`` with shapes (B, 2, Gh, Gw) and (B, 3, Gh, Gw).
 
     ``grid3d`` is ``None`` when the configuration disables the 3-D head. The
-    layout (NCHW) is deliberate: channels_last measured ~4x slower on the
-    target RTX 3060 Ti.
+    model is built NCHW: channels_last measured ~4x slower on the target RTX
+    3060 Ti. The trainer's ``channels_last`` option converts it for training.
     """
 
     def __init__(self, config: DewarpModelConfig | None = None) -> None:
