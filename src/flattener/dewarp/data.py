@@ -801,29 +801,51 @@ def view_box(sample: RawSample, view: ViewConfig, rng: np.random.Generator) -> t
     return int(low[0]), int(low[1]), int(high[0]), int(high[1])
 
 
+def resize_box(
+    image: Image.Image, box: tuple[int, int, int, int], input_size: tuple[int, int]
+) -> torch.Tensor:
+    """Whole-pixel ``box`` of ``image`` resized to a (3, H, W) uint8 tensor.
+
+    Bilinear without antialiasing, as ``predict`` resizes a crop file (torch's uint8
+    kernel rounds, so values stay within one level of the float resize).
+    """
+    region = torch.from_numpy(np.array(image.crop(box))).permute(2, 0, 1).unsqueeze(0)
+    return F.interpolate(
+        region, size=input_size, mode="bilinear", align_corners=False, antialias=False
+    )[0]
+
+
 def warp_image(
     image: Image.Image, crop: Crop, input_size: tuple[int, int], *, draft: bool = False
-) -> NDArray[np.uint8]:
-    """Sample ``crop`` of ``image`` into an (H, W, 3) uint8 array.
+) -> tuple[torch.Tensor, Crop]:
+    """Sample ``crop`` of ``image`` into a (3, H, W) uint8 tensor; return it and the crop used.
 
-    Bilinear without antialiasing (like ``predict``); PIL truncates, so values sit up
-    to one level below a float resize. Outside the image the border is replicated. With
-    ``draft``, an unloaded JPEG decodes at the smallest DCT scale that still has one
-    source pixel per output pixel.
+    An axis-aligned crop inside the image snaps outward to whole pixels and goes through
+    ``resize_box``. Other crops use a PIL affine transform (bilinear, no antialiasing;
+    PIL truncates, so values sit up to one level low) with the border replicated
+    outside the image. With ``draft``, an unloaded JPEG decodes at the smallest DCT
+    scale that still has one source pixel per output pixel.
     """
     out_h, out_w = input_size
     width, height = image.size
-    center, linear = crop.center, crop.linear
+    factor = 1.0
     if draft and image.format == "JPEG":  # a loaded image ignores draft()
         step = min(2 * crop.half[0] / out_w, 2 * crop.half[1] / out_h)  # source px per output px
         if step >= 2:
             result = image.draft("RGB", (math.ceil(width / step), math.ceil(height / step)))
             if result is not None:
                 factor = result[1][2] / width  # 1 / DCT scale
-                center, linear = center * factor, linear * factor
                 width, height = image.size
     if image.mode != "RGB":
         image = image.convert("RGB")
+    center, linear = crop.center * factor, crop.linear * factor
+    if crop.theta == 0.0:
+        low = np.floor(center - np.abs(linear).sum(axis=1) + 1e-6)
+        high = np.maximum(np.ceil(center + np.abs(linear).sum(axis=1) - 1e-6), low + 1)
+        if (low >= 0).all() and high[0] <= width and high[1] <= height:
+            box = (int(low[0]), int(low[1]), int(high[0]), int(high[1]))
+            snapped = Crop(0.0, (low + high) / (2 * factor), (high - low) / (2 * factor))
+            return resize_box(image, box, input_size), snapped
     # PIL maps output edge coordinates (i + 0.5) to source edge coordinates.
     scale = linear * np.array([2.0 / out_w, 2.0 / out_h])
     offset = center - linear.sum(axis=1)
@@ -844,15 +866,11 @@ def warp_image(
     data = (scale[0, 0], scale[0, 1], offset[0], scale[1, 0], scale[1, 1], offset[1])
     bilinear = Image.Resampling.BILINEAR
     output = image.transform((out_w, out_h), Image.Transform.AFFINE, data, bilinear)
-    return np.array(output)  # writable, for torch.from_numpy
+    return torch.from_numpy(np.array(output)).permute(2, 0, 1), crop
 
 
 def _as_image(image: Image.Image | NDArray[np.uint8]) -> Image.Image:
     return image if isinstance(image, Image.Image) else Image.fromarray(image)
-
-
-def _chw(pixels: NDArray[np.uint8]) -> torch.Tensor:
-    return torch.from_numpy(pixels).permute(2, 0, 1)
 
 
 def apply_geometry(
@@ -868,8 +886,8 @@ def apply_geometry(
     """
     crop = plan_crop(sample, augment, rng)
     draft = rng is not None and augment.jpeg_draft
-    pixels = warp_image(_as_image(sample.image), crop, input_size, draft=draft)
-    return _chw(pixels), crop.target(_edge_points(sample))
+    pixels, used = warp_image(_as_image(sample.image), crop, input_size, draft=draft)
+    return pixels, used.target(_edge_points(sample))
 
 
 def evaluation_view(
@@ -882,11 +900,10 @@ def evaluation_view(
     """
     rng = np.random.default_rng([zlib.crc32(view.name.encode()), zlib.crc32(key.encode())])
     left, top, right, bottom = view_box(sample, view, rng)
-    region = _as_image(sample.image).crop((left, top, right, bottom))
+    pixels = resize_box(_as_image(sample.image), (left, top, right, bottom), input_size)
     half = np.array([right - left, bottom - top], dtype=np.float64) / 2.0
-    pixels = warp_image(region, Crop(0.0, half, half), input_size)
     box = Crop(0.0, np.array([left, top], dtype=np.float64) + half, half)
-    return _chw(pixels), box.target(_edge_points(sample))
+    return pixels, box.target(_edge_points(sample))
 
 
 def draw_color_params(
@@ -935,29 +952,31 @@ def apply_color_batch(
 
     ``params`` (B, ``COLOR_PARAMS``) and ``noise_seeds`` (B,) come from
     ``draw_color_params``; the noise of each sample draws from its own seeded generator.
+    Samples without colour jitter pass through the affine steps unchanged.
     """
     p = params.to(device=images.device, dtype=images.dtype)
-
-    def per_sample(column: int, on: torch.Tensor) -> torch.Tensor:
-        return torch.where(on, p[:, column], torch.ones_like(p[:, column])).view(-1, 1, 1, 1)
-
     on = p[:, 0] > 0
-    x = images * per_sample(1, on)
-    mean = x.mean(dim=(1, 2, 3), keepdim=True)
-    x = (x - mean) * per_sample(2, on) + mean
+    ones = torch.ones_like(p[:, :8])
+    q = torch.where(on.view(-1, 1), p[:, :8], ones).view(-1, 8, 1, 1, 1)
+    brightness, contrast, saturation, gamma = q[:, 1], q[:, 2], q[:, 3], q[:, 7]
+    # brightness then contrast around the (brightened) mean, as one multiply-add
+    mean = images.mean(dim=(1, 2, 3), keepdim=True) * brightness
+    x = torch.addcmul(mean * (1 - contrast), images, brightness * contrast)
     gray = _grayscale(x)
-    x = (x - gray) * per_sample(3, on) + gray
-    gains = torch.where(on.view(-1, 1), p[:, 4:7], torch.ones_like(p[:, 4:7]))
-    x = (x * gains.view(-1, 3, 1, 1)).clamp(0, 1).pow(per_sample(7, on))
-    x = torch.where((p[:, 8] > 0).view(-1, 1, 1, 1), _grayscale(x).expand_as(x), x)
+    x = torch.addcmul(gray * (1 - saturation), x, saturation)
+    x.mul_(q[:, 4:7].view(-1, 3, 1, 1)).clamp_(0, 1).pow_(gamma)
+    grayscale = torch.nonzero(p[:, 8] > 0).flatten()
+    if len(grayscale):
+        x[grayscale] = _grayscale(x[grayscale]).expand(-1, 3, -1, -1)
     blur = torch.nonzero(p[:, 9] > 0).flatten()
     if len(blur):
         x[blur] = _blur(x[blur], p[blur, 10])
     seeds = noise_seeds.tolist() if isinstance(noise_seeds, torch.Tensor) else list(noise_seeds)
+    stds = p[:, 12].tolist()
     for index in torch.nonzero(p[:, 11] > 0).flatten().tolist():
         generator = torch.Generator(device=x.device).manual_seed(int(seeds[index]))
         noise = torch.randn(x.shape[1:], generator=generator, device=x.device, dtype=x.dtype)
-        x[index] += noise * p[index, 12]
+        x[index].add_(noise, alpha=stds[index])
     return x.clamp_(0, 1)
 
 

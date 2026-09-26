@@ -445,15 +445,22 @@ def test_geometry_keeps_image_and_grid_consistent_under_rotation():
     grid = pixels_to_flattener(_grid_pixels(page, (9, 7)), (size, size))
     sample = RawSample(_ramp(size, slope), grid, np.ones((9, 7), bool), None)
     augment = AugmentConfig(margin=(0.05, 0.1), rotation_deg=25.0, rotation_prob=1.0)
+    expected = ((grid + 1) / 2 * size - 0.5).transpose(2, 0, 1) * slope
     for seed in range(4):
         rng = np.random.default_rng(seed)
         output, target = apply_geometry(sample, (120, 90), augment, rng)
         assert output.dtype == torch.uint8 and output.shape == (3, 120, 90)
         points = torch.from_numpy(target).unsqueeze(0)
         sampled = F.grid_sample(output[None].double(), points.double(), align_corners=False)
-        expected = ((grid + 1) / 2 * size - 0.5).transpose(2, 0, 1) * slope
-        # uint8 truncation costs at most one level; a 0.1 px shift would add 0.3.
+        # PIL truncation costs at most one level; a 0.1 px shift would add 0.3.
         assert np.abs(sampled[0, :2].numpy() - expected + 0.5).max() < 0.8
+    # Axis-aligned crops snap to whole pixels and resize with rounding.
+    straight = AugmentConfig(margin=(0.05, 0.1), rotation_deg=0.0)
+    for seed in range(4):
+        output, target = apply_geometry(sample, (120, 90), straight, np.random.default_rng(seed))
+        points = torch.from_numpy(target).unsqueeze(0)
+        sampled = F.grid_sample(output[None].double(), points.double(), align_corners=False)
+        assert np.abs(sampled[0, :2].numpy() - expected).max() < 0.6
     # rotation_kinds: upstream rotates UVDoc samples only.
     only_uvdoc = AugmentConfig(
         margin=(0.05, 0.1), rotation_deg=25.0, rotation_prob=1.0, rotation_kinds=["uvdoc"]
@@ -519,7 +526,7 @@ def test_evaluation_views_resize_whole_pixel_crops_like_predict(tmp_path):
         antialias=False,
     )[0]
     difference = item["image"][2].double() - reference
-    assert difference.abs().max() < 1 + 1e-6 and -0.7 < difference.mean() < 0  # PIL truncates
+    assert difference.abs().max() < 1 + 1e-6 and abs(float(difference.mean())) < 0.25
     grid = item["grid2d"][2].numpy()  # page nodes relative to the whole image
     assert grid[0].min() > -1 and grid[0].max() < 1
 
