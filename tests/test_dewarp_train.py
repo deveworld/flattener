@@ -295,6 +295,11 @@ def test_validation_signature_covers_what_defines_a_validation_result(tmp_path):
     assert memory_stats(torch.device("cpu")) == {}
 
 
+def test_default_views_keep_a_margin_on_every_side():
+    assert [view.name for view in DEFAULT_VIEWS] == ["page", "docunet"]
+    assert all(view.crop == "page" and view.margin[0] >= 0.02 for view in DEFAULT_VIEWS)
+
+
 def test_scaler_restore_and_strict_json_for_non_finite_values(tmp_path):
     enabled = torch.amp.GradScaler("cpu", enabled=True)
     assert restore_scaler(enabled, {}) is False  # cpu/xpu checkpoint resumed with AMP

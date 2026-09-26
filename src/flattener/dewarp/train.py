@@ -108,11 +108,11 @@ RESUMABLE_CHANGES = frozenset(
     }
 )
 EPE_REFERENCE_SIZE = (712, 488)  # UVDoc input size (height, width)
-# "page": the page box with a fixed margin; "docunet": uneven 0-10% margins like
+# "page": the page box with a fixed margin; "docunet": uneven 2-10% margins like
 # DocUNet crops, the input condition of ``predict`` on benchmark crops.
 DEFAULT_VIEWS = (
     ViewConfig("page", "page", (0.025, 0.025)),
-    ViewConfig("docunet", "page", (0.0, 0.1)),
+    ViewConfig("docunet", "page", (0.02, 0.1)),
 )
 CSV_COLUMNS = (
     "kind",

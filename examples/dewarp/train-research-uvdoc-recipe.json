@@ -24,7 +24,7 @@
   "val_batch_size": 16,
   "val_views": [
     {"name": "page", "crop": "page", "margin": [0.025, 0.025]},
-    {"name": "docunet", "crop": "page", "margin": [0.0, 0.1]}
+    {"name": "docunet", "crop": "page", "margin": [0.02, 0.1]}
   ],
   "val_select": "docunet",
   "checkpoint_every": 10000

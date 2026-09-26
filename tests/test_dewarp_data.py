@@ -550,11 +550,13 @@ def test_evaluation_views_resize_whole_pixel_crops_like_predict(tmp_path):
     spec = _spec(tmp_path, [source])
     views = (
         ViewConfig("page", "page", (0.0, 0.0)),
-        ViewConfig("docunet", "page", (0.0, 0.1)),
+        ViewConfig("docunet", "page", (0.02, 0.1)),
         ViewConfig("frame", "full_frame"),
     )
     item = _build(spec, views=views)[1]
     assert item["image"].shape == (3, 3, *INPUT) and item["grid2d"].shape == (3, 2, *GRID)
+    docunet = item["grid2d"][1].numpy()  # every side keeps a margin
+    assert -1 + 0.03 < docunet.min() and docunet.max() < 1 - 0.03
     again = build_dataset(
         spec,
         track="research",
@@ -684,7 +686,7 @@ def test_spec_view_and_augment_validation(tmp_path):
     ):
         with pytest.raises(ValueError):
             AugmentConfig(**bad)
-    view = ViewConfig("docunet", "page", [0.0, 0.1])
+    view = ViewConfig("docunet", "page", [0.02, 0.1])
     assert ViewConfig.from_dict(view.to_dict()) == view
     for bad in ({"name": ""}, {"name": "a", "crop": "tight"}, {"name": "a", "margin": (0.3, 0.1)}):
         with pytest.raises(ValueError):
