@@ -1,0 +1,54 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "flattener"
+version = "0.5.0"
+description = "CPU document unwarping, reproducible synthetic data and experimental learning"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+license = "Apache-2.0 AND OFL-1.1"
+license-files = ["LICENSE", "src/flattener/assets/fonts/OFL.txt"]
+dependencies = [
+    "numpy>=2.0,<3",
+    "Pillow>=11,<13",
+    "torch>=2.7,<3",
+]
+
+[dependency-groups]
+dev = ["pytest>=8,<10", "ruff>=0.11,<1", "build>=1.2,<2", "hatchling>=1.27,<2"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/flattener"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src", "/tests", "/examples", "/docs", "/benchmarks",
+    "/README.md", "/LICENSE", "/THIRD_PARTY.md",
+    "/pyproject.toml", "/uv.lock", "/.python-version",
+]
+
+[tool.uv]
+environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = ["training: executes training, backward, or optimizer steps; opt-in with --run-training"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+extend-exclude = ["outputs"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
