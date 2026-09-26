@@ -18,10 +18,15 @@ Variants:
   ``CANVAS_MAX_PIXELS`` is scaled down together with the crop. The crop keeps its own
   background, so the crop rectangle stays visible around the page.
 
+Photos and crops are read with their EXIF orientation applied, as a phone shows them.
+
 Each variant lives in ``OUT/<variant>/``: ``predictions.json`` and ``{k}_{m}.png`` from
 ``flattener.dewarp.predict.rectify_batch`` and ``docunet.json`` from
-``evaluate_docunet``. A rerun keeps predictions of the same weights and reuses a report
-whose prediction hashes still match.
+``evaluate_docunet``. A rerun keeps a prediction only when the weights and its input
+pixels are unchanged (see ``rectify_batch``). It reuses the per-image scores of a report
+when every prediction hash, the conventions, the SIFT-flow build and the scan hashes
+still match, and rebuilds the report's prediction statuses, means and evidence from the
+current ``predictions.json``.
 """
 
 from __future__ import annotations
@@ -35,11 +40,18 @@ from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
-from PIL import Image
+from PIL import Image, ImageOps
 
 from ..evidence import evidence
-from . import docunet
-from .reporting import prediction_record, sha256_file, utc_now, write_json_atomic
+from . import docunet, metrics
+from .reporting import (
+    prediction_record,
+    prediction_status,
+    report_evidence,
+    sha256_file,
+    utc_now,
+    write_json_atomic,
+)
 from .siftflow import SiftFlowBuild
 
 SCHEMA = "flattener-benchmark-docunet-stress-1"
@@ -60,8 +72,9 @@ _TURNS = {"rot90": Image.Transpose.ROTATE_90, "rot270": Image.Transpose.ROTATE_2
 
 
 def _rgb(path: Path) -> Image.Image:
+    """The image at ``path`` in RGB, turned by its EXIF orientation."""
     with Image.open(path) as image:
-        return image.convert("RGB")
+        return ImageOps.exif_transpose(image).convert("RGB")
 
 
 def canvas(size: tuple[int, int], rng: np.random.Generator) -> NDArray[np.uint8]:
@@ -127,19 +140,56 @@ def variant_inputs(variant: str, crop_dir: Path, photo_dir: Path, seed: int = 0)
     return inputs
 
 
-def _reusable(path: Path, predictions_dir: Path) -> dict[str, Any] | None:
-    """The report at ``path`` when its prediction hashes and recorded failures still match."""
+SIFTFLOW_IDENTITY = (
+    "binding_version",
+    "build_key",
+    "compile_flags",
+    "dense_library_sha256",
+    "flow_library_sha256",
+    "source_sha256",
+    "torch_version",
+)
+
+
+def _siftflow_identity(metadata: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The fields of a SIFT-flow build record that decide LD and AD (no paths)."""
+    if metadata is None:
+        return None
+    return {key: metadata.get(key) for key in SIFTFLOW_IDENTITY}
+
+
+def _reusable(path: Path, predictions_dir: Path, scoring: dict[str, Any]) -> dict[str, Any] | None:
+    """The report at ``path`` with its statuses, means and evidence rebuilt from the
+    current ``predictions.json``, when it was scored under ``scoring`` (conventions,
+    SIFT-flow build, scan hashes) and every prediction it scored is unchanged."""
     if not path.is_file():
         return None
     report = json.loads(path.read_text(encoding="utf-8"))
-    hashes = report.get("inputs", {}).get("predictions", {})
+    config = {key: value for key, value in report.get("config", {}).items() if key != "workers"}
+    inputs = report.get("inputs", {})
+    if (
+        config != scoring["config"]
+        or _siftflow_identity(report.get("siftflow")) != scoring["siftflow"]
+        or inputs.get("references") != scoring["references"]
+    ):
+        return None
+    hashes = inputs.get("predictions", {})
     for name, digest in hashes.items():
         file = predictions_dir / f"{name}.png"
         if not file.is_file() or sha256_file(file) != digest:
             return None
-    record, current = report.get("predictions_record") or {}, prediction_record(predictions_dir)
-    if not hashes or current is None or record.get("failures") != current["failures"]:
+    record = prediction_record(predictions_dir)
+    rows = report.get("rows", [])
+    if not hashes or record is None or {row.get("id") for row in rows} != set(hashes):
         return None
+    for row in rows:
+        row["prediction_status"] = prediction_status(record, f"{row['id']}.png")
+    report.update(
+        summary=docunet.summarize(rows, scoring["config"]["conventions"]),
+        predictions_record=record,
+        evidence=report_evidence(record),
+        record_refreshed_utc=utc_now(),
+    )
     return report
 
 
@@ -175,6 +225,27 @@ def run_stress(
         raise ValueError(f"variants must be among {tuple(VARIANTS)}, got {list(variants)}")
     conventions = docunet.validate_conventions(conventions)
     output, crops, photos = Path(output_dir), Path(crop_dir), Path(photo_dir)
+    documents = sorted({k for k, _, _ in docunet.required_views(conventions)})
+    scoring = {
+        "config": {
+            "ad_solver": metrics.DEFAULT_AD_SOLVER,
+            "conventions": list(conventions),
+            "prediction_pattern": "{k}_{m}.png",
+            "ref_resize": "once",
+            "reference_pattern": reference_pattern,
+            "references_verified": verify_references,
+        },
+        "siftflow": None if build is None else _siftflow_identity(build.metadata()),
+        "references": {
+            str(k): digest
+            for k, digest in docunet.hash_references(
+                Path(references_dir).expanduser().resolve(),
+                reference_pattern,
+                documents,
+                verify=verify_references,
+            ).items()
+        },
+    }
     dewarper = load_dewarper(weights, device=device)
     summary: dict[str, Any] = {
         "schema": SCHEMA,
@@ -218,8 +289,10 @@ def run_stress(
             ],
         }
         report_path = directory / "docunet.json"
-        report = _reusable(report_path, directory)
-        if report is None:
+        report = _reusable(report_path, directory, scoring)
+        if report is not None:
+            write_json_atomic(report_path, report, overwrite=True)
+        else:
             log(f"stress: scoring {variant}")
             try:
                 report = docunet.evaluate_docunet(

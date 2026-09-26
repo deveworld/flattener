@@ -3,8 +3,9 @@
 ``python -m flattener.dewarp.predict --weights W image --input a.jpg --output b.png``
 ``python -m flattener.dewarp.predict --weights W docunet --input-dir crop --output-dir out``
 
-The image is resized to the model input (bilinear, align_corners=False, no
-antialias: upstream's ``cv2.resize`` INTER_LINEAR), the 2-D grid is predicted,
+Input files are read with their EXIF orientation applied. The image is resized to
+the model input (bilinear, align_corners=False, no antialias: upstream's
+``cv2.resize`` INTER_LINEAR), the 2-D grid is predicted,
 converted to a dense flattener backward map at the requested output size
 (default: the input size) and rendered by ``flattener.render``. Upstream UVDoc
 weights (``grid_convention="uvdoc"``) use the exact upstream densification.
@@ -36,7 +37,7 @@ from typing import Any
 import numpy as np
 import torch
 from numpy.typing import NDArray
-from PIL import Image
+from PIL import Image, ImageOps
 from torch.nn import functional as F
 
 from ..contracts import FlattenerError, RenderConfig, RenderResult, Status
@@ -250,8 +251,9 @@ def rectify(
 
 
 def load_rgb(path: str | Path) -> NDArray[np.uint8]:
+    """The image at ``path`` as RGB uint8, turned by its EXIF orientation."""
     with Image.open(path) as image:
-        return np.array(image.convert("RGB"))
+        return np.array(ImageOps.exif_transpose(image).convert("RGB"))
 
 
 @dataclass(frozen=True, slots=True)
