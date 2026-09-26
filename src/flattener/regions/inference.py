@@ -27,12 +27,11 @@ REGION_PREPROCESS_VERSION = "virtual-box-antialias-original-map-1.0"
 
 
 def prepare_page_view(image, region, input_size, *, config=None):
-    """Prepare a canonical RGB preview and its exact virtual source-edge box.
+    """Return an RGB preview of ``region`` and its exact virtual source-edge box.
 
-    First antialias the whole original to a working resolution sufficient for
-    the virtual view; then sample that view. Its normalized coordinates always
-    refer to the original physical extent, independently of working resolution.
-    Original sampling for the final output happens only once, after composition.
+    The whole original is antialiased to a working resolution, and the view is
+    sampled from that. Normalized coordinates always refer to the original
+    extent; the final output samples the original once, after composition.
     """
     config = _config(config)
     validate_image(image, RenderConfig())
@@ -273,10 +272,9 @@ def _pipeline(
 
 
 def crop_page(image, output_size, *, region=None, segmenter=None, region_config=None, config=None):
-    """Localize/crop one page without learned curvature correction.
+    """Localize and crop one page with no learned correction.
 
-    This is an explicit baseline, not a dewarping claim. Original-file decoding
-    and model loading are outside the per-image timing scope.
+    Per-image timings exclude file decoding and model loading.
     """
     return _pipeline(image, output_size, None, region, segmenter, region_config, config)
 
@@ -284,12 +282,10 @@ def crop_page(image, output_size, *, region=None, segmenter=None, region_config=
 def unwarp_page(
     image, predictor, output_size, *, region=None, segmenter=None, region_config=None, config=None
 ):
-    """Opt-in region-conditioned correction with an estimated-coverage guard.
+    """Correct one page inside a region, guarded by estimated page coverage.
 
-    Existing full-frame ``learning.unwarp`` remains unchanged. Choose exactly
-    one manual rectangle or loaded page segmenter. Output size is still explicit;
-    neither page mask confidence nor true content preservation is guaranteed.
-    Metadata separates processing status from unevaluated rectification quality.
+    Pass exactly one of ``region`` (a manual rectangle) or ``segmenter``, and an
+    explicit ``output_size``. Metadata reports ``quality_status="not_evaluated"``.
     """
     return _pipeline(
         image,

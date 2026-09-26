@@ -1,10 +1,9 @@
-"""Explicit-device coordinate study, strict checkpoints and one CLI entry.
+"""Coordinate-model training study, strict checkpoints and its CLI.
 
-CUDA remains the default; CPU and XPU require an explicit device choice.
-There is no automatic device fallback. Operational time/epoch limits do not
-change the configured experiment or save an incomplete epoch.
-Resume is restricted to epoch boundaries with identical data/code/runtime; accelerator
-numerical reproducibility is not a promise of bit-exact resumed trajectories.
+The default device is CUDA; choose CPU or XPU explicitly. Training uses only the
+requested device. Time and epoch limits stop at the last complete epoch and
+leave the saved configuration unchanged. Resume works at epoch boundaries with
+the same data, code and runtime; resumed accelerator runs can differ bitwise.
 """
 
 from __future__ import annotations
@@ -206,7 +205,7 @@ def _config(config):
 
 
 def _require_cuda_device(device="cuda"):
-    """Fail before dataset access, output creation or optimizer construction."""
+    """Return the CUDA device, raising before any data, output or optimizer work."""
     if not isinstance(device, str) or not _CUDA.fullmatch(device):
         raise _error("cuda_required", "this CUDA request cannot use a CPU fallback")
     if not torch.cuda.is_available():
@@ -222,7 +221,7 @@ def _require_cuda_device(device="cuda"):
 
 
 def _resolve_device(device="cuda"):
-    """Resolve only the requested backend; CPU never consults accelerator APIs."""
+    """Resolve the requested backend; CPU requests skip accelerator APIs."""
     if device == "cpu":
         return torch.device("cpu")
     if isinstance(device, str) and device.startswith("xpu"):
@@ -231,7 +230,7 @@ def _resolve_device(device="cuda"):
 
 
 def _require_xpu_device(device="xpu"):
-    """Reject unavailable/malformed XPU requests before filesystem or training work."""
+    """Return the XPU device, raising before any filesystem or training work."""
     if not isinstance(device, str) or not _XPU.fullmatch(device):
         raise _error("xpu_required", "this XPU request cannot use a CPU or CUDA fallback")
     backend = getattr(torch, "xpu", None)
@@ -249,7 +248,7 @@ def _require_xpu_device(device="xpu"):
 
 @contextmanager
 def _training_rng(device, seed):
-    """Isolate CPU and the explicitly selected accelerator's RNG/current device."""
+    """Seed and isolate the CPU and selected accelerator RNGs and current device."""
     backend = getattr(torch, device.type) if device.type in ("cuda", "xpu") else None
     with (torch.device("cpu"), backend.device(device) if backend else nullcontext(),
           torch.random.fork_rng(devices=[device.index] if backend else [],
@@ -276,7 +275,7 @@ def _run_controls(config, stop_after_epoch, max_seconds):
 
 
 class _DeadlineReached(Exception):
-    """Internal batch-boundary stop, never a partially committed epoch."""
+    """Stop at a batch boundary; the unfinished epoch is discarded."""
 
 
 def _check_deadline(deadline):
@@ -495,7 +494,7 @@ def _model_spec(config, model=None):
 
 
 def _adam_group(config, parameter_count):
-    """Canonical Adam group; useful for inference-only epoch-zero fixtures."""
+    """Return the canonical Adam parameter group for ``config``."""
     return {"lr": config.learning_rate, "betas": (0.9, 0.999), "eps": 1e-8,
             "weight_decay": 0, "amsgrad": False, "maximize": False, "foreach": False,
             "capturable": False, "differentiable": False, "fused": False,
@@ -516,7 +515,7 @@ def _tensor(value, shape, dtype=torch.float32):
 
 
 def _validate_saved(saved):
-    """Strict CPU-only validation; no optimizer, forward pass or GPU required."""
+    """Validate a checkpoint payload on CPU without building a model or optimizer."""
     required = {"schema_version", "checkpoint_kind", "config", "model_spec", "model_state",
                 "optimizer_state", "epoch", "history", "best_epoch", "manifest_sha256",
                 "initial_validation_epe_pixels", "best_validation_epe_pixels", "provenance",
@@ -804,7 +803,7 @@ def _read_checkpoint(path):
 
 
 def coordinate_checkpoint(path):
-    """Load trusted local weights with a bounded mandatory checksum sidecar."""
+    """Load a trusted local checkpoint after checking its mandatory .sha256 sidecar."""
     return _read_checkpoint(path)[0]
 
 
@@ -882,6 +881,7 @@ def model_from_checkpoint(saved):
 
 
 def load_coordinate_predictor(checkpoint):
+    """Load a coordinate-study checkpoint such as ``selected.pt`` for CPU inference."""
     started = perf_counter()
     path = _checkpoint_location(checkpoint)
     saved, digest = _read_checkpoint(path)
@@ -924,13 +924,12 @@ def _save_checkpoint(path, payload):
 def _commit_checkpoints(output: Path, payload: dict) -> str:
     """Publish a complete immutable best/last generation with one pointer swap.
 
-    The training caller owns .training.lock. Incomplete staging generations are
-    retained for diagnosis but are never reached through current. Existing
-    complete generations remain intact; this function does not prune data.
+    The caller holds .training.lock. Incomplete staging generations stay on disk
+    for diagnosis and are unreachable through ``current``; older generations stay.
     """
     output = Path(output).resolve(strict=True)
-    # Validate a last-shaped copy first: the incoming model is not necessarily
-    # the selected best, and the actual best digest is assigned below.
+    # Validate a last-shaped copy first; the incoming model may differ from the
+    # selected best, whose digest is set below.
     pending = dict(payload, checkpoint_kind="last", best_checkpoint_sha256="0" * 64)
     _validate_saved(pending)
     portable = _PORTABLE_CHECKPOINTS
@@ -1003,10 +1002,8 @@ def _commit_checkpoints(output: Path, payload: dict) -> str:
             or stored_best["epoch"] != stored_last["best_epoch"]):
         raise _error("invalid_checkpoint", "staged generation failed final identity validation")
     if portable:
-        # Windows cannot atomically replace a directory symlink. Publish a
-        # regular pointer file; readers resolve best/last through it once.
-        # Files are fsynced before publication. Windows has no POSIX directory
-        # fsync here, so power-loss durability is limited by its filesystem.
+        # Windows cannot atomically replace a directory symlink, so publish a
+        # pointer file. Without directory fsync, durability rests on the filesystem.
         _atomic_bytes(current, (json.dumps({"generation": generation.name}) + "\n").encode("ascii"))
         return best_digest
     pointer = generation / ".publish-current"
@@ -1100,7 +1097,7 @@ def _regularizer_tensor(value, name, *, _validated=False):
 
 
 def _topology_loss(predicted, valid, *, _validated=False):
-    """Fixed-GT-cell mean plus worst corner hinge; identity Jacobian is one."""
+    """Return the mean plus worst corner-Jacobian hinge over fixed GT cells."""
     _regularizer_tensor(predicted, "predicted", _validated=_validated)
     if (predicted.ndim != 4 or predicted.shape[-1] != 2 or predicted.shape[0] < 1
             or min(predicted.shape[1:3]) < 2 or not isinstance(valid, torch.Tensor)
@@ -1233,7 +1230,7 @@ def _masked_coordinate_mean(predicted, target, valid, photo_size):
 
 
 def _coordinate_loss(predicted, target, valid, photo_size, *, _validated=False):
-    """Fixed-shape version of the historical source-pixel coordinate objective."""
+    """Return the SmoothL1 source-pixel coordinate loss on fixed valid GT."""
     _map_loss_inputs(predicted, target, valid, photo_size, _validated=_validated)
     if not _validated and not bool(valid.any()):
         raise _error("invalid_training_batch", "coordinate supervision requires valid GT")
@@ -1251,11 +1248,10 @@ def _boundary_loss(predicted, target, valid, photo_size, *, _validated=False):
 
 
 def _page_relative_loss(predicted, target, valid, source_mask, photo_size, *, _validated=False):
-    """Extra GT-only small-page weighting; physical bbox support uses max-min+1.
+    """Weight each image's coordinate loss up when its GT page is small.
 
-    Each image's fixed-valid source-pixel SmoothL1 mean is weighted by the excess
-    photo/page diagonal ratio above one, capped by a 5%-photo diagonal floor.
-    No predicted mask or coordinate bounds change the supervised denominator.
+    The weight is photo_diagonal / max(page_diagonal, 0.05 * photo_diagonal) - 1,
+    with page bbox sides max - min + 1. Only fixed valid GT enters the mean.
     """
     _map_loss_inputs(predicted, target, valid, photo_size, _validated=_validated)
     if (predicted.shape[0] < 1 or not isinstance(source_mask, torch.Tensor)
@@ -1300,7 +1296,7 @@ def _coarse_supervision(predicted, target, valid, grid_size):
 
 
 def _differential_loss(predicted, target, valid, photo_size, grid_size, *, _validated=False):
-    """Match first/second coarse-grid GT differences, not zero curvature."""
+    """Match the GT first and second differences on the coarse grid."""
     _map_loss_inputs(predicted, target, valid, photo_size, _validated=_validated)
     if (not isinstance(grid_size, tuple) or len(grid_size) != 2
             or any(type(v) is not int or v < 1 for v in grid_size)
@@ -1354,10 +1350,10 @@ def _batch(batch, device):
 
 
 def _orientation_loss(predicted, target, valid, photo_size, grid_size, *, _validated=False):
-    """Direction agreement, with GT-only eligibility and equal image weighting.
+    """Penalize coarse-difference direction error on GT-eligible cells, per image.
 
-    Exact opposite directions can be stationary when predicted norm >= 1;
-    this auxiliary must retain the primary coordinate supervision.
+    Exactly opposite directions are stationary when the predicted norm is >= 1,
+    so use this loss only together with the coordinate loss.
     """
     _map_loss_inputs(predicted, target, valid, photo_size, _validated=_validated)
     if (predicted.shape[0] < 1 or not isinstance(grid_size, tuple) or len(grid_size) != 2
@@ -1387,7 +1383,7 @@ def _orientation_loss(predicted, target, valid, photo_size, grid_size, *, _valid
 
 
 def _rotate_training_batch(batch, probability, *, _validated=False, _checks=None):
-    """CPU-RNG sampling, device-local quarter-turns; never mutate input tensors."""
+    """Quarter-turn random items on their device using the CPU RNG; inputs stay intact."""
     if not _finite_number(probability) or probability > 1:
         raise _error("invalid_training_batch", "rotation probability must be in [0,1]")
     if probability == 0:
@@ -1445,8 +1441,8 @@ def _rotate_training_batch(batch, probability, *, _validated=False, _checks=None
     if "corner_target" in batch:
         matrices = image.new_tensor(([[0, 1], [-1, 0]], [[-1, 0], [0, -1]],
                                      [[0, -1], [1, 0]]))
-        # Legacy resize can change physical aspect. Recompute direction from
-        # transformed corners rather than assuming an exact physical turn.
+        # Resizing back to the input shape can change the physical aspect, so
+        # recompute direction from the transformed corners.
         photo_size = tuple(source_mask.shape[-2:]) if source_mask is not None else None
         if photo_size is None:
             raise _error("invalid_training_batch", "semantic batch rotation needs source_mask")
@@ -1510,7 +1506,7 @@ def _semantic_page_losses(auxiliary, batch, photo_size, *, _checks=None):
 
 
 def _training_step(model, optimizer, batch, config, photo_size, device, *, _defer_metrics=False):
-    """Only the explicitly configured device may perform backward and step."""
+    """Run one backward and optimizer step; ``device`` must match ``config.device``."""
     _config(config)
     device = torch.device(device)
     parameters = list(model.parameters())
@@ -1716,15 +1712,10 @@ def _device_info(device):
 
 
 def _coordinate_datasets(dataset_dir, config):
-    """One complete metadata admission, then independent train/validation views.
+    """Admit the dataset once and return separate train and validation views.
 
-    SceneCoordinateDataset validates the entire manifest, every positive's
-    geometry metadata, and all paper sources regardless of its selected split.
-    Only that newly admitted object's private metadata is reused here, never a
-    caller-supplied dataset or a held-out decoded sample. Deep copies retain
-    each split's independent mutable metadata and lazy content-verification set.
-    The cache factory still performs its full before/after source/hash checks.
-    Public uncached dataset construction remains unchanged.
+    ``SceneCoordinateDataset`` validates the whole manifest and every source for
+    any split. The validation view is a deep copy with its own records.
     """
     train = SceneCoordinateDataset(
         dataset_dir, "train", config.model_config, config.output_size,
@@ -1740,8 +1731,8 @@ def _coordinate_datasets(dataset_dir, config):
         for record in validation._manifest["collection"]["paper_augmentation"]["records"]:
             if record["split"] == "validation":
                 record = copy.deepcopy(record)
-                # Match scene_data._paper_collection exactly, including legacy
-                # simulated records that omit kind and/or source_kind.
+                # Match scene_data._paper_collection: records without ``kind``
+                # are simulated.
                 record["source_kind"] = record.get("kind", "simulated")
                 paper.append(record)
     if len(paper) != train.source_page_counts["paper"]["validation"]:
@@ -1764,7 +1755,7 @@ def prepare_coordinate_data(dataset_dir, config, *, cache_max_bytes,
 
 
 class _CachedBatchView:
-    """Keep DataLoader RNG/sampling, replace clone/stack/pin with one gather."""
+    """Serve each batch with one gather while DataLoader keeps sampling and RNG."""
 
     def __init__(self, data, include_source_mask, pin_memory, semantic_labels=None):
         self.data, self.include_source_mask = data, include_source_mask
@@ -1797,8 +1788,7 @@ def _already_batched(batch):
 
 
 def _data_loader(data, config, shuffle, cuda, include_source_mask, *, training=None):
-    # The historical argument name is retained for callers; True requests
-    # pinned host memory for either explicitly selected CUDA or XPU execution.
+    # ``cuda`` requests pinned host memory for CUDA and XPU alike.
     if training is None:
         training = data.split == "train"
     options = {"batch_size": config.batch_size, "shuffle": training,
@@ -1834,18 +1824,14 @@ def train_coordinate_study(
     stop_after_epoch=None, max_seconds=None, cache_max_bytes=0, prepared_data=None,
     persistent_cache=None, rebuild_cache=False,
 ):
-    """Train on the explicit device; limits stop at the last complete epoch.
+    """Train on the configured device; limits stop at the last complete epoch.
 
-    ``stop_after_epoch`` is absolute, not additional epochs. ``max_seconds`` is
-    a soft invocation wall-clock limit checked at train/validation batch
-    boundaries, so one in-flight batch or checkpoint publication may overrun.
-    Neither operational limit changes the checkpointed experiment config.
-    Fresh ``initial_checkpoint`` loads only model weights and binds their file
-    hash into config. Resume requires that same configured hash, without the
-    original initialization file. Both modes are mutually exclusive.
-    ``prepared_data`` reuses the RAM cache returned by ``prepare_coordinate_data``.
-    Cached runs hash all artifacts before/after each invocation and compare file
-    metadata between epochs. Manifest and implementation hashes stay checked.
+    ``stop_after_epoch`` is an absolute epoch number. ``max_seconds`` is a soft
+    wall-clock limit checked at batch boundaries; one batch or checkpoint write
+    may overrun it. ``initial_checkpoint`` loads model weights only and binds
+    their hash into the config; ``resume`` needs that hash and excludes
+    ``initial_checkpoint``. ``prepared_data`` reuses the cache from
+    ``prepare_coordinate_data``; cached runs hash all artifacts before and after.
     """
     started = perf_counter()
     config = _config(StudyConfig() if config is None else config)

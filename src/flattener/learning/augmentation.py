@@ -1,9 +1,8 @@
-"""Train-only GPU-friendly augmentation without changing cached supervision.
+"""Training-only batch augmentation on the batch's device; cached data stays intact.
 
-Images are float32 N3HW in [0, 1]. Coordinate values describe the original
-photo's physical bounds in xy order, not the resized preview's pixel aspect.
-The flat document domain and its fixed valid mask are never rotated or resized.
-All random draws use the CPU global torch RNG already saved by the trainer.
+Images are float32 (N, 3, H, W) in [0, 1]. Coordinates are xy values normalized
+to the original photo's physical bounds. The flat document domain and its valid
+mask keep their shape. Random draws use the CPU global torch RNG the trainer saves.
 """
 
 from __future__ import annotations
@@ -38,7 +37,7 @@ AUGMENTATION_PROTOCOL = {
     "disabled": "both probabilities zero returns identical batch and consumes no RNG",
 }
 
-# Separate from the historical augmentation protocol embedded in 0.9 models.
+# Kept apart from AUGMENTATION_PROTOCOL, which DIVERSITY_CHECKPOINT_SCHEMA embeds.
 SEMANTIC_PAGE_PROTOCOL = {
     "version": "exact-semantic-page-labels-1.0",
     "corners": "TL,TR,BR,BL semantic document order; never re-sort by screen position",
@@ -59,7 +58,7 @@ _SEMANTIC_FIELDS = ("corner_target", "corner_valid", "direction_target", "direct
 
 
 def _direction_labels(corners, photo_size):
-    """Clockwise nearest-quarter of the semantic global x-axis, in photo pixels."""
+    """Return the nearest clockwise quarter of the semantic x-axis in photo pixels."""
     finite = torch.isfinite(corners).all(dim=(1, 2))
     safe = torch.where(torch.isfinite(corners), corners, 0.0)
     axis = ((safe[:, 1] - safe[:, 0]) + (safe[:, 2] - safe[:, 3])) * 0.5
@@ -101,13 +100,12 @@ def _semantic_contract(batch, count, device, checks):
 
 
 def transform_semantic_page_labels(batch, forward, photo_size, *, turns=None, _checks=None):
-    """Return only transformed label fields; the caller merges them into its batch.
+    """Return the transformed label fields for the caller to merge into its batch.
 
-    ``forward`` is N2x2 in normalized original-photo coordinates. ``turns`` is
-    optional CPU int64 N and certifies this is the *physical-aspect-preserving*
-    fit transform, enabling exact q-k labels for cropped corners. Omit it for
-    legacy anisotropic quarter turns: their partially observed direction is
-    masked instead of assigning a potentially incorrect class.
+    ``forward`` is (N, 2, 2) in normalized original-photo coordinates. Pass
+    ``turns`` (CPU int64, N) only for the aspect-preserving fit transform; it
+    gives exact q-k labels for cropped corners. Without it, partially observed
+    directions are masked.
     """
     if not isinstance(batch, dict):
         raise _error("semantic transform requires a batch dictionary")
@@ -150,7 +148,7 @@ def transform_semantic_page_labels(batch, forward, photo_size, *, turns=None, _c
 
 
 class SemanticPageLabels:
-    """Small independent CPU table; no decoded images or persistent-cache mutation."""
+    """CPU table of semantic page labels built from metadata only."""
 
     def __init__(self, dataset, tensors, metadata_paths, identity):
         self._dataset = dataset
@@ -170,7 +168,7 @@ class SemanticPageLabels:
         return len(self.record_ids)
 
     def verify_integrity(self):
-        """Metadata/code-only verification; cache owners retain full pixel-file checks."""
+        """Check manifest, source and metadata hashes; cache owners check pixel files."""
         from . import scene_data
 
         dataset = self._dataset
@@ -187,7 +185,7 @@ class SemanticPageLabels:
             scene_data._checked_hash(path, digest, 1024 * 1024)
 
     def fetch_batch(self, indices, *, pin_memory=False):
-        """Fresh contiguous label tensors in exactly the supplied sample order."""
+        """Return fresh contiguous label tensors in the given sample order."""
         if type(pin_memory) is not bool:
             raise _error("semantic pin_memory must be boolean")
         if isinstance(indices, torch.Tensor):
@@ -223,12 +221,10 @@ class SemanticPageLabels:
 
 
 def prepare_semantic_page_labels(dataset, *, max_bytes=16 * 1024**2):
-    """Evaluate four true page boundaries per selected record, without image IO.
+    """Build corner and direction labels for the dataset's records from metadata.
 
-    Existing cache source identity stays unchanged: this opt-in metadata table
-    is not serialized into, or used to reinterpret, its eight tensor storages.
-    Test-split use is allowed only for already constructed explicit evaluation
-    datasets; this function never opens other splits' pixels or predictions.
+    The table sits beside the cache and leaves its tensors and identity intact.
+    Image pixels are never read.
     """
     from ..synthetic.geometry import flat_to_photo
     from . import scene_data
@@ -346,16 +342,14 @@ def _admit(batch, photo_size, required_mask, validated, checks):
 
 
 def _random(shape, device):
-    # Small CPU draws preserve the existing checkpoint RNG contract and avoid
-    # device scalar reads. Only the resulting fields transfer to the GPU.
+    # Draw on CPU to keep the checkpointed RNG stream and avoid device scalar reads.
     return torch.rand(shape, dtype=torch.float32, device="cpu").to(device, non_blocking=True)
 
 
 def _texture(image):
     count, _, height, width = image.shape
     device = image.device
-    # One small transfer for all random fields; no full-resolution CPU texture
-    # and no data-dependent GPU-to-host read in the augmentation hot path.
+    # Move all random fields in one small transfer; the hot path reads nothing back.
     fields = _random((count, 3 + 12 + 64 + 1024 + 4), device)
     color = 0.10 + 0.78 * fields[:, :3, None, None]
     smooth = F.interpolate(fields[:, 3:15].reshape(count, 3, 2, 2) - 0.5,
@@ -377,9 +371,8 @@ def _texture(image):
 
 def _protected_preview(source_mask, image_size):
     mask = F.max_pool2d(source_mask[:, None].float(), 7, stride=1, padding=3)
-    # Unlike interpolating a thin mask then thresholding at 0.5, max-pooling
-    # retains any covered source pixel. Additional preview dilation covers the
-    # cached antialiased resize footprint and a conservative boundary margin.
+    # Max-pooling keeps any covered source pixel; the extra preview dilation
+    # covers the antialiased resize footprint plus a boundary margin.
     mask = F.adaptive_max_pool2d(mask, image_size)
     return F.max_pool2d(mask, 5, stride=1, padding=2).bool()
 
@@ -428,8 +421,8 @@ def _rotate_fit(batch, turns, photo_size, fill, checks):
     result = dict(batch)
     result["image"] = torch.where(upright, image, torch.where(
         half, image.flip((-2, -1)), rotated.clamp(0.0, 1.0)))
-    # Do not rotate the flat output lattice: it is the document's upright
-    # reading order. Only each correspondence's source-photo xy value changes.
+    # The flat output lattice keeps the upright reading order; only the
+    # source-photo xy values rotate.
     transformed = torch.einsum("nij,nhwj->nhwi", forward, target)
     result["target"] = torch.where(upright, target, transformed)
     result.update(transform_semantic_page_labels(
@@ -454,15 +447,12 @@ def _rotate_fit(batch, turns, photo_size, fill, checks):
 @torch.no_grad()
 def augment_training_batch(batch, *, photo_size, rotation_probability=0.0,
                            background_probability=0.0, _validated=False, _checks=None):
-    """Return an augmented batch; caller must invoke this only during training.
+    """Return an augmented copy of a training batch; call it only during training.
 
-    Background replacement is per image and never modifies the protected page.
-    Quarter turns fit the complete original photo into the same physical canvas
-    without anisotropic stretching or changing the fixed validity denominator.
-    With ``_validated=True`` and a shared ``_checks`` list, all data-dependent
-    checks remain device tensors for the trainer's one existing synchronization.
-    Existing entries are preserved and inputs are never mutated. Both disabled
-    probabilities return the exact original object without any RNG operation.
+    Background replacement keeps the protected page pixels. Quarter turns fit the
+    whole photo into the same canvas at one scale and keep the valid mask. With
+    both probabilities zero, the input object is returned and no RNG is consumed.
+    ``_validated`` with ``_checks`` leaves data checks as device tensors for the trainer.
     """
     _probability(rotation_probability, "rotation_probability")
     _probability(background_probability, "background_probability")

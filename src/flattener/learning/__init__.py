@@ -1,7 +1,4 @@
-"""CPU coordinate prediction for trained models.
-
-Trained models need an explicit output size.
-"""
+"""Learned coordinate models; inference runs on CPU with an explicit output size."""
 
 from .inference import LoadedPredictor, load_predictor, unwarp
 from .model import CoordinatePredictor, ModelConfig, dense_maps, preprocess_image

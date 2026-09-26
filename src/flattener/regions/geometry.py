@@ -1,7 +1,7 @@
 """Page-region decisions and exact pixel-edge coordinate composition.
 
-Probability is a model score, not calibrated confidence. Estimated-page
-coverage is distinct from actual document or character preservation.
+Probabilities are uncalibrated model scores. Coverage is measured against the
+estimated page mask.
 """
 
 from collections import deque
@@ -125,7 +125,7 @@ class RegionEstimate:
 
 
 def _largest_component(binary):
-    """Deterministic 8-connectivity; ties retain first row-major component."""
+    """Return the largest 8-connected component; ties keep the first in row-major order."""
     height, width = binary.shape
     visited = np.zeros_like(binary)
     largest = []
@@ -265,11 +265,10 @@ def region_map_to_source(grid, virtual_box, source_size):
 
 
 def page_coverage(grid, mask):
-    """Fraction of estimated source-mask centers inside mapped output boundary.
+    """Return the fraction of page-mask centers inside the mapped output boundary.
 
-    Pixel-center scanlines are on the probability grid, not high-resolution text. Local
-    fold checks remain the renderer's responsibility; this is not a detector of
-    self-occlusion, characters, global injectivity, or true document correctness.
+    Scanlines run through pixel centers of the probability grid. Fold checks
+    belong to the renderer.
     """
     _map(grid)
     if (
@@ -285,9 +284,8 @@ def page_coverage(grid, mask):
     following = np.roll(polygon, -1, axis=0)
     x0, y0 = polygon.T
     x1, y1 = following.T
-    # A float32 map's boundary centers may differ from their exact normalized
-    # values by a few ULP. This tolerance is < 0.00013 probability-grid pixels
-    # at the maximum 512 width; it is not an integer-pixel dilation.
+    # Float32 boundary centers can be a few ULP off their exact values; this
+    # tolerance stays below 0.00013 grid pixels at the maximum 512 width.
     epsilon = 4 * np.finfo(np.float32).eps
     x_centers = 2 * (np.arange(mask.shape[1], dtype=np.float64) + 0.5) / mask.shape[1] - 1
     horizontal = np.abs(y1 - y0) <= epsilon
@@ -352,8 +350,8 @@ def ensure_page_coverage(grid, mask, *, config=None):
             metadata,
         )
     low, high = 1.0, config.max_boundary_expansion
-    # Bisection finds an accepted scale; every proposed scale is checked. No
-    # monotonicity of an arbitrary non-convex footprint is assumed as a proof.
+    # Bisect for an accepted scale and check every probe, since coverage of a
+    # non-convex footprint can be non-monotonic in scale.
     for _ in range(8):
         mid = (low + high) / 2
         probe = expanded(mid)

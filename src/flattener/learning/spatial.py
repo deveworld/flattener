@@ -1,10 +1,12 @@
-"""Explicit CPU/CUDA/XPU coordinate models without implicit device transfers.
+"""Coordinate models for CPU, CUDA and XPU.
 
-The spatial decoder keeps image features at each output-grid position. Legacy
-architectures emit free normalized residuals; projective/surface architectures
-evaluate bounded geometric parameters directly at requested pixel centers.
-Every zero-initialized output head starts at identity. Construction consumes
-the caller's torch RNG; callers needing isolation must use ``fork_rng``.
+Models run on the device that holds their parameters; callers place the model
+and inputs. Inputs are float32 RGB in [0, 1], resized to ``config.input_size``.
+Outputs are normalized source coordinates and are never clipped.
+Global, page and spatial models emit coarse residuals. Projective and surface
+models evaluate bounded geometric parameters at the requested pixel centers.
+Every output head is zero-initialized and starts at identity. Construction
+consumes the caller's torch RNG; use ``torch.random.fork_rng`` to isolate it.
 """
 
 from __future__ import annotations
@@ -105,12 +107,11 @@ def _dense_size(size: tuple[int, int], coarse_size: tuple[int, int], batch: int)
 def expand_coordinate_residual(
     residual: torch.Tensor, output_size: tuple[int, int], mode: str = "legacy"
 ) -> torch.Tensor:
-    """Expand half-pixel residuals without clipping or changing their device.
+    """Expand coarse half-pixel residuals into a dense absolute map.
 
-    ``legacy`` is exactly the previous bilinear border-extension protocol.
-    ``linear`` uses the nearest two coarse centers even outside their convex
-    hull, so affine absolute maps remain affine across the full image extent.
-    Linear extrapolation does not guarantee orientation for arbitrary fields.
+    ``legacy`` resizes bilinearly with border extension. ``linear`` extrapolates
+    from the nearest two coarse centers, so affine maps stay affine over the
+    whole image; its orientation depends on the field, and the renderer checks it.
     """
     if (not isinstance(residual, torch.Tensor) or residual.dtype != torch.float32
             or residual.device.type not in {"cpu", "cuda", "xpu"}
@@ -130,8 +131,8 @@ def expand_coordinate_residual(
         expanded = F.interpolate(residual, size=output_size, mode="bilinear", align_corners=False)
     else:
         expanded = residual
-        # Index selection is bounded; interpolation weights deliberately are
-        # not. Negative edge weights implement linear extrapolation, not clamp.
+        # Indices are clamped to valid pairs; weights stay unclamped, so edge
+        # weights outside [0, 1] extrapolate linearly.
         for axis, (incoming, outgoing) in enumerate(zip(coarse_size, output_size), start=2):
             position = ((torch.arange(outgoing, device=residual.device, dtype=torch.float64)
                          + 0.5) * incoming / outgoing - 0.5)
@@ -150,10 +151,10 @@ def expand_coordinate_residual(
 
 
 class DeviceCoordinatePredictor(CoordinatePredictor):
-    """Legacy global architecture and state keys with explicit accelerator support.
+    """``CoordinatePredictor`` with CPU, CUDA and XPU input validation.
 
-    Only validation changes: the inherited layers and initialization match
-    ``CoordinatePredictor`` exactly for the same configuration and RNG state.
+    Layers, state keys and initialization match ``CoordinatePredictor`` for the
+    same configuration and RNG state.
     """
 
     def __init__(self, config: ModelConfig | None = None) -> None:
@@ -165,13 +166,7 @@ class DeviceCoordinatePredictor(CoordinatePredictor):
 
 
 class SpatialCoordinatePredictor(nn.Module):
-    """Multiscale spatial decoder for N,2,Gh,Gw normalized residuals.
-
-    RGB input must already be float32, full-extent resized and in [0, 1].
-    ``model.to(device)`` and input placement are the caller's responsibility.
-    This module does not resize source images, clip coordinates, or move data
-    between devices. It is not a trained model or a quality certification.
-    """
+    """Multiscale spatial decoder that emits (N, 2, Gh, Gw) normalized residuals."""
 
     def __init__(self, config: ModelConfig | None = None) -> None:
         super().__init__()
@@ -219,11 +214,10 @@ class SpatialCoordinatePredictor(nn.Module):
 
 
 class PageCoordinatePredictor(nn.Module):
-    """Page-supervised multiscale attention feeding a global coordinate head.
+    """Global coordinate head fed by page-supervised multiscale attention.
 
     Page logits are at the second encoder level (ceil(input / 4)). Attention
-    scales deep features by 0.5 + sigmoid(logits), retaining background context
-    instead of hard-cropping. A predicted page is not a quality certification.
+    scales deep features by 0.5 + sigmoid(logits), so background keeps half weight.
     """
 
     def __init__(self, config: ModelConfig | None = None) -> None:
@@ -271,13 +265,12 @@ class PageCoordinatePredictor(nn.Module):
 
 
 class ProjectiveCoordinatePredictor(nn.Module):
-    """Eight-DOF positive-orientation homography evaluated at dense centers.
+    """Eight-DOF orientation-preserving homography evaluated at dense centers.
 
-    The encoder and hidden-head state names match the legacy global model;
-    the final layer is a new identity-initialized parameter head. Parameters
-    are ordered tx, ty, theta, log_sx, log_sy, shear, perspective_x, perspective_y.
-    ``forward`` remains a coarse-residual compatibility view, NOT the correct
-    dense decoder. Use ``forward_dense`` to retain the analytic geometry.
+    Encoder and hidden-head state names match the global model; the final layer
+    is an identity-initialized parameter head. Parameters are ordered tx, ty,
+    theta, log_sx, log_sy, shear, perspective_x, perspective_y. ``forward``
+    returns coarse residuals; use ``forward_dense`` for the analytic dense map.
     """
 
     parameter_outputs = 8
@@ -327,15 +320,15 @@ class ProjectiveCoordinatePredictor(nn.Module):
         ], dim=-1)
 
     def _decoder_constants(self, raw, size):
-        # Keep the original CPU float64 -> float32 center formula and compute
-        # bases on the destination device, exactly as the uncached decoder did.
+        # Build centers on CPU so they are bit-identical on every device; build
+        # bases on the destination device.
         key = (size, raw.device, torch.float32)
         cached = self._constant_cache.get(key)
         if cached is not None:
             self._constant_cache.move_to_end(key)
             return cached
-        # Inference-warmed constants must also be safe to save for a later
-        # backward pass; inference tensors cannot be used for that purpose.
+        # Leave inference mode so constants cached during inference stay usable
+        # in a later backward pass.
         with torch.inference_mode(False), torch.no_grad():
             with torch.device("cpu"):
                 centers = coarse_identity(size)
@@ -367,7 +360,7 @@ class ProjectiveCoordinatePredictor(nn.Module):
             dx = torch.linalg.vector_norm(torch.diff(coefficients, dim=3), dim=1).flatten(1)
             dy = torch.linalg.vector_norm(torch.diff(coefficients, dim=2), dim=1).flatten(1)
             # Bernstein derivative convexity gives column bounds Lx and Ly.
-            # Norm, rather than sqrt(sum squares), has a finite zero gradient.
+            # vector_norm has a finite gradient at zero; sqrt(sum squares) gives NaN.
             bound = torch.linalg.vector_norm(torch.stack((2 * dx.amax(1),
                                                           1.5 * dy.amax(1)), dim=1), dim=1)
             coefficients = coefficients * (0.7 / bound.clamp_min(0.7))[:, None, None, None]
@@ -396,13 +389,11 @@ class ProjectiveCoordinatePredictor(nn.Module):
     def _forward_dense_validated(
         self, images: torch.Tensor, output_size: tuple[int, int]
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Internal dense-only path for prevalidated training/evaluation batches.
+        """Return the dense map and a device finite flag for a prevalidated batch.
 
-        The caller guarantees finite [0,1] inputs and checks the returned scalar
-        device boolean together with the loss before backward. It includes raw
-        parameter finiteness because tanh can conceal an infinite raw value.
-        Metadata/resource guards remain; host synchronization and unused coarse
-        geometry are omitted here only.
+        Callers pass finite inputs in [0, 1] and check the flag with the loss
+        before backward. The flag covers raw parameters, since tanh can hide an
+        infinite raw value. This path skips host synchronization and the coarse map.
         """
         _validate_images(self, self.config, images, check_values=False)
         size = _dense_size(output_size, self.config.grid_size, images.shape[0])
@@ -428,40 +419,27 @@ class ProjectiveCoordinatePredictor(nn.Module):
 
 
 class SurfaceCoordinatePredictor(ProjectiveCoordinatePredictor):
-    """Positive homography composed with a bounded smooth 4x5 Bernstein warp.
+    """Orientation-preserving homography composed with a bounded 4x5 Bernstein warp.
 
-    Coefficients are 0.2*tanh(raw), normalized so sqrt(Lx²+Ly²)<=0.7.
-    Thus ||Jr||₂<=0.7 and G=x+r is continuously injective and orientation
-    preserving. Each discrete cell's two residual edge-difference columns
-    are also bounded by Lx and Ly, so its four corner Jacobians are positive
-    in exact arithmetic. The homography preserves those convex cells because
-    its denominator stays positive over |G|<=1.2. This is not an absolute
-    float32/renderer-pass guarantee; out-of-bounds and finite-precision gates
-    remain mandatory. No coordinate or RGB clipping is applied.
+    Coefficients are 0.2*tanh(raw), scaled so sqrt(Lx²+Ly²) <= 0.7. Then
+    ||Jr||₂ <= 0.7, G = x + r is injective, and every cell has positive corner
+    Jacobians in exact arithmetic; the homography denominator stays positive
+    over |G| <= 1.2. Float32 maps still go through the renderer's checks.
     """
 
     parameter_outputs = 48
 
 
 class OrientedSurfaceCoordinatePredictor(SurfaceCoordinatePredictor):
-    """Four physical directions, page attention, and an analytic Surface map.
+    """Surface map with page attention and a four-way physical direction head.
 
-    This is a new architecture, not a reinterpretation of old Surface weights.
-    Only encoder.* and head.1.* have the old backbone's parameter meaning.
-    The new geometry head starts at identity. Direction is a hard argmax with
-    first-index tie breaking: right/down/left/up in source pixel coordinates.
-    A direction classification objective is required because argmax does not
-    transmit coordinate-loss gradients to the direction head. The residual
-    angle is bounded to +/- pi/4; maps from different classes are never averaged.
-
-    ``photo_size`` is mandatory at each call: preview aspect ratio need not
-    equal physical source aspect ratio. All returned maps and semantic corners
-    are in the original normalized source frame. There is no canonical crop,
-    coordinate clipping, or inferred output aspect ratio in this first stage.
-    D^-1 R D preserves the positive determinant of the scale/shear transform,
-    so the existing Bernstein/perspective orientation argument still applies
-    in exact arithmetic. Finite, out-of-bounds, and renderer gates remain
-    mandatory; neither valid geometry nor four corners certify page coverage.
+    Direction is the argmax over right/down/left/up in source pixel coordinates,
+    first index on ties; train it with a classification loss, since argmax passes
+    no coordinate gradient. The residual angle is bounded to +/- pi/4.
+    ``photo_size`` is required at each call because the preview aspect ratio can
+    differ from the source. Maps and corners are in the normalized source frame.
+    D^-1 R D keeps the determinant positive, so the Surface orientation bound holds.
+    Only ``encoder.*`` and ``head.1.*`` share state meaning with the global model.
     """
 
     requires_photo_size = True
@@ -487,7 +465,7 @@ class OrientedSurfaceCoordinatePredictor(SurfaceCoordinatePredictor):
 
     def _geometry_features(self, images):
         features, encoded = [], images
-        # Keep the old encoder.* state keys, but retain its pre-pooling scales.
+        # Run encoder.* layer by layer to keep the pre-pooling feature scales.
         for index in (0, 2, 4):
             encoded = self.encoder[index + 1](self.encoder[index](encoded))
             features.append(encoded)
@@ -546,8 +524,8 @@ class OrientedSurfaceCoordinatePredictor(SurfaceCoordinatePredictor):
         return self._project_oriented(centers[None] + residual, parameters, photo_size)
 
     def _corner_coordinates(self, raw, parameters, photo_size):
-        # At each flat physical boundary corner Bernstein reduces exactly to
-        # one coefficient, not a sampled/extrapolated dense-grid pixel center.
+        # At the boundary corners the Bernstein sum reduces exactly to one
+        # coefficient, so corners need no dense-grid sampling.
         corners = raw.new_tensor(((-1, -1), (1, -1), (1, 1), (-1, 1)))
         residual = parameters[0][:, :, (0, 0, 3, 3), (0, 4, 4, 0)].permute(0, 2, 1)
         return self._project_oriented(corners[None] + residual, parameters, photo_size)
@@ -556,16 +534,12 @@ class OrientedSurfaceCoordinatePredictor(SurfaceCoordinatePredictor):
         self, images, output_size, *, photo_size, need_coarse=False,
         teacher_direction=None, teacher_valid=None,
     ):
-        """Metadata-checked hot path; caller checks finite flag before backward.
+        """Return residual, dense map, auxiliaries and a device finite flag.
 
-        Inputs must already be finite float32 RGB in [0,1]. The returned device
-        flag includes raw geometry/direction/page logits, dense and corner
-        coordinates, so saturation cannot conceal nonfinite parameters.
-        A paired teacher override is training-only. Fixed GT eligible classes
-        control geometry, never the predicted logits. Missing GT falls back to
-        argmax. Invalid eligible classes use safe indices and return false in
-        the admission flag; they must never reach backward. Public/eval paths
-        cannot request this override.
+        Inputs are finite float32 RGB in [0, 1]; callers check the flag before
+        backward. The flag covers raw geometry, direction and page logits, and
+        the dense and corner maps. In training mode, valid ``teacher_direction``
+        entries replace the argmax for geometry; bad eligible labels clear the flag.
         """
         _validate_images(self, self.config, images, check_values=False)
         size = _dense_size(output_size, self.config.grid_size, images.shape[0])
@@ -590,9 +564,8 @@ class OrientedSurfaceCoordinatePredictor(SurfaceCoordinatePredictor):
         if teacher:
             in_range = (teacher_direction >= 0) & (teacher_direction < 4)
             teacher_admitted = (~teacher_valid | in_range).all()
-            # Select safe values before any quarter-turn lookup. Out-of-range
-            # eligible GT fails admission; no labels or supervision masks are
-            # clamped to manufacture a valid training example.
+            # Pick in-range turns before the quarter-turn lookup; out-of-range
+            # eligible labels fail admission as they are.
             turns = torch.where(teacher_valid & in_range, teacher_direction, orientation.argmax(1))
             parameters = self._geometry_parameters(raw, orientation, turns=turns)
         else:
@@ -642,7 +615,7 @@ def make_coordinate_model(
 ) -> (DeviceCoordinatePredictor | SpatialCoordinatePredictor | PageCoordinatePredictor
       | ProjectiveCoordinatePredictor | SurfaceCoordinatePredictor
       | OrientedSurfaceCoordinatePredictor):
-    """Choose an explicit architecture; never infer or fall back to another."""
+    """Build the named architecture; unknown names raise ValueError."""
     if not isinstance(architecture, str) or architecture not in {
         "global", "spatial", "page", "projective", "surface", "oriented_surface"
     }:

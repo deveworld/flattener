@@ -1,4 +1,4 @@
-"""Generate fixed-count printed/blank scene controls without replacing outputs."""
+"""Generate a small paired printed/blank scene dataset in a new directory."""
 
 import argparse
 import json

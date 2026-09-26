@@ -1,9 +1,9 @@
 """Restricted image input and transactional PNG/JSON output adapters.
 
-Output files are committed atomically one at a time. A failed commit rolls back
-this call's changes; the group is not an atomic snapshot for concurrent readers.
-Callers must not write to the same output directory concurrently. Unreferenced
-files in an existing directory are left alone, including on explicit overwrite.
+Output files are committed atomically one at a time, and a failed commit rolls
+back this call's changes. Concurrent readers can see a partly committed group.
+Use one writer per output directory. Other files in the directory are left
+alone, also with ``overwrite``.
 """
 
 from __future__ import annotations
@@ -53,9 +53,8 @@ def load_image(
 ) -> NDArray[np.uint8]:
     """Decode one 8-bit RGB/L JPEG or PNG and apply its EXIF orientation once.
 
-    This array-returning adapter always raises on failure. ``render_file`` applies
-    the configured failure policy when an application needs a ``RenderResult``.
-    No ICC profile conversion is performed.
+    Raises on failure; ``render_file`` applies the configured failure policy and
+    returns a ``RenderResult``. Pixel values are used as stored, without ICC conversion.
     """
     cfg = validate_config(config)
     source = _path(path)
@@ -166,10 +165,9 @@ def save_result(
 ) -> dict[str, str]:
     """Save present arrays and JSON, refusing existing targets by default.
 
-    Images/masks use lossless PNG. JSON includes the processing status even for
-    failures and fallback output. On success, ``result.metadata`` also receives
-    the artifact paths and measured save time. The save timer covers staging
-    image/mask data; JSON serialization and commit are excluded from saved times.
+    Images and masks are PNG. The JSON records the processing status, also for
+    failures and fallback output. On success, ``result.metadata`` also gets the
+    artifact paths and the save time, which covers image and mask staging.
     """
     arrays = _validate_result(result)
     if not isinstance(overwrite, bool):
@@ -244,7 +242,7 @@ def save_result(
                     backups[key] = backup
                 os.replace(staging / _ARTIFACT_NAMES[key], target)
             else:
-                # link is an atomic create-if-absent, unlike an exists/replace pair.
+                # link creates the target atomically and only if it is absent.
                 os.link(staging / _ARTIFACT_NAMES[key], target)
             committed.append(key)
     except BaseException as exc:

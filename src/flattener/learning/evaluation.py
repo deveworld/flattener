@@ -1,7 +1,7 @@
-"""Fixed-ground-truth coordinate metrics and complete, auditable evaluation.
+"""Coordinate metrics against fixed ground truth, and audited scene evaluation.
 
-Endpoint errors are measured in source pixels, before clipping or renderer
-validation. A predicted validity mask can never remove a difficult target.
+Metrics use raw predictions in source pixels, before renderer validation, and
+never clip coordinates. The target set is always the full GT mask.
 """
 
 from __future__ import annotations
@@ -104,8 +104,8 @@ def coordinate_metrics(prediction, truth, gt_mask, source_size) -> dict[str, Any
     """Measure raw error and geometry independently of rendering acceptance."""
     epe = endpoint_error(prediction, truth, gt_mask, source_size)
     boundary = boundary_mask(gt_mask)
-    # Maximum OOB allowance lets the existing fold diagnostic run even when
-    # a finite map is mostly outside the source. No coordinates are clipped.
+    # Allow any out-of-bounds fraction so the fold check also runs on maps that
+    # lie mostly outside the source.
     with np.errstate(over="ignore"):
         coordinates = prediction.astype(np.float32)
     try:
@@ -221,7 +221,7 @@ def _simple_boundary(points):
 
 
 def _polygon_mask(points, size):
-    """Even-odd interior at source pixel centers, with half-open edge ownership."""
+    """Rasterize the even-odd interior at source pixel centers with half-open edges."""
     height, width = size
     points = (points + 1) * np.asarray([width, height], dtype=np.float64) / 2
     ends = np.roll(points, -1, axis=0)
@@ -244,14 +244,12 @@ def _polygon_mask(points, size):
 
 
 def page_sampling_metrics(prediction: np.ndarray, source_mask: np.ndarray) -> dict[str, Any]:
-    """Source-page diagnostics, not a correction-quality certification.
+    """Measure how the output samples the GT source page.
 
-    Precision is the fraction of ALL requested output centers falling in a GT
-    source-page pixel. Nonfinite/outside centers are misses. Coverage and IoU
-    rasterize the half-pixel-extrapolated output perimeter at source centers;
-    they are resolution-independent *extent* diagnostics, not text correctness.
-    Coverage is unavailable for incomplete, locally folded, or self-intersecting
-    maps. No coordinate clipping, GT mask shrinking, or morphological dilation.
+    Precision is the fraction of all output centers that land on a GT page pixel;
+    nonfinite and outside centers count as misses. Coverage and IoU rasterize the
+    output perimeter, extrapolated by half a pixel, at source centers. Coverage
+    is reported only for finite, unfolded maps with a simple boundary.
     """
     if (
         not isinstance(prediction, np.ndarray)
@@ -273,8 +271,8 @@ def page_sampling_metrics(prediction: np.ndarray, source_mask: np.ndarray) -> di
     height, width = source_mask.shape
     xy = np.floor((prediction[inside].astype(np.float64) + 1) * [width / 2, height / 2])
     xy = xy.astype(np.int64)
-    # Float64 u<1 can round to exactly W during conversion. Only bound the
-    # categorical pixel index after the original, unclipped inside test.
+    # Float64 u < 1 can still round to exactly W; bound the pixel index only
+    # after the inside test.
     xy = np.minimum(xy, [width - 1, height - 1])
     hits = int(source_mask[xy[:, 1], xy[:, 0]].sum())
     result = {
@@ -327,11 +325,10 @@ def page_sampling_metrics(prediction: np.ndarray, source_mask: np.ndarray) -> di
 
 
 def page_relative_endpoint_error(prediction, truth, gt_mask, source_mask):
-    """EPE divided by GT page's source-pixel bounding-box diagonal.
+    """Return EPE divided by the GT page bounding-box diagonal in source pixels.
 
-    The bounding box spans physical pixel edges: width=x_max-x_min+1 and
-    height=y_max-y_min+1, not a resized preview or center-to-center distance.
-    A mask narrower than two pixels on either axis is rejected as degenerate.
+    The box spans pixel edges: width = x_max - x_min + 1, height = y_max - y_min + 1.
+    Masks narrower than two pixels on either axis raise ValueError.
     """
     if (
         not isinstance(source_mask, np.ndarray)
@@ -468,7 +465,7 @@ def _record_source_kind(record):
 
 
 def _scene_grouped_summary(rows, records):
-    """One summary implementation for report publication and selection admission."""
+    """Summarize rows overall, by size bin and by family for reports and selection."""
     summary = _scene_summary(rows, records)
     for field in ("size_bin", "family"):
         summary[f"by_{field}"] = {
@@ -569,7 +566,7 @@ def _scene_case(dataset, index, predictor, render_config):
     except _EXPECTED_EVALUATION_ERRORS as error:
         failure("page_metrics", error)
     try:
-        # Deliberately no GT target mask: measure the actual public full-target path.
+        # Render the full target without the GT mask, as the public path does.
         rendered = render(sample["original_image"], prediction, config=render_config)
         row["renderer_status"] = str(rendered.status)
         row["renderer_reason"] = rendered.reason_code
@@ -596,15 +593,11 @@ def evaluate_scene_checkpoint(
     resume: bool = False,
     save_every: int = 16,
 ) -> dict[str, Any]:
-    """Audit ONE frozen coordinate-study model on one fixed positive scene split.
+    """Evaluate one coordinate-study checkpoint on one positive scene split.
 
-    Strict current/legacy checkpoint loaders are imported at runtime. A different
-    training manifest is allowed and recorded for frozen-baseline comparisons.
-    Fresh output is mandatory unless explicitly resuming the identical protocol;
-    resume requires an intact report and an exact ordered case prefix. No model
-    selection, training, source changes, previews, or quality certification occur.
-    Paper augmentation is an explicit opt-in, with separate per-source metrics;
-    mixed aggregate results must not be presented as paper-only performance.
+    ``output_dir`` must be new unless ``resume`` continues the same protocol from
+    an intact report. The checkpoint may come from another training manifest;
+    the report records it. Paper augmentation is opt-in and reported per source.
     """
     from .coordinate_study import (
         _checkpoint_location,
@@ -779,7 +772,7 @@ SCENE_SELECTION_POLICY_ID = "scene-promotion-1.0"
 
 
 def scene_selection_policy() -> dict[str, Any]:
-    """Return an independent copy of the existing, fixed promotion policy."""
+    """Return a fresh copy of the fixed promotion policy."""
     return {
         "id": SCENE_SELECTION_POLICY_ID,
         "authored_epe_max_ratio": 1.10,
@@ -801,11 +794,10 @@ def scene_selection_policy() -> dict[str, Any]:
 
 @dataclass(frozen=True)
 class SceneSelectionCandidate:
-    """Caller-frozen evidence, allowing content-identical checkpoint relocation.
+    """Checkpoint and report evidence for one selection candidate.
 
-    Checkpoint paths may name immutable generation files or exported copies.
-    Mutable aliases are resolved once and must match the declared SHA. This
-    selector checks bytes/sidecars; it does not deserialize or execute models.
+    Paths may name any copy with the declared SHA-256; aliases are resolved once.
+    Selection hashes bytes and sidecars and never loads a model.
     """
 
     id: str
@@ -1062,15 +1054,12 @@ def select_scene_checkpoints(
     policy_sha256: str | None = None,
     output_path: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Choose best eligible from explicit, frozen formal validation reports only.
+    """Pick the best eligible candidate from frozen validation reports.
 
-    No models, datasets or test pixels are executed/read, and best.pt retains its
-    EPE meaning. Corrupt/incompatible evidence raises; complete reports containing
-    quality failures remain in the candidate table. No passing candidate means
-    best_eligible=None, never a relaxed gate. Document macros are diagnostic only.
-    Source/runtime provenance is checked within and across historical reports,
-    not against today's source. Original dataset artifacts are NOT revalidated.
-    An optional output is atomically published without replacing existing files.
+    Reads only report and checkpoint bytes. Corrupt or incompatible evidence
+    raises; quality failures stay in the candidate table. With no passing
+    candidate, ``best_eligible`` is None. Provenance is compared across reports.
+    ``output_path`` must be a new path; it is written atomically.
     """
     policy = scene_selection_policy()
     policy_digest = _json_digest(policy)
@@ -1190,7 +1179,7 @@ def _selection_cli(argv):
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI for reproducible fixed-checkpoint synthetic scene evaluation."""
+    """Evaluate a fixed checkpoint on a synthetic scene split."""
     arguments = list(sys.argv[1:] if argv is None else argv)
     if arguments[:1] == ["select"]:
         return _selection_cli(arguments[1:])

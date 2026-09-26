@@ -1,4 +1,9 @@
-"""Reusable CPU inference joining the learned geometry model and validated renderer."""
+"""CPU inference that feeds predicted coordinate maps to the validated renderer.
+
+``load_predictor`` reads learning-0.1 checkpoints. Load coordinate-study
+checkpoints, including the default ``selected.pt``, with
+``coordinate_study.load_coordinate_predictor``; ``unwarp`` accepts both.
+"""
 
 import hashlib
 import io
@@ -53,11 +58,9 @@ def _output_size(size, config: RenderConfig, model_config: ModelConfig) -> tuple
 
 @dataclass(frozen=True, slots=True)
 class LoadedPredictor:
-    """One loaded model, reused across images without changing global torch settings.
+    """A loaded model reused across images; global torch settings stay untouched.
 
-    Construct with ``load_predictor``. Model weights are treated as immutable.
-    ``predict_map`` always raises on error; ``unwarp`` applies renderer policies.
-    The stored load time is reported separately from each image's hot-call time.
+    ``predict_map`` raises on error; ``unwarp`` applies the renderer failure policy.
     """
 
     _model: torch.nn.Module
@@ -154,7 +157,7 @@ class LoadedPredictor:
             raise _model_error("prediction_failed", str(error)) from error
 
     def predict_map(self, image: NDArray[np.uint8], output_size: tuple[int, int]) -> NDArray:
-        """Return an unclipped float32 H,W,2 map; sizes are explicit (height,width)."""
+        """Return an unclipped float32 (H, W, 2) map for an explicit (height, width)."""
         config = RenderConfig()
         validate_image(image, config)
         output_size = _output_size(output_size, config, self.model_config)
@@ -169,12 +172,11 @@ class LoadedPredictor:
 
 
 def load_predictor(checkpoint: str | os.PathLike[str]) -> LoadedPredictor:
-    """Read a learning-0.1 checkpoint, optionally verify its .sha256 sidecar.
+    """Load a learning-0.1 checkpoint and check its .sha256 sidecar when present.
 
-    Only tensors and safe built-in checkpoint data are loaded (weights_only).
-    Configuration, exact state keys/shapes, float32 dtype, and finite parameters
-    are checked before inference. CPU RNG, thread count, and deterministic flags
-    are unchanged. A missing sidecar is explicitly recorded as unverified.
+    Loads with ``weights_only`` and checks config, state keys and shapes, float32
+    dtype and finite values. Global RNG, thread and determinism settings stay as
+    they are. A missing sidecar is recorded as ``checksum_verified=False``.
     """
     started = perf_counter()
     try:
@@ -200,8 +202,8 @@ def load_predictor(checkpoint: str | os.PathLike[str]) -> LoadedPredictor:
             if isinstance(raw_config[name], list):
                 raw_config[name] = tuple(raw_config[name])
         config = ModelConfig(**raw_config)
-        # Check an explicit CPU inference resource bound before constructing a
-        # model from file-controlled dimensions. This is not a quality limit.
+        # Bound CPU inference resources before building a model from
+        # file-controlled dimensions.
         c1, c2, c3 = config.channels
         outputs = 2 * config.grid_size[0] * config.grid_size[1]
         parameters = (
@@ -262,14 +264,11 @@ def unwarp(
     *,
     config: RenderConfig | None = None,
 ) -> RenderResult:
-    """Predict and render one photo, preserving raise/return/original failure policy.
+    """Predict and render one photo under the raise/return/original failure policy.
 
-    The model does not infer output dimensions or a target mask. All requested
-    output pixels are targets. Geometry rejection and source coverage follow the
-    existing renderer. Caller arrays, torch thread/RNG settings, and model weights
-    are preserved. ``timings.total`` covers this hot call, excluding model load.
-    Success describes processing only; page selection and rectification quality
-    are not evaluated and are explicitly reported separately in the metadata.
+    Every pixel of the requested ``output_size`` is a target, and the renderer
+    applies its geometry checks. Caller arrays, torch settings and weights stay
+    unchanged. ``timings.total`` covers this call without model loading.
     """
     started = perf_counter()
     candidate = RenderConfig() if config is None else config

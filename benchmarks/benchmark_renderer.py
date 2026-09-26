@@ -1,4 +1,4 @@
-"""Reproducible Linux CPU identity-render smoke baseline; writes JSON to stdout."""
+"""Time identity rendering on a Linux CPU and print the results as JSON."""
 
 import argparse
 import json
@@ -61,7 +61,7 @@ def run_once(image, grid, config):
     started = perf_counter()
     result = render(image, grid, config=config)
     wall_seconds = perf_counter() - started
-    # Correctness checks are deliberately outside the render-call timing.
+    # Check correctness outside the timed render call.
     exact = bool(np.array_equal(result.image, image))
     return {
         "status": str(result.status),
