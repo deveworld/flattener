@@ -5,7 +5,7 @@ import json
 import pytest
 
 from flattener.benchmark import calibration, docunet
-from flattener.evidence import SMOKE_STEPS, evidence
+from flattener.evidence import SMOKE_STEPS, evidence, initialization
 
 OWN = {"kind": "checkpoint", "step": SMOKE_STEPS}
 UVDOC = {"kind": "uvdoc", "sha256": "7e90"}
@@ -35,6 +35,33 @@ def test_only_trained_own_checkpoints_on_docunet_count_as_new_model_real_photo()
     assert calibration.CALIBRATION_EVIDENCE == external
     with pytest.raises(ValueError):
         evidence("docunet")
+
+
+def test_initialization_follows_the_lineage_to_its_start():
+    uvdoc_start = [{"kind": "uvdoc", "sha256": "7e90"}, {"kind": "train"}]
+    parent = [{"kind": "checkpoint", "lineage": uvdoc_start}, {"kind": "train"}]
+    cases = {
+        "scratch": [{"kind": "scratch", "seed": 0}, {"kind": "train"}],
+        "external_pretrained": parent,
+        "unknown": [{"kind": "checkpoint"}],
+    }
+    for expected, lineage in cases.items():
+        record = evidence("docunet_standard", {**OWN, "lineage": lineage})
+        assert record["initialization"] == expected
+        assert record["evidence_kind"] == "new_model_real_photo"  # a fine-tune counts too
+    assert initialization({**OWN, "initialization": "scratch"}) == "scratch"
+    assert initialization(OWN) == "unknown"
+    assert initialization(UVDOC) is None and initialization(None) is None
+
+
+def test_earlier_models_and_training_losses_are_not_new_model_results():
+    previous = evidence("docunet_standard", {"provenance": "own_previous_model"})
+    assert previous["evidence_kind"] == "docunet_standard"
+    assert previous["model_provenance"] == "own_previous_model"
+    assert not previous["new_model_real_photo"] and previous["training"] is None
+    trained = evidence("training_loss", OWN)
+    assert trained["evidence_kind"] == "training_loss" and not trained["new_model_real_photo"]
+    assert evidence("training_loss", {**OWN, "step": 5})["evidence_kind"] == "smoke_training"
 
 
 def _record(predictions, model, inputs):
