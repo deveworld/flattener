@@ -1,0 +1,392 @@
+"""OrientNet-1 data builder (tools/orient) and trainer (flattener.scan.orient_train)."""
+
+import json
+import sys
+from dataclasses import replace
+from pathlib import Path
+
+import numpy as np
+import pytest
+import torch
+from PIL import Image
+
+from flattener import FlattenerError
+from flattener.scan import orient
+from flattener.scan.orient import SourceSampler, ViewGeometry, clockwise, quantize
+from flattener.scan.orient_train import (
+    AugmentConfig,
+    OrientData,
+    OrientDataset,
+    TrainConfig,
+    augmented_views,
+    compute_losses,
+    main,
+    soft_targets,
+    train,
+)
+
+TOOLS = Path(__file__).resolve().parents[1] / "tools" / "orient"
+sys.path.insert(0, str(TOOLS))
+
+import build_data  # noqa: E402
+import pages  # noqa: E402
+
+PAGE = (400, 283)
+RENDER = (560, 560)
+QUIET = AugmentConfig(
+    margin=(0.0, 0.0),
+    skew_deg=0.0,
+    crop_skew_sd_deg=0.0,
+    warp_prob=0.0,
+    light_prob=0.0,
+    shadow_prob=0.0,
+    contrast=0.0,
+    brightness=0.0,
+    gamma=0.0,
+    blur_prob=0.0,
+    noise_prob=0.0,
+    jpeg_prob=0.0,
+)
+
+
+def _asymmetric_page(size=PAGE):
+    """Text-like lines in the top half and a mark at the bottom right."""
+    height, width = size
+    page = np.full(size, 236, np.uint8)
+    rng = np.random.default_rng(5)
+    for y in range(20, height // 2, 12):
+        page[y : y + 4, 20 : int(rng.integers(width // 2, width - 20))] = 25
+    page[height - 60 : height - 25, width - 70 : width - 25] = 10
+    return page
+
+
+def _render(page, angle, map_size=(40, 28)):
+    """A photo of ``page`` turned clockwise by ``angle`` and its backward map."""
+    hp, wp = page.shape
+    height, width = RENDER
+    center = np.array([width / 2, height / 2])
+    rotation = clockwise(angle)
+    inverse = rotation.T
+    offset = np.array([wp / 2, hp / 2]) - inverse @ center
+    geometry = ViewGeometry((float(height), float(width)), np.column_stack([inverse, offset]))
+    sampler = SourceSampler(page, geometry)
+    points = np.stack(np.meshgrid(np.arange(width) + 0.5, np.arange(height) + 0.5), -1)
+    q = sampler.normalized(points)
+    values = np.where((np.abs(q) > 1).any(-1), 90.0, sampler.lookup(q, 1.0))
+    rgb = np.repeat(quantize(values)[..., None], 3, axis=2)
+    hm, wm = map_size
+    flat = np.stack(
+        np.meshgrid((np.arange(wm) + 0.5) / wm * wp, (np.arange(hm) + 0.5) / hm * hp), -1
+    )
+    photo = center + (flat - [wp / 2, hp / 2]) @ rotation.T
+    return rgb, (2 * photo / [width, height] - 1).astype(np.float32)
+
+
+def _write_syntheticdoc(root, track="release"):
+    root.mkdir(parents=True)
+    lines = []
+    for index, angle in enumerate((0.0, 90.0, 180.0, -20.0, 0.0, 30.0)):
+        page = pages.composed_page(np.random.default_rng(index), PAGE)
+        rgb, values = _render(page, angle)
+        if index == 3:
+            values[:] = np.nan  # no usable page: counted as skipped
+        Image.fromarray(rgb).save(root / f"{index}.png")
+        np.save(root / f"{index}.npy", values.astype(np.float16))
+        entry = {
+            "schema": "flattener-dewarp-sample-1",
+            "sample_id": f"sd{index}",
+            "split": "val" if index >= 4 else "train",
+            "image": f"{index}.png",
+            "backward_map": f"{index}.npy",
+            "track": track,
+            "license_class": "clean",
+        }
+        lines.append(json.dumps(entry) + "\n")
+    (root / "manifest.jsonl").write_text("".join(lines))
+    spec = {
+        "schema": "flattener-dewarp-data-1",
+        "name": "tiny-syntheticdoc",
+        "track": "release",
+        "sources": [
+            {
+                "name": f"sd-{split}",
+                "kind": "converted",
+                "root": root.name,
+                "track": "release",
+                "split": split,
+                "license": "test pages",
+            }
+            for split in ("train", "val")
+        ],
+    }
+    (root.parent / "dewarp.json").write_text(json.dumps(spec))
+
+
+def _build_spec(directory, name="build.json", **changes):
+    syntheticdoc = {"track": "release", "license": "test pages", "dewarp_spec": "dewarp.json"}
+    spec = {
+        "schema": "flattener-orient-build-1",
+        "name": "orient-tiny",
+        "track": "release",
+        "long_side": 384,
+        "chunk": 2,
+        "sources": [
+            {
+                "name": "sd-flat",
+                "kind": "syntheticdoc_flat",
+                "part": [0, 1],
+                "count": {"train": 4, "val": 2},
+                **syntheticdoc,
+            },
+            {"name": "sd-crop", "kind": "syntheticdoc_crop", **syntheticdoc},
+            {
+                "name": "own",
+                "kind": "documents",
+                "track": "release",
+                "license": build_data.OWN_LICENSE,
+                "count": {"train": 3, "val": 1},
+            },
+            {
+                "name": "blank",
+                "kind": "text_free",
+                "track": "release",
+                "license": "Apache-2.0",
+                "count": {"train": 2, "val": 1},
+            },
+        ],
+        **changes,
+    }
+    path = directory / name
+    path.write_text(json.dumps(spec))
+    return path
+
+
+@pytest.fixture(scope="module")
+def built(tmp_path_factory):
+    directory = tmp_path_factory.mktemp("orient-build")
+    _write_syntheticdoc(directory / "sd")
+    spec = _build_spec(directory)
+    summary = build_data.build(spec, directory / "out", workers=1)
+    return directory, summary
+
+
+def test_build_writes_release_data(built):
+    directory, summary = built
+    data = OrientData.load(directory / "out")
+    assert summary["counts"] == {
+        "blank/train": 2,
+        "blank/val": 1,
+        "own/train": 3,
+        "own/val": 1,
+        "sd-crop/train": 3,
+        "sd-crop/val": 2,
+        "sd-flat/train": 3,
+        "sd-flat/val": 2,
+    }
+    sources = {source["name"]: source for source in summary["sources"]}
+    assert sources["sd-flat"]["skipped"] == {"train": {"invalid_grid": 1}}
+    assert sources["sd-flat"]["license_classes"] == {"clean": 5}
+    assert sources["own"]["license_classes"] == {"own": 4}
+    assert sources["sd-crop"]["dewarp_spec"]["track"] == "release"
+    assert orient.data_spec_problems(data.spec) == []
+    assert orient.data_sources_problems(data.data_sources) == []
+    names = [source["name"] for source in data.spec["sources"]]
+    assert names == [
+        "sd-flat/sd-train",
+        "sd-flat/sd-val",
+        "sd-crop/sd-train",
+        "sd-crop/sd-val",
+        "own/train",
+        "own/val",
+        "blank/train",
+        "blank/val",
+    ]
+    assert data.data_sources["val"][0] == {
+        "name": "sd-flat",
+        "kind": "syntheticdoc_flat",
+        "track": "release",
+        "license": "test pages",
+        "samples": 2,
+        "license_classes": {"clean": 2},
+    }
+    for record in data.records:
+        image = Image.open(directory / "out" / record["path"])
+        assert image.mode == "L" and list(image.size[::-1]) == record["size"]
+        assert max(record["size"]) <= 384 * 1.4
+        assert record["uniform"] == (record["kind"] == "text_free")
+        x0, y0, x1, y1 = record["box"]
+        if record["kind"] == "syntheticdoc_crop":
+            assert -1 < x0 < x1 < 1 and -1 < y0 < y1 < 1
+        else:
+            assert record["box"] == [-1.0, -1.0, 1.0, 1.0]
+    angles = [r["origin"]["up_angle_deg"] for r in data.records if r["source"] == "sd-crop"]
+    assert sorted(round(a) % 360 for a in angles) == [0, 0, 30, 90, 180]
+
+
+def test_build_resumes_from_parts_and_refuses_another_spec(built):
+    directory, summary = built
+    parts = sorted((directory / "out" / "parts").rglob("*.jsonl"))
+    times = [path.stat().st_mtime_ns for path in parts]
+    again = build_data.build(directory / "build.json", directory / "out", workers=1)
+    assert again["records_sha256"] == summary["records_sha256"]
+    assert [path.stat().st_mtime_ns for path in parts] == times
+    other = _build_spec(directory, "other.json", jpeg_quality=80)
+    with pytest.raises(SystemExit):
+        build_data.build(other, directory / "out", workers=1)
+
+
+def test_release_build_refuses_research_samples(tmp_path):
+    _write_syntheticdoc(tmp_path / "sd", track="research")
+    with pytest.raises(FlattenerError) as caught:
+        build_data.build(_build_spec(tmp_path), tmp_path / "out", workers=1)
+    assert caught.value.reason_code == "track_violation"
+    pages_root = tmp_path / "templates"
+    pages_root.mkdir()
+    row = {"path": "a.png", "split": "train", "track": "release", "license_class": "CC BY-NC 4.0"}
+    (pages_root / "manifest.jsonl").write_text(json.dumps(row) + "\n")
+    spec = json.loads(_build_spec(tmp_path).read_text())
+    spec["sources"] = [
+        {
+            "name": "templates",
+            "kind": "pages",
+            "track": "release",
+            "license": "x",
+            "root": "templates",
+        }
+    ]
+    (tmp_path / "pages.json").write_text(json.dumps(spec))
+    with pytest.raises(SystemExit):
+        build_data.build(tmp_path / "pages.json", tmp_path / "out2", workers=1)
+
+
+@pytest.mark.parametrize("angle", [90.0, 180.0, -20.0])
+def test_crop_turns_the_page_upright(angle):
+    page = _asymmetric_page()
+    rgb, values = _render(page, angle)
+    from flattener.dewarp.coords import map_to_grid
+
+    crop, box, found = pages.crop_syntheticdoc(rgb, map_to_grid(values, (40, 28)), 1024, 0.1)
+    assert abs((found - angle + 180) % 360 - 180) < 0.5
+    height, width = crop.shape
+    x0, y0, x1, y1 = ((np.array(box) + 1) / 2 * [width, height, width, height]).round().astype(int)
+    region = np.asarray(Image.fromarray(crop[y0:y1, x0:x1]).resize(PAGE[::-1]), dtype=float)
+    upright = np.corrcoef(region.ravel(), page.astype(float).ravel())[0, 1]
+    flipped = np.corrcoef(region.ravel(), np.rot90(page, 2).astype(float).ravel())[0, 1]
+    assert upright > 0.8 and upright > flipped + 0.3
+
+
+def test_flat_page_matches_the_source_page():
+    page = _asymmetric_page()
+    rgb, values = _render(page, 90.0)
+    from flattener.dewarp.coords import map_to_grid
+
+    flat, box = pages.flatten_syntheticdoc(rgb, map_to_grid(values, (40, 28)), 384, 300)
+    assert box == pages.FULL_BOX and flat.shape == (384, round(384 * PAGE[1] / PAGE[0]))
+    resized = np.asarray(Image.fromarray(flat).resize(PAGE[::-1]), dtype=float)
+    assert np.corrcoef(resized.ravel(), page.astype(float).ravel())[0, 1] > 0.9
+
+
+def test_training_views_follow_the_label_convention():
+    page = _asymmetric_page()
+    record = {"kind": "documents", "box": [-1.0, -1.0, 1.0, 1.0], "uniform": False}
+    config = orient.OrientConfig()
+    upright = augmented_views(record, page, 0, np.random.default_rng(0), QUIET, config)
+    for k in (1, 2, 3):
+        turned = augmented_views(record, page, k, np.random.default_rng(0), QUIET, config)
+        difference = np.rot90(upright.global_view, -k).astype(int) - turned.global_view
+        assert np.abs(difference).max() <= 1
+        # np.rot90(view, k) restores the upright page.
+        assert np.abs(np.rot90(turned.global_view, k).astype(int) - upright.global_view).max() <= 1
+    noisy = augmented_views(record, page, 1, np.random.default_rng(3), AugmentConfig(), config)
+    assert noisy.global_view.shape == (256, 256) and noisy.patches.shape == (4, 128, 128)
+
+
+def test_dataset_items_and_targets(built):
+    directory, _ = built
+    data = OrientData.load(directory / "out")
+    config = orient.OrientConfig()
+    common = {"model": config, "augment": AugmentConfig(), "seed": 3}
+    train_set = OrientDataset(data.root, data.split("train"), train=True, **common)
+    assert train_set.names == ["sd-flat", "sd-crop", "own", "blank"]
+    assert train_set.sizes == [3, 3, 3, 2]
+    item = train_set[(len(train_set) - 1, 17)]
+    assert item["label"] == -1 and item["global_view"].shape == (1, 256, 256)
+    assert item["patches"].shape == (4, 1, 128, 128)
+    again = train_set[(len(train_set) - 1, 17)]
+    assert torch.equal(item["global_view"], again["global_view"])
+    val_set = OrientDataset(data.root, data.split("val"), train=False, **common)
+    assert len(val_set) == 5 * 4 + 1
+    labels = soft_targets(torch.tensor([2, -1]), 0.1)
+    torch.testing.assert_close(labels, torch.tensor([[0.025, 0.025, 0.925, 0.025], [0.25] * 4]))
+    logits = torch.zeros(2, 4)
+    config_ = TrainConfig(data=".", output_dir=".", aux_weight=0.5, label_smoothing=0.0)
+    losses = compute_losses((logits, logits, logits), torch.tensor([0, -1]), config_)
+    assert losses["loss"].item() == pytest.approx(1.5 * np.log(4))
+
+
+def test_config_rejects_bad_values_and_prints(tmp_path, capsys):
+    with pytest.raises(FlattenerError):
+        TrainConfig(data=".", output_dir=".", init="uvdoc")
+    with pytest.raises(FlattenerError):
+        TrainConfig.from_dict({"data": ".", "output_dir": ".", "model": {"patches": 99}})
+    path = tmp_path / "run.json"
+    path.write_text(json.dumps({"data": "data", "output_dir": "runs/a", "batch_size": 8}))
+    assert main(["--config", str(path), "--print-config", "--max-steps", "5"]) == 0
+    printed = json.loads(capsys.readouterr().out)
+    assert Path(printed["data"]) == (tmp_path / "data").resolve() and printed["max_steps"] == 5
+
+
+@pytest.mark.training
+def test_training_smoke_records_a_release_lineage(built, tmp_path):
+    directory, _ = built
+    torch.set_num_threads(2)
+    config = TrainConfig(
+        data=str(directory / "out"),
+        output_dir=str(tmp_path / "run"),
+        batch_size=4,
+        total_steps=3,
+        warmup_steps=1,
+        num_workers=0,
+        log_every=1,
+        val_every=3,
+        val_max_pages=3,
+        checkpoint_every=0,
+        amp=False,
+        device="cpu",
+    )
+    summary = train(config, resume="none")
+    assert summary["state"] == "completed" and summary["step"] == 3
+    assert summary["evidence"]["training"] == "smoke_training"
+    checkpoints = tmp_path / "run" / "checkpoints"
+    best = json.loads((checkpoints / "best.json").read_text())
+    sidecar = json.loads((checkpoints / f"{best['file']}.json").read_text())
+    assert sidecar["track"] == "release" and sidecar["lineage"][0] == {"kind": "scratch", "seed": 0}
+    assert sidecar["lineage"][1]["kind"] == "train" and sidecar["lineage"][1]["track"] == "release"
+    assert orient.release_problems(sidecar) == []
+    assert sidecar["data_spec_sha256"] == sidecar["lineage"][1]["data_spec_sha256"]
+    try:
+        from flattener.scan import shippable
+    except ImportError:
+        pass
+    else:
+        assert shippable.gate_file(checkpoints / best["file"]).shippable
+    assert sidecar["calibration"]["source"] == "synthetic_val"
+    assert sidecar["metrics"]["samples"] == 8 and sidecar["metrics"]["text_free_samples"] == 1
+    orienter = orient.Orienter.load(checkpoints / best["file"])
+    assert (
+        orienter.info["shippable"] and orienter.temperature == sidecar["calibration"]["temperature"]
+    )
+    log = [
+        json.loads(line) for line in (tmp_path / "run" / "train_log.jsonl").read_text().splitlines()
+    ]
+    assert [r["kind"] for r in log] == ["train", "train", "train", "val"]
+    status = json.loads((tmp_path / "run" / "status.json").read_text())
+    assert (
+        status["state"] == "completed" and status["evidence"]["measurement"] == "gt_crop_validation"
+    )
+
+    resumed = train(config)  # the finished run resumes at its last step
+    assert resumed["step"] == 3
+    with pytest.raises(FlattenerError) as caught:
+        train(replace(config, lr=1e-3))
+    assert caught.value.reason_code == "resume_mismatch"
