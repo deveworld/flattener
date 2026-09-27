@@ -158,6 +158,8 @@ VERIFY: dict[str, Any] = {
     "page_max_dark": 0.35,
     # A zoomed piece of the page (scan.look.text): fewer lines across it than this, lines
     # at least this regular, and ink in the outer band of at least this share of two edges.
+    # A pitch longer than 1/8 of the page is a layout (columns, boxes), not text lines.
+    "fragment_min_lines": 8,
     "fragment_max_lines": 20,
     "fragment_min_periodicity": 0.4,
     "fragment_min_edges": 0.5,
@@ -1294,7 +1296,7 @@ class Scanner:
         edges = sorted(measured["edges"].values())
         if (
             measured["lines"] is not None
-            and measured["lines"] < VERIFY["fragment_max_lines"]
+            and VERIFY["fragment_min_lines"] <= measured["lines"] < VERIFY["fragment_max_lines"]
             and measured["periodicity"] >= VERIFY["fragment_min_periodicity"]
             and edges[-2] >= VERIFY["fragment_min_edges"]
         ):
