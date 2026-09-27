@@ -82,6 +82,8 @@ CPU `float32`로 RGB를 [0,1]로 바꾸고 `grid_sample(mode="bilinear", padding
 
 영역 경로는 미리보기 좌표를 원본 좌표에 합성한 뒤 한 번만 샘플링하고, 추정 마스크가 영역을 충분히 덮지 못하면 영역을 넓혀 다시 검사합니다. 출력 종횡비는 호출자가 정하고, 반환 마스크는 위 렌더러 규약을 따릅니다.
 
+`unwarp_page`의 `predictor`로 `flattener.dewarp`의 `Dewarper`도 받습니다. 이때는 영역에 변마다 크기의 4%를 더한 정수 픽셀 크롭에서 한 번 예측하고, 격자를 원본 좌표에 배치해 `output_size`로 조밀화합니다. 분할기 마스크의 추정 덮는 비율은 검사만 하고(`page_coverage_insufficient`) 영역을 넓히지 않습니다. 수동 사각형의 덮는 비율은 기록만 합니다(`coverage_enforced: false`). `LoadedPredictor` 경로는 그대로입니다.
+
 ## 페이지 게이트
 
 `flattener.regions.context`의 `load_context_segmenter(checkpoint, *, device="cpu")`는 `region-context-unet-2.0` 체크포인트를 읽습니다. 파일 옆에 SHA-256 16진수 한 줄을 담은 `<파일>.sha256`이 있어야 합니다. 스키마는 `independent-locator-pilot-1.0`(위치 추정 연구의 `best.pt`)과 `region-context-1`(가중치, 설정, 전처리 버전, 출처 기록)입니다. 전처리는 `regions.segmentation.preprocess_image`이고, 읽은 모델은 `predict_probability`, `model_id`, `model_sha256`을 가지므로 `segmenter=` 자리에 넣을 수 있습니다.

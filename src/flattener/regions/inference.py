@@ -1,4 +1,15 @@
-"""Opt-in page localization, region-only cropping, and guarded rectification."""
+"""Opt-in page localization, region-only cropping, and guarded rectification.
+
+``unwarp_page`` takes a legacy ``LoadedPredictor`` (virtual box at 0.68 occupancy, preview
+padding, residual expansion, ``ensure_page_coverage`` may widen the footprint) or a
+``flattener.dewarp`` ``Dewarper``. With a ``Dewarper`` the view is the region plus
+``RERUN_MARGIN`` of its extent per side (whole pixels, clipped to the image), predicted
+once and placed in the source (``flattener.scan.placement``); the estimated page coverage
+of a segmenter's mask is a check only (``page_coverage_insufficient`` below
+``required_coverage``; a manual rectangle's coverage is recorded), and the map is the
+edge-aligned densification of the placed grid at ``output_size``. Both paths sample
+the original once through ``flattener.render``.
+"""
 
 from dataclasses import asdict
 from math import ceil
@@ -18,6 +29,7 @@ from .geometry import (
     _config,
     detect_region,
     ensure_page_coverage,
+    page_coverage,
     region_map_to_source,
     validate_region,
     virtual_page_box,
@@ -128,6 +140,62 @@ def _manual_estimate(region, source_size):
     )
 
 
+def _is_dewarper(predictor):
+    from ..dewarp.predict import Dewarper  # the dewarp stack loads only when it is used
+
+    return isinstance(predictor, Dewarper)
+
+
+def _dewarp_region_grid(image, dewarper, region, metadata):
+    """Grid (source flattener values) of one ``Dewarper`` pass on the region's box."""
+    from ..dewarp.predict import RERUN_MARGIN
+    from ..scan.locate import expand_box
+    from ..scan.views import crop_placement, run_view
+
+    source_size = image.shape[:2]
+    bounds = (region.left, region.top, region.right, region.bottom)
+    box = expand_box(bounds, source_size, RERUN_MARGIN)
+    placement = crop_placement(box, 0.0, source_size)
+    grid, record = run_view(dewarper, image, placement, crop_box=box)
+    metadata["dewarp"] = {
+        "model_sha256": dewarper.info.get("sha256"),
+        "grid_convention": dewarper.config.grid_convention,
+        "grid_size": list(grid.shape[:2]),
+        "box": list(box),
+        "margin": RERUN_MARGIN,
+        "pass": record,
+    }
+    if not np.isfinite(grid).all():
+        raise FlattenerError(
+            Status.INVALID_TRANSFORM, "non_finite_grid", "the dewarp pass gave non-finite values"
+        )
+    return grid
+
+
+def _check_dewarp_coverage(grid, mask, region_config, *, enforce):
+    """The estimated page coverage of a placed grid, as a check only (no widening). A
+    manual rectangle is not a page mask (a skewed page leaves its corners uncovered), so
+    its coverage is recorded and ``enforce`` is false."""
+    coverage = page_coverage(grid.astype(np.float32), mask)
+    check = {
+        "initial_estimated_page_coverage": coverage,
+        "required_estimated_page_coverage": region_config.required_coverage,
+        "final_estimated_page_coverage": coverage,
+        "boundary_expansion": 1.0,
+        "coverage_grid_size": list(mask.shape),
+        "coverage_is_ground_truth": False,
+        "coverage_enforced": enforce,
+    }
+    if enforce and coverage < region_config.required_coverage:
+        raise FlattenerError(
+            Status.MODEL_ERROR,
+            "page_coverage_insufficient",
+            "estimated page extends beyond predicted footprint",
+            metadata=check,
+        )
+    return check
+
+
 def _pipeline(
     image,
     output_size,
@@ -191,13 +259,18 @@ def _pipeline(
                 "region_source_required",
                 "provide exactly one manual region or loaded segmenter",
             )
-        if (require_predictor or predictor is not None) and not isinstance(
-            predictor, LoadedPredictor
+        dewarper = predictor is not None and _is_dewarper(predictor)
+        if (require_predictor or predictor is not None) and not (
+            dewarper or isinstance(predictor, LoadedPredictor)
         ):
             raise FlattenerError(
                 Status.INPUT_ERROR, "invalid_predictor", "load a coordinate predictor first"
             )
-        if predictor is not None:
+        if dewarper:
+            metadata["page_method"] = "region_dewarp"
+            metadata["model_sha256"] = predictor.info.get("sha256")
+            metadata["model_id"] = predictor.info.get("kind")
+        elif predictor is not None:
             predictor._metadata(metadata)
             metadata["model_preview_resize"] = metadata["input_resize"]
             metadata["input_resize"] = (
@@ -221,6 +294,8 @@ def _pipeline(
             grid = region_map_to_source(
                 identity_map(output_size, config=candidate), estimate.region, image.shape[:2]
             )
+        elif dewarper:
+            grid = _dewarp_region_grid(image, predictor, estimate.region, metadata)
         else:
             if any(
                 a < b for a, b in zip(output_size, predictor.model_config.grid_size, strict=True)
@@ -239,7 +314,15 @@ def _pipeline(
         metadata["region_timings"][stage] = perf_counter() - stage_started
 
         stage, stage_started = "page_coverage", perf_counter()
-        grid, coverage = ensure_page_coverage(grid, estimate.mask, config=region_config)
+        if dewarper:
+            coverage = _check_dewarp_coverage(
+                grid, estimate.mask, region_config, enforce=region is None
+            )
+            from ..scan.placement import dense_map
+
+            grid = dense_map(grid, output_size)
+        else:
+            grid, coverage = ensure_page_coverage(grid, estimate.mask, config=region_config)
         metadata["page_region"].update(coverage)
         metadata["region_timings"][stage] = perf_counter() - stage_started
         stage, stage_started = "render", perf_counter()
@@ -285,7 +368,9 @@ def unwarp_page(
     """Correct one page inside a region, guarded by estimated page coverage.
 
     Pass exactly one of ``region`` (a manual rectangle) or ``segmenter``, and an
-    explicit ``output_size``. Metadata reports ``quality_status="not_evaluated"``.
+    explicit ``output_size``. ``predictor`` is a legacy ``LoadedPredictor`` or a
+    ``flattener.dewarp`` ``Dewarper`` (see the module docstring). Metadata reports
+    ``quality_status="not_evaluated"``.
     """
     return _pipeline(
         image,
