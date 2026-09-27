@@ -29,10 +29,14 @@ python -m flattener.scan IMG... --out DIR --weights DEWARP.pt [--gate GATE.pt] [
 - 모든 옵션: `python -m flattener.scan --help`.
 
 ```python
+from flattener.scan.io import save_scan
 from flattener.scan.pipeline import Scanner
 
 result = Scanner.load("bundle.json").scan("photo.jpg")
+save_scan(result, "out", "photo")  # out/photo.jpg, out/photo.scan.json
 ```
+
+`result.outcome`은 아래 결과 종류 중 하나이고, `result.image`는 RGB `uint8` 배열입니다.
 
 ## 결과와 실패
 
