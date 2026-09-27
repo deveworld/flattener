@@ -29,6 +29,7 @@ from flattener.scan import locate
 from flattener.scan.io import read_scan_record, read_source, save_scan
 from flattener.scan.pipeline import (
     BUNDLE_SCHEMA,
+    VERIFY,
     PlannedScan,
     Scanner,
     ScanOptions,
@@ -239,12 +240,20 @@ def test_gate_rejections_return_the_original_with_guidance():
     assert result.reason_code == "ambiguous_page_region" and result.status == Status.MODEL_ERROR
 
 
-def test_a_gate_region_past_the_page_keeps_the_dewarp_result():
+def test_a_gate_region_past_the_page_keeps_the_dewarp_result(monkeypatch):
     # The gate takes the page and 70 pixels beside its left edge (a neighbouring page).
     wider = Page(TRUE.pixels([-70 / 150, 0]), (220, 190), 7.0)
     scanner, _ = _scanner()
     scanner.gate.pages = [wider]
-    result = scanner.scan(ramp_scene(SIZE, TRUE))
+    image = ramp_scene(SIZE, TRUE)
+    # The ramp page is too colourful for paper: no page, the original comes back.
+    result = scanner.scan(image)
+    assert result.outcome == Outcome.ORIGINAL_RETURNED and result.reason_code == "page_not_found"
+    assert result.reasons[-1].detail["check"] == "paper"
+    # Taken for paper, the dewarp result is kept with a warning.
+    monkeypatch.setitem(VERIFY, "page_max_saturation", 1.0)
+    monkeypatch.setitem(VERIFY, "page_max_dark", 1.0)
+    result = scanner.scan(image)
     assert result.status == Status.SUCCESS
     assert _codes(result) == ["orientation_uncertain", "page_region_larger"]
     assert _error_px(result.plan.grid) < 0.5 and result.qa["coverage"] < 0.8

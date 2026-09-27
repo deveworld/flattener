@@ -14,7 +14,9 @@ Rules (``THRESHOLDS``, the design's starting values; they are recorded with ever
   when the two largest components lie side by side) asks G0: its outline is the page
   (box and angle, method ``outline``) and the pieces holding at least half of their
   cells inside it are the mask; the code stays as a warning with the component boxes.
-  When G0 has no outline or holds no piece, the split ends the scan. A page under 1 % of
+  When G0 has no outline, holds no piece, or the held pieces cover less than half of its
+  outline (``outline_mask_precision``; a desk or a keyboard the gate cut into pieces, or a
+  close-up whose page runs out of the photo), the split ends the scan. A page under 1 % of
   the photo or with a long side under 600 full-resolution pixels is ``page_too_small``.
 * A mask over 90 % of the frame or touching three borders fills the frame
   (``page_fills_frame``, informational): B is the whole image and theta is 0.
@@ -72,6 +74,7 @@ THRESHOLDS: dict[str, Any] = {
     "two_page_min_overlap": 0.5,
     "component_min_area_fraction": 0.01,
     "split_min_inside": 0.5,
+    "split_min_precision": 0.5,
 }
 SPLIT_CODES = ("ambiguous_page_region", "two_page_candidate")
 SIDES = ("top", "right", "bottom", "left")
@@ -555,6 +558,7 @@ def locate_page(
     split: Reason | None = None  # the gate split the page into pieces; G0 decides
     grid = None
     held: list[int] = []
+    precision = 0.0
     try:
         gate = gate_page_region(probability, source_size, config=config)
     except FlattenerError as error:
@@ -567,7 +571,9 @@ def locate_page(
                 return rejected
             grid = pass0()
             held = _held_pieces(grid, labels, items, source_size)
-            if not held:
+            precision = outline_mask_precision(grid, np.isin(labels, held)) if held else 0.0
+            rejected.metrics["split_precision"] = precision
+            if precision < THRESHOLDS["split_min_precision"]:
                 rejected.pass0 = grid
                 return rejected
             split = rejected.failure
@@ -576,7 +582,7 @@ def locate_page(
         detection = dict(gate.metadata)
     elif split is not None:
         mask = np.isin(labels, held)
-        detection = {"gate_error": split.code, "held_pieces": held}
+        detection = {"gate_error": split.code, "held_pieces": held, "split_precision": precision}
     else:
         mask = labels == 1
         detection = {"gate_error": "uncertain_page_region"}

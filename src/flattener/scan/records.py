@@ -134,7 +134,8 @@ REASONS: dict[str, ReasonSpec] = {
             "page_not_found",
             Status.MODEL_ERROR,
             Severity.FAILURE,
-            "Return the original; the user sets the page region.",
+            "Return the original; the user sets the page region. Also a grid the gate mask "
+            "reaches past that does not look like paper (detail: check 'paper').",
             _RESHOOT_OR_REGION,
             "페이지 전체가 화면에 들어오게 찍어 주세요",
             "Take the photo with the whole page in the frame",

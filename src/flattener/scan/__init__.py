@@ -10,6 +10,7 @@ Modules:
 - ``locate``: the page gate's decision, the consensus rule with the pass-0 outline and the
   page conditions (the detect stage).
 - ``orient``: OrientNet-1, the page quarter-turn classifier (``orient_train`` trains it).
+- ``look``: paper and text measures of a small flat preview (the verify stage's evidence).
 - ``records``: reason codes, outcomes, scan plans and scan results.
 - ``timing``: per-stage timing.
 - ``output_policy``: output size and aspect.

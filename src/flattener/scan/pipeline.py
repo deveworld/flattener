@@ -28,8 +28,11 @@ plan and checks the plan's map; ``render(source, planned)`` makes the image of a
   book edge or the paper under the page leave mask past some sides and the result goes on
   with ``page_region_larger``; mask past every side by more than 5 % of the page area
   (``locate.region_excess``) means the grid holds only a piece of the page and fails.
-  Against a manual quad, coverage below 0.95 fails. The median node drift between the
-  last two passes must stay within 4 % of the page diagonal.
+  Such a grid must also look like paper on a 384-pixel flat preview (``scan.look``:
+  median saturation at most 0.28, at most 35 % dark pixels); otherwise the photo holds no
+  page (a keyboard or a desk the gate took for one) and the grid fails with
+  ``page_not_found``. Against a manual quad, coverage below 0.95 fails. The median node
+  drift between the last two passes must stay within 4 % of the page diagonal.
 * ``plan``: ``scan.output_policy.plan_output`` (auto size, standard-ratio snap) and a
   ``ScanPlan`` with its ``plan_sha256``.
 * ``render``: the dense map of the plan (``render_map``; the grid nodes placed as the
@@ -100,6 +103,7 @@ from ..regions.context import GateConfig, LoadedContextSegmenter, load_context_s
 from ..renderer import render as flattener_render
 from ..validation import validate_image
 from . import locate as locating
+from . import look
 from .fast_check import FastCheck, fast_check
 from .io import SourceImage, read_source
 from .orient import Orienter, OrientResult, ViewGeometry
@@ -141,6 +145,9 @@ QUANTIZE_MODES = ("round", "truncate")
 VERIFY: dict[str, Any] = {
     "min_coverage": 0.95,  # below this the gate mask reaches past the page: a warning
     "fragment_side_excess": 0.05,  # mask past every side above this: a piece of the page
+    # A grid the gate mask reaches past must look like paper (scan.look.paper).
+    "page_max_saturation": 0.28,
+    "page_max_dark": 0.35,
     "max_drift": 0.04,  # median node drift between passes, fraction of the page diagonal
     "low_resolution_density": 0.5,  # source pixels per output pixel below this warn
     "post_preview_long_side": 768,
@@ -1220,9 +1227,11 @@ class Scanner:
             ]
         return passes
 
-    def _flat_preview(self, src: SourceImage, grid: NDArray) -> NDArray[np.uint8]:
+    def _flat_preview(
+        self, src: SourceImage, grid: NDArray, long_side: int | None = None
+    ) -> NDArray[np.uint8]:
         size = src.info.size
-        output = plan_output(grid, size, output=VERIFY["post_preview_long_side"])
+        output = plan_output(grid, size, output=long_side or VERIFY["post_preview_long_side"])
         backward = dense_map(grid, output.size, nodes=self.dewarper.config.grid_convention)
         density = output.density_median or 1.0
         factor = max(f for f in (1, 2, 4, 8) if f == 1 or f <= density)
@@ -1242,6 +1251,19 @@ class Scanner:
         result = self.orienter.predict(preview)
         record = {"result": result.to_dict(), "action": None}
         return (result.k if result.accepted else None), record
+
+    def _looks_like_paper(self, src: SourceImage, grid: NDArray, checks: dict[str, Any]) -> bool:
+        """Whether a grid the gate mask reaches past looks like paper on a small flat
+        preview; the measures go to ``checks["paper"]``."""
+        try:
+            preview = self._flat_preview(src, grid, look.SIZE)
+        except FlattenerError:
+            return True  # the plan and render checks judge a grid that gives no preview
+        checks["paper"] = measured = look.paper(preview)
+        return (
+            measured["saturation"] <= VERIFY["page_max_saturation"]
+            and measured["dark"] <= VERIFY["page_max_dark"]
+        )
 
     def _plan_for(
         self,
@@ -1587,6 +1609,8 @@ class Scanner:
                         bad = reason("unstable_geometry", check="coverage", **checks)
                     elif checks.get("drift", 0.0) > VERIFY["max_drift"]:
                         bad = reason("unstable_geometry", check="drift", **checks)
+                    elif excess and not self._looks_like_paper(src, grid, checks):
+                        bad = reason("page_not_found", check="paper", **checks)
             if bad is not None:
                 failures.append((bad, {"grid": label, "checks": checks}))
                 continue
@@ -1670,6 +1694,7 @@ class Scanner:
             "candidate": plan.region.get("candidate"),
             "coverage": outcome["checks"].get("coverage"),
             "region_excess": outcome["checks"].get("excess"),
+            "paper": outcome["checks"].get("paper"),
             "drift": outcome["checks"].get("drift"),
             "drift_limit": VERIFY["max_drift"],
             "orientation": orientation_qa,
