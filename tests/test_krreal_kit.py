@@ -171,6 +171,30 @@ def test_page_angle_and_quarter_follow_the_reading_order_corners():
     assert labelcheck.page_quarter(-45.01) == 3 and labelcheck.page_quarter(45.0) == 1
 
 
+def test_scan_provider_turns_a_saved_grid_into_a_draft_quad(tmp_path):
+    import scan_provider
+
+    # 40x30 on file, EXIF 6: the labeled photo is 30 wide and 40 tall.
+    photo = _jpeg(tmp_path / "photos" / "kr1-p1-curved-b03-007.jpg", orientation=6)
+    info = kitlib.photo_info(photo) | {"name": kitlib.parse_name(photo.name)}
+    grid = [[[x, y] for x in (-0.5, 0.0, 0.5)] for y in (-0.5, 0.0, 0.5)]
+    record = {
+        "outcome": "rectified",
+        "source": {"file_sha256": info["sha256"]},
+        "plan": {"kind": "dewarp", "grid": grid},
+    }
+    saved = tmp_path / "scan-quarter" / f"{photo.stem}.scan.json"
+    kitlib.write_json(saved, record)
+    proposal = scan_provider.propose(photo, info)
+    assert proposal["pages"][0]["quad"] == [[7.0, 9.5], [22.0, 9.5], [22.0, 29.5], [7.0, 29.5]]
+    label, dropped = drafts.build_draft(
+        info, info["name"], provider_name="scan", proposal=proposal, kit=KIT
+    )
+    assert dropped == [] and label["draft"]["fields"] == ["quad"]
+    kitlib.write_json(saved, record | {"outcome": "original_returned"})
+    assert scan_provider.propose(photo, info) == {}
+
+
 # Splits and the shot list ------------------------------------------------------------
 
 

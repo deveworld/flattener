@@ -103,7 +103,7 @@ def propose(photo: Path, info: dict) -> dict:
     return {"pages": [page], "flags": [...]}
 ```
 
-좌표 규약은 라벨과 같습니다. 곡선 끝점은 quad 모서리로 바뀝니다. 검사를 통과하지 못한 제안은 버리고 사진 정보만 남깁니다. 스캐너 provider는 `flattener.scan`이 생긴 뒤 붙일 자리입니다: 최종 격자를 `drafts.pages_from_grid`로 quad와 휜 가장자리로 바꾸고, OCR 단어 상자에서 글자 영역과 기준선을 만듭니다.
+좌표 규약은 라벨과 같습니다. 곡선 끝점은 quad 모서리로 바뀝니다. 검사를 통과하지 못한 제안은 버리고 사진 정보만 남깁니다. 스캐너 provider는 `--provider tools/krreal/scan_provider.py:propose`입니다. 스캐너의 최종 격자를 `drafts.pages_from_grid`로 quad와 휜 가장자리로 바꿉니다. 같은 사진의 스캔 기록이 `scan-quarter/`나 `scan-default/`에 있으면 그 격자를 쓰고, 없으면 스캐너를 돌립니다. 스캐너가 원본을 돌려준 사진은 기하 없이 둡니다. 글자 영역과 기준선은 아직 채우지 않습니다.
 
 ## 전사
 
