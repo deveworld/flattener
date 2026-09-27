@@ -1,0 +1,185 @@
+{
+  "set": "KR-Real v1",
+  "version": 1,
+  "name_pattern": "^kr1-(p[1-9])-([a-z]+)-([bdx][0-9]{2})-([0-9]{3})\\.jpg$",
+  "name_example": "kr1-p1-curved-b03-007.jpg",
+  "sources": {
+    "b": "책",
+    "d": "낱장 문서(인쇄물, 영수증, 양식 등)",
+    "x": "문서 없음 (x00만 씀)"
+  },
+  "phones": ["p1", "p2"],
+  "dev_fraction": 0.4,
+  "split_salt": "krreal-v1",
+  "transcripts_checked_target": 20,
+  "strata": [
+    {
+      "code": "curved",
+      "name": "곡면 한국어 책",
+      "target_v1": 60,
+      "transcribe": 8,
+      "variants": {
+        "thick_left": "두꺼운 책(300쪽 이상)의 왼쪽 페이지. 가운데 골 쪽이 크게 휜 상태",
+        "thick_right": "두꺼운 책의 오른쪽 페이지",
+        "thin": "얇은 책이나 잡지의 한 페이지",
+        "lifted": "페이지 끝이 들뜬 상태. 손으로 누르지 않음",
+        "oblique": "30–45° 비스듬한 각도에서 촬영",
+        "dim": "조명 하나뿐인 어두운 실내. 그림자가 조금 생기는 곳"
+      },
+      "shots": {
+        "p1": ["thick_left", "thick_right", "thin", "lifted", "oblique", "dim"],
+        "p2": ["thick_left", "thick_right", "thin", "lifted", "oblique", "dim"]
+      }
+    },
+    {
+      "code": "small",
+      "name": "8pt 이하 작은 글씨",
+      "target_v1": 30,
+      "transcribe": 4,
+      "variants": {
+        "footnote": "각주, 참고문헌, 색인처럼 글씨가 작은 책 페이지",
+        "dictionary": "사전이나 용어집 페이지",
+        "fineprint": "약관, 설명서, 신문처럼 작은 글씨가 빽빽한 인쇄물"
+      },
+      "shots": {
+        "p1": ["footnote", "dictionary", "fineprint"],
+        "p2": ["footnote", "dictionary", "fineprint"]
+      }
+    },
+    {
+      "code": "table",
+      "name": "표·수식",
+      "target_v1": 40,
+      "transcribe": 4,
+      "variants": {
+        "table_flat": "표가 있는 낱장 문서(평평함)",
+        "table_book": "표가 있는 책 페이지(휘어짐)",
+        "formula": "수식이 많은 교과서나 문제집 페이지",
+        "grid": "표와 수식이 섞인 페이지, 또는 칸이 많은 양식"
+      },
+      "shots": {
+        "p1": ["table_flat", "table_book", "formula", "grid"],
+        "p2": ["table_flat", "table_book", "formula", "grid"]
+      }
+    },
+    {
+      "code": "rotate",
+      "name": "큰 회전(90/180/270, ±30°, EXIF 오류)",
+      "target_v1": 40,
+      "transcribe": 3,
+      "variants": {
+        "r90": "사진에서 페이지 위쪽이 오른쪽을 향함",
+        "r180": "사진에서 페이지가 거꾸로 보임(위쪽이 사진 아래)",
+        "r270": "사진에서 페이지 위쪽이 왼쪽을 향함",
+        "skew_pos": "페이지를 시계 방향으로 약 30° 돌려 놓고 촬영",
+        "skew_neg": "페이지를 반시계 방향으로 약 30° 돌려 놓고 촬영",
+        "exif": "휴대폰을 책상과 평행하게 눕혀 바로 위에서 촬영(EXIF 방향이 틀리기 쉬움)"
+      },
+      "shots": {
+        "p1": ["r90", "r180", "skew_pos", "exif"],
+        "p2": ["r270", "r180", "skew_neg", "exif"]
+      }
+    },
+    {
+      "code": "clutter",
+      "name": "복잡한 배경",
+      "target_v1": 30,
+      "transcribe": 2,
+      "variants": {
+        "pattern": "무늬가 있는 천, 이불, 식탁보 위",
+        "wood": "나뭇결이 뚜렷한 책상 위",
+        "dark": "어두운 색 책상 위",
+        "mess": "다른 종이, 필기구, 컵 같은 물건이 많은 책상 위",
+        "hands": "손으로 책을 잡은 채 촬영. 손가락이 페이지 가장자리에 걸침"
+      },
+      "shots": {
+        "p1": ["pattern", "wood", "mess"],
+        "p2": ["pattern", "dark", "hands"]
+      }
+    },
+    {
+      "code": "tiny",
+      "name": "작은 페이지(사진 면적의 20% 미만)",
+      "target_v1": 25,
+      "transcribe": 0,
+      "variants": {
+        "far": "A4나 책 페이지를 멀리서 촬영. 페이지가 사진 면적의 20% 미만",
+        "card": "명함, 영수증, 메모지처럼 작은 문서",
+        "corner": "작은 페이지가 사진 구석에 치우침"
+      },
+      "shots": {
+        "p1": ["far", "card", "corner"],
+        "p2": ["far", "card"]
+      }
+    },
+    {
+      "code": "flat",
+      "name": "이미 평평한 페이지",
+      "target_v1": 30,
+      "transcribe": 3,
+      "variants": {
+        "topdown": "평평한 낱장(A4 인쇄물 등)을 바로 위에서",
+        "oblique": "평평한 낱장을 비스듬히. 원근만 있음",
+        "form": "표나 칸이 있는 평평한 양식 문서"
+      },
+      "shots": {
+        "p1": ["topdown", "oblique", "form"],
+        "p2": ["topdown", "oblique", "form"]
+      }
+    },
+    {
+      "code": "hard",
+      "name": "페이지 없음, 가림, 잘림, 옆 페이지",
+      "target_v1": 25,
+      "transcribe": 0,
+      "variants": {
+        "none": "페이지가 없는 사진(빈 책상, 방 안)",
+        "occluded": "손가락이나 물건이 페이지 일부를 가림",
+        "cut_off": "페이지 한쪽이 사진 밖으로 잘림",
+        "neighbor": "펼친 책에서 한 페이지만 겨냥했지만 옆 페이지가 크게 보임"
+      },
+      "shots": {
+        "p1": ["occluded", "cut_off"],
+        "p2": ["none", "occluded", "neighbor"]
+      }
+    },
+    {
+      "code": "spread",
+      "name": "두 쪽 펼침(라벨만)",
+      "target_v1": 20,
+      "transcribe": 0,
+      "variants": {
+        "spread_top": "펼친 책의 두 쪽 전체를 위에서",
+        "spread_oblique": "펼친 책의 두 쪽 전체를 비스듬히"
+      },
+      "shots": {
+        "p1": ["spread_top", "spread_oblique"],
+        "p2": ["spread_top", "spread_oblique"]
+      }
+    }
+  ],
+  "flags": {
+    "occluded": "가림(손가락, 물건)",
+    "cut_off": "잘림(사진 밖)",
+    "neighbor_page": "옆 페이지 보임",
+    "vertical_text": "세로쓰기",
+    "no_page": "페이지 없음",
+    "two_page": "두 쪽 펼침",
+    "exif_wrong": "EXIF 방향 오류",
+    "glare": "빛 반사",
+    "shadow": "강한 그림자",
+    "blur": "흐림, 흔들림"
+  },
+  "sides": ["top", "right", "bottom", "left"],
+  "text_kinds": {
+    "text": "글자 영역",
+    "table": "표",
+    "formula": "수식"
+  },
+  "reference_kinds": {
+    "baseline": "글줄 기준선",
+    "table_rule": "표선",
+    "vertical_line": "세로선"
+  },
+  "transcript_markers": ["[[수식]]", "[[그림]]", "[[?]]"]
+}
