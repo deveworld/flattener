@@ -25,7 +25,7 @@ from flattener.contracts import FlattenerError, RenderConfig, Status
 from flattener.dewarp.checkpoint import CHECKPOINT_SCHEMA, save_checkpoint
 from flattener.dewarp.model import DewarpModelConfig, UVDocNet
 from flattener.dewarp.predict import BatchInput, Dewarper, rectify, rectify_batch, rerun_grid
-from flattener.scan import locate
+from flattener.scan import locate, look
 from flattener.scan.io import read_scan_record, read_source, save_scan
 from flattener.scan.pipeline import (
     BUNDLE_SCHEMA,
@@ -259,6 +259,26 @@ def test_a_gate_region_past_the_page_keeps_the_dewarp_result(monkeypatch):
     assert _error_px(result.plan.grid) < 0.5 and result.qa["coverage"] < 0.8
     excess = result.qa["region_excess"]
     assert excess["left"] > 0.3 and max(excess["top"], excess["right"], excess["bottom"]) < 0.05
+
+
+def test_a_zoomed_piece_of_the_page_returns_the_original(monkeypatch):
+    # A close-up: the flat preview shows 12 large lines cut by three of its edges.
+    edges = {"top": 0.1, "right": 0.8, "bottom": 0.7, "left": 0.9}
+    monkeypatch.setattr(
+        look, "text", lambda image: {"lines": 12.0, "periodicity": 0.8, "edges": edges}
+    )
+    scanner, _ = _scanner()
+    image = ramp_scene(SIZE, TRUE)
+    result = scanner.scan(image)
+    assert result.outcome == Outcome.ORIGINAL_RETURNED and result.status == Status.MODEL_ERROR
+    assert result.reason_code == "page_cut_off"
+    assert _chain(result) == [("C1", None, ["page_cut_off"])]  # the other candidates wait
+    assert result.guidance[-1].message_ko == (
+        "페이지 끝이 사진 밖으로 잘렸어요. 조금 떨어져서 페이지 전체가 보이게 다시 찍어 주세요"
+    )
+    # A region the user sets is flattened as asked.
+    forced = scanner.scan(image, overrides=ScanOverrides(region=(80, 20, 262, 232)))
+    assert forced.status == Status.SUCCESS and forced.plan is not None
 
 
 def test_without_a_gate_the_outline_is_used_unverified():

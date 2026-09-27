@@ -121,6 +121,7 @@ from .records import (
     Reason,
     ScanPlan,
     ScanResult,
+    Severity,
     SourceInfo,
     collect_guidance,
     decide_outcome,
@@ -148,6 +149,11 @@ VERIFY: dict[str, Any] = {
     # A grid the gate mask reaches past must look like paper (scan.look.paper).
     "page_max_saturation": 0.28,
     "page_max_dark": 0.35,
+    # A zoomed piece of the page (scan.look.text): fewer lines across it than this, lines
+    # at least this regular, and ink in the outer band of at least this share of two edges.
+    "fragment_max_lines": 20,
+    "fragment_min_periodicity": 0.4,
+    "fragment_min_edges": 0.5,
     "max_drift": 0.04,  # median node drift between passes, fraction of the page diagonal
     "low_resolution_density": 0.5,  # source pixels per output pixel below this warn
     "post_preview_long_side": 768,
@@ -1252,18 +1258,40 @@ class Scanner:
         record = {"result": result.to_dict(), "action": None}
         return (result.k if result.accepted else None), record
 
-    def _looks_like_paper(self, src: SourceImage, grid: NDArray, checks: dict[str, Any]) -> bool:
-        """Whether a grid the gate mask reaches past looks like paper on a small flat
-        preview; the measures go to ``checks["paper"]``."""
+    def _judge_look(
+        self, src: SourceImage, grid: NDArray, checks: dict[str, Any], mask_past: bool
+    ) -> Reason | None:
+        """The failure a grid's small flat preview shows (``scan.look``), or ``None``. A
+        grid the gate mask reaches past (``mask_past``) must look like paper; any grid
+        that shows a zoomed piece of text cut by its edges is a page cut off by the photo.
+        The measures go to ``checks["paper"]`` and ``checks["text"]``."""
         try:
             preview = self._flat_preview(src, grid, look.SIZE)
         except FlattenerError:
-            return True  # the plan and render checks judge a grid that gives no preview
-        checks["paper"] = measured = look.paper(preview)
-        return (
-            measured["saturation"] <= VERIFY["page_max_saturation"]
-            and measured["dark"] <= VERIFY["page_max_dark"]
-        )
+            return None  # the plan and render checks judge a grid that gives no preview
+        if mask_past:
+            checks["paper"] = paper = look.paper(preview)
+            if (
+                paper["saturation"] > VERIFY["page_max_saturation"]
+                or paper["dark"] > VERIFY["page_max_dark"]
+            ):
+                return reason("page_not_found", check="paper", **checks)
+        checks["text"] = measured = look.text(preview)
+        edges = sorted(measured["edges"].values())
+        if (
+            measured["lines"] is not None
+            and measured["lines"] < VERIFY["fragment_max_lines"]
+            and measured["periodicity"] >= VERIFY["fragment_min_periodicity"]
+            and edges[-2] >= VERIFY["fragment_min_edges"]
+        ):
+            return reason(
+                "page_cut_off",
+                status=Status.MODEL_ERROR,
+                severity=Severity.FAILURE,
+                check="fragment",
+                **checks,
+            )
+        return None
 
     def _plan_for(
         self,
@@ -1537,8 +1565,10 @@ class Scanner:
                     )
                 return self._accept(planned, outcome, reasons, outcome["orientation"])
             failed.append(candidate.name)
-            if first_failure is None:
+            if first_failure is None or outcome.get("stop"):
                 first_failure = outcome["failure"]
+            if outcome.get("stop"):
+                break  # the page runs out of the photo; no candidate can bring it back
             if outcome["orientation"].settled_by is not None:
                 # A quarter turn settled on a flat preview holds for the later candidates.
                 orientation = outcome["orientation"]
@@ -1609,10 +1639,12 @@ class Scanner:
                         bad = reason("unstable_geometry", check="coverage", **checks)
                     elif checks.get("drift", 0.0) > VERIFY["max_drift"]:
                         bad = reason("unstable_geometry", check="drift", **checks)
-                    elif excess and not self._looks_like_paper(src, grid, checks):
-                        bad = reason("page_not_found", check="paper", **checks)
+                    elif not strict:
+                        bad = self._judge_look(src, grid, checks, bool(excess))
             if bad is not None:
                 failures.append((bad, {"grid": label, "checks": checks}))
+                if bad.code == "page_cut_off":
+                    break  # a close-up: pass A and the other candidates see the same photo
                 continue
             views = [record for _, record in passes[:count]]
             try:
@@ -1653,11 +1685,15 @@ class Scanner:
         entry["accepted"] = None
         entry["failures"] = [{**where, "failure": item.to_dict()} for item, where in failures]
         first = failures[0][0] if failures else reason("unstable_geometry", why="no_grid")
+        cut_off = failures[-1][0].code == "page_cut_off" if failures else False
+        if cut_off:
+            first = failures[-1][0]
         detail = {**first.detail, "candidate": candidate.name}
         result.update(
             checked=None,
             failure=Reason(first.code, first.severity, first.status, detail),
             record=entry,
+            stop=cut_off,
         )
         return result
 
@@ -1695,6 +1731,7 @@ class Scanner:
             "coverage": outcome["checks"].get("coverage"),
             "region_excess": outcome["checks"].get("excess"),
             "paper": outcome["checks"].get("paper"),
+            "text": outcome["checks"].get("text"),
             "drift": outcome["checks"].get("drift"),
             "drift_limit": VERIFY["max_drift"],
             "orientation": orientation_qa,

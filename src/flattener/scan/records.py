@@ -196,7 +196,10 @@ REASONS: dict[str, ReasonSpec] = {
             "page_cut_off",
             Status.SUCCESS,
             Severity.WARNING,
-            "Warn and go on; detail 'sides' names the cut edges.",
+            "Warn and go on when the gate mask runs along image sides (detail 'sides'). A "
+            "flattened page that shows only a zoomed piece of text cut by its edges (check "
+            "'fragment') fails with model_error: the chain stops and the original comes back "
+            "with the reshoot guidance.",
             (Action.RESHOOT,),
             _CUT_OFF_KO,
             _CUT_OFF_EN,
@@ -426,8 +429,9 @@ def _cut_off_messages(detail: dict[str, Any]) -> tuple[str, str]:
     sides = _sides(detail)
     if not sides:
         return (
-            "페이지 가장자리가 잘렸어요. 조금 물러나 찍어 주세요",
-            "An edge of the page is cut off. Step back a little and take the photo again",
+            "페이지 끝이 사진 밖으로 잘렸어요. 조금 떨어져서 페이지 전체가 보이게 다시 찍어 주세요",
+            "The page runs out of the photo. Step back and take it again with the whole page "
+            "in view",
         )
     names_ko = [_SIDES_KO[side] for side in sides]
     ko = f"{names_ko[0]}과 {names_ko[1]}" if len(names_ko) == 2 else ", ".join(names_ko)
