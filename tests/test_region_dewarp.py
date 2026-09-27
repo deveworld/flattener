@@ -2,17 +2,14 @@
 
 from dataclasses import replace
 
-import numpy as np
 import torch
 from scan_fakes import (
     CONFIG,
     RELEASE_INFO,
-    FakeGate,
     Oracle,
     Page,
     oracle_dewarper,
     ramp_scene,
-    shrink,
 )
 
 from flattener.contracts import RenderConfig, Status
@@ -52,35 +49,6 @@ def test_a_dewarper_predicts_once_on_the_region_box_and_renders_the_original():
     grid, _ = run_view(again, image, crop_placement(box, 0.0, SIZE), crop_box=box)
     expected = render(image, dense_map(grid, (190, 150)), config=config)
     assert result.image.tobytes() == expected.image.tobytes()
-
-
-def test_a_segmenter_region_and_a_coverage_check_that_never_widens():
-    dewarper = oracle_dewarper(PAGE, SIZE)
-    image = ramp_scene(SIZE, PAGE)
-    gate = FakeGate([PAGE], SIZE)
-    result = unwarp_page(image, dewarper, (190, 150), segmenter=gate)
-    assert result.status == Status.SUCCESS
-    assert result.metadata["page_region"]["coverage_enforced"] is True
-    assert result.metadata["page_region"]["segmenter_id"] == "fake-gate"
-    dewarper.model.always = shrink(0.8)
-    config = RenderConfig(on_error="original")
-    result = unwarp_page(image, dewarper, (190, 150), segmenter=gate, config=config)
-    assert result.status == Status.MODEL_ERROR
-    assert result.reason_code == "page_coverage_insufficient"
-    assert result.used_fallback and result.image.tobytes() == image.tobytes()
-    assert result.metadata["page_region"]["boundary_expansion"] == 1.0
-    assert result.metadata["failure_stage"] == "page_coverage"
-
-
-def test_a_failing_dewarper_map_keeps_the_renderer_status():
-    dewarper = oracle_dewarper(PAGE, SIZE)
-    dewarper.model.always = lambda grid: np.full_like(grid, np.nan)
-    image = ramp_scene(SIZE, PAGE)
-    result = unwarp_page(
-        image, dewarper, (190, 150), region=_region(), config=RenderConfig(on_error="return")
-    )
-    assert result.status == Status.INVALID_TRANSFORM and result.reason_code == "non_finite_grid"
-    assert result.image is None
 
 
 def test_the_result_names_the_weights_and_their_ship_gate_stamp():

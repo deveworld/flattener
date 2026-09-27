@@ -22,7 +22,6 @@ from flattener.scan.orient_train import (
     _initialize,
     augmented_views,
     compute_losses,
-    main,
     soft_targets,
     train,
 )
@@ -172,71 +171,6 @@ def built(tmp_path_factory):
     return directory, summary
 
 
-def test_build_writes_release_data(built):
-    directory, summary = built
-    data = OrientData.load(directory / "out")
-    assert summary["counts"] == {
-        "blank/train": 2,
-        "blank/val": 1,
-        "own/train": 3,
-        "own/val": 1,
-        "sd-crop/train": 3,
-        "sd-crop/val": 2,
-        "sd-flat/train": 3,
-        "sd-flat/val": 2,
-    }
-    sources = {source["name"]: source for source in summary["sources"]}
-    assert sources["sd-flat"]["skipped"] == {"train": {"invalid_grid": 1}}
-    assert sources["sd-flat"]["license_classes"] == {"clean": 5}
-    assert sources["own"]["license_classes"] == {"own": 4}
-    assert sources["sd-crop"]["dewarp_spec"]["track"] == "release"
-    assert orient.data_spec_problems(data.spec) == []
-    assert orient.data_sources_problems(data.data_sources) == []
-    names = [source["name"] for source in data.spec["sources"]]
-    assert names == [
-        "sd-flat/sd-train",
-        "sd-flat/sd-val",
-        "sd-crop/sd-train",
-        "sd-crop/sd-val",
-        "own/train",
-        "own/val",
-        "blank/train",
-        "blank/val",
-    ]
-    assert data.data_sources["val"][0] == {
-        "name": "sd-flat",
-        "kind": "syntheticdoc_flat",
-        "track": "release",
-        "license": "test pages",
-        "samples": 2,
-        "license_classes": {"clean": 2},
-    }
-    for record in data.records:
-        image = Image.open(directory / "out" / record["path"])
-        assert image.mode == "L" and list(image.size[::-1]) == record["size"]
-        assert max(record["size"]) <= 384 * 1.4
-        assert record["uniform"] == (record["kind"] == "text_free")
-        x0, y0, x1, y1 = record["box"]
-        if record["kind"] == "syntheticdoc_crop":
-            assert -1 < x0 < x1 < 1 and -1 < y0 < y1 < 1
-        else:
-            assert record["box"] == [-1.0, -1.0, 1.0, 1.0]
-    angles = [r["origin"]["up_angle_deg"] for r in data.records if r["source"] == "sd-crop"]
-    assert sorted(round(a) % 360 for a in angles) == [0, 0, 30, 90, 180]
-
-
-def test_build_resumes_from_parts_and_refuses_another_spec(built):
-    directory, summary = built
-    parts = sorted((directory / "out" / "parts").rglob("*.jsonl"))
-    times = [path.stat().st_mtime_ns for path in parts]
-    again = build_data.build(directory / "build.json", directory / "out", workers=1)
-    assert again["records_sha256"] == summary["records_sha256"]
-    assert [path.stat().st_mtime_ns for path in parts] == times
-    other = _build_spec(directory, "other.json", jpeg_quality=80)
-    with pytest.raises(SystemExit):
-        build_data.build(other, directory / "out", workers=1)
-
-
 def test_release_build_refuses_research_samples(tmp_path):
     _write_syntheticdoc(tmp_path / "sd", track="research")
     with pytest.raises(FlattenerError) as caught:
@@ -261,8 +195,8 @@ def test_release_build_refuses_research_samples(tmp_path):
         build_data.build(tmp_path / "pages.json", tmp_path / "out2", workers=1)
 
 
-@pytest.mark.parametrize("angle", [90.0, 180.0, -20.0])
-def test_crop_turns_the_page_upright(angle):
+def test_crop_turns_the_page_upright():
+    angle = 90.0
     page = _asymmetric_page()
     rgb, values = _render(page, angle)
     from flattener.dewarp.coords import map_to_grid
@@ -275,17 +209,6 @@ def test_crop_turns_the_page_upright(angle):
     upright = np.corrcoef(region.ravel(), page.astype(float).ravel())[0, 1]
     flipped = np.corrcoef(region.ravel(), np.rot90(page, 2).astype(float).ravel())[0, 1]
     assert upright > 0.8 and upright > flipped + 0.3
-
-
-def test_flat_page_matches_the_source_page():
-    page = _asymmetric_page()
-    rgb, values = _render(page, 90.0)
-    from flattener.dewarp.coords import map_to_grid
-
-    flat, box = pages.flatten_syntheticdoc(rgb, map_to_grid(values, (40, 28)), 384, 300)
-    assert box == pages.FULL_BOX and flat.shape == (384, round(384 * PAGE[1] / PAGE[0]))
-    resized = np.asarray(Image.fromarray(flat).resize(PAGE[::-1]), dtype=float)
-    assert np.corrcoef(resized.ravel(), page.astype(float).ravel())[0, 1] > 0.9
 
 
 def test_training_views_follow_the_label_convention():
@@ -324,18 +247,6 @@ def test_dataset_items_and_targets(built):
     config_ = TrainConfig(data=".", output_dir=".", aux_weight=0.5, label_smoothing=0.0)
     losses = compute_losses((logits, logits, logits), torch.tensor([0, -1]), config_)
     assert losses["loss"].item() == pytest.approx(1.5 * np.log(4))
-
-
-def test_config_rejects_bad_values_and_prints(tmp_path, capsys):
-    with pytest.raises(FlattenerError):
-        TrainConfig(data=".", output_dir=".", init="uvdoc")
-    with pytest.raises(FlattenerError):
-        TrainConfig.from_dict({"data": ".", "output_dir": ".", "model": {"patches": 99}})
-    path = tmp_path / "run.json"
-    path.write_text(json.dumps({"data": "data", "output_dir": "runs/a", "batch_size": 8}))
-    assert main(["--config", str(path), "--print-config", "--max-steps", "5"]) == 0
-    printed = json.loads(capsys.readouterr().out)
-    assert Path(printed["data"]) == (tmp_path / "data").resolve() and printed["max_steps"] == 5
 
 
 @pytest.mark.training

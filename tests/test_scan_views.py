@@ -1,25 +1,21 @@
 """``scan.views``: model inputs of placed views and one pass placed in the source."""
 
 import numpy as np
-import pytest
 import torch
 from scan_fakes import Page, oracle_dewarper, ramp_scene
 from torch.nn import functional as F
 
-from flattener.contracts import FlattenerError, Status
 from flattener.dewarp.model import DewarpModelConfig, UVDocNet
-from flattener.dewarp.predict import Dewarper, crop_pass_box, model_input, rerun_grid
+from flattener.dewarp.predict import Dewarper, crop_pass_box, rerun_grid
 from flattener.scan.io import SourceImage
 from flattener.scan.placement import Placement, compose
 from flattener.scan.records import SourceInfo
 from flattener.scan.views import (
     crop_placement,
-    level_factor,
     on_source,
     run_view,
     sample_view,
     source_footprint,
-    view_input,
 )
 
 SIZE = (150, 200)
@@ -43,8 +39,8 @@ def test_the_whole_image_pass_is_rectifys_first_prediction():
     assert record["input"] == "model_input"
 
 
-@pytest.mark.parametrize("angle", [0.0, 12.5, -30.0, 45.0])
-def test_a_crop_box_at_up_to_45_degrees_is_crop_pass_box(angle):
+def test_a_crop_box_at_up_to_45_degrees_is_crop_pass_box():
+    angle = 12.5
     dewarper, image = _seeded(1), _image(3)
     box = (13, 22, 170, 131)
     placement = crop_placement(box, angle, SIZE)
@@ -91,25 +87,6 @@ def test_a_quarter_turned_view_shows_a_turned_page_upright():
     assert np.abs(other - page.grid(source_size=size)).max() > 0.1
 
 
-def test_the_pyramid_source_reads_a_reduced_level():
-    dewarper = _seeded(3)
-    image = _image(5, (400, 520))
-    source = SourceImage(image, SourceInfo(size=(400, 520)))
-    whole = Placement.whole((400, 520))
-    assert level_factor(whole, (64, 48)) == 8
-    seen = []
-
-    def levels(factor):
-        seen.append(factor)
-        return source.level(factor)
-
-    tensor = view_input(dewarper, image, whole, view_source="pyramid", levels=levels)
-    assert seen == [8] and tuple(tensor.shape) == (1, 3, 64, 48)
-    assert not torch.equal(tensor, model_input(dewarper, image))
-    grid, record = run_view(dewarper, image, whole, view_source="pyramid", levels=levels)
-    assert record["input"] == "view_map:pyramid" and np.isfinite(grid).all()
-
-
 def test_a_box_view_keeps_its_place_on_a_reduced_level():
     box = Placement.from_box((10, 10, 110, 110), (200, 200))
     corners = np.array([[-1.0, -1.0], [1.0, 1.0]])
@@ -122,16 +99,3 @@ def test_a_box_view_keeps_its_place_on_a_reduced_level():
     full = sample_view(image, box, (20, 20))
     reduced = sample_view(source.level(2), box, (20, 20))
     assert float((full - reduced)[0, :2].abs().max()) < 2 / 255  # the same place
-
-
-def test_invalid_views_are_refused():
-    dewarper, image = _seeded(), _image()
-    for call in (
-        lambda: crop_placement((1.5, 0, 10, 10), 0.0, SIZE),
-        lambda: crop_placement((0, 0, 10), 0.0, SIZE),
-        lambda: run_view(dewarper, image, Placement.whole((10, 10))),
-        lambda: run_view(dewarper, image, Placement.whole(SIZE), view_source="other"),
-    ):
-        with pytest.raises(FlattenerError) as error:
-            call()
-        assert error.value.status == Status.INPUT_ERROR

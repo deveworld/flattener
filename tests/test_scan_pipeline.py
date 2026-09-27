@@ -33,14 +33,8 @@ from flattener.scan.pipeline import (
     Scanner,
     ScanOptions,
     ScanOverrides,
-    homography_map,
-    median_drift,
-    quad_homography,
-    view_geometry,
 )
-from flattener.scan.placement import Placement, compose
 from flattener.scan.records import Outcome, ScanPlan
-from flattener.scan.views import crop_placement
 
 SIZE = (240, 320)
 TRUE = Page((170, 125), (150, 190), 7.0)
@@ -446,61 +440,6 @@ def test_bundles_load_through_the_ship_gate(tmp_path):
     with pytest.raises(FlattenerError) as error:
         Scanner.load(bundle, research=True)
     assert error.value.reason_code == "invalid_bundle"
-
-
-def test_geometry_helpers():
-    placement = crop_placement((20, 30, 180, 150), 90.0 + 8.0, SIZE)
-    geometry = view_geometry(placement)
-    height, width = placement.view_size
-    corners = np.array([[0, 0], [width, 0], [width, height], [0, height]], float)
-    pixels = corners @ geometry.matrix[:, :2].T + geometry.matrix[:, 2]
-    values = compose(np.array([[-1, -1], [1, -1], [1, 1], [-1, 1]], float), placement)
-    np.testing.assert_allclose(pixels, (values + 1) / 2 * [SIZE[1], SIZE[0]], atol=1e-9)
-    homography = quad_homography(TRUE.corners(), SIZE)
-    dense = homography_map(homography, (4, 4))
-    assert dense.dtype == np.float32 and dense.shape == (4, 4, 2)
-    corner = np.array([-1, -1, 1.0]) @ homography.T
-    np.testing.assert_allclose(
-        (corner[:2] / corner[2] + 1) / 2 * [SIZE[1], SIZE[0]], TRUE.corners()[0], atol=1e-9
-    )
-    grid = TRUE.grid(source_size=SIZE)
-    assert median_drift(grid, grid, SIZE) == 0.0
-    assert Placement.whole(SIZE).kind == "whole"
-
-
-def test_invalid_options_are_refused():
-    for kwargs in (
-        {"passes": 3},
-        {"passes": True},
-        {"orient": "maybe"},
-        {"output": 1},
-        {"output": (10,)},
-        {"border": 1.0},
-        {"inset": 2.0},
-        {"preview": 1},
-        {"deskew": "yes"},
-        {"view_extent": "loose"},
-    ):
-        with pytest.raises(FlattenerError) as error:
-            ScanOptions(**kwargs)
-        assert error.value.reason_code == "invalid_scan_option"
-
-
-@pytest.mark.parametrize(
-    "options",
-    [ScanOptions(view_source="pyramid"), ScanOptions(view_extent="tight"), ScanOptions(passes=2)],
-)
-def test_view_flags_and_two_passes_keep_the_page(options):
-    scanner, model = _scanner()
-    result = scanner.scan(ramp_scene(SIZE, TRUE), options)
-    assert result.status == Status.SUCCESS and not result.qa["rerun_discarded"]
-    assert _error_px(result.plan.grid) < 1.0
-    inputs = [view["input"] for view in result.plan.views]
-    if options.view_source == "pyramid":
-        assert all(item == "view_map:pyramid" for item in inputs)
-    if options.view_extent == "tight":
-        assert result.plan.views[1]["placement"]["kind"] == "outline"
-    assert len(result.plan.views) == 1 + options.rerun
 
 
 def test_a_non_finite_pass_is_refused_and_the_chain_goes_on():

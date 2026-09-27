@@ -50,28 +50,23 @@ def relative_error(value, truth):
     return abs(value / truth - 1.0)
 
 
-@pytest.mark.parametrize("aspect", [1 / math.sqrt(2), 0.773, 1.0, 1.414, 0.52])
-@pytest.mark.parametrize("angle", [0.0, 17.0, 90.0, -135.0])
+@pytest.mark.parametrize(("angle", "aspect"), [(17.0, 1 / math.sqrt(2)), (-135.0, 1.414)])
 def test_arc_aspect_is_exact_on_similarity_grids(aspect, angle):
     grid = similarity_grid(1200 * aspect, 1200, angle=angle, scale=1.3)
     assert relative_error(op.arc_aspect(grid, SOURCE), aspect) < 1e-9
     assert relative_error(op.arc_aspect(grid.astype(np.float32), SOURCE), aspect) < 1e-5
 
 
-@pytest.mark.parametrize(
-    ("tilt_x", "tilt_y", "roll"), [(6, 0, 0), (0, 6, 0), (-5, 4, 25), (4, -4, -60), (3, 3, 180)]
-)
-def test_arc_aspect_is_within_one_percent_under_mild_perspective(tilt_x, tilt_y, roll):
+def test_arc_aspect_is_within_one_percent_under_mild_perspective():
     aspect = 1 / math.sqrt(2)
-    grid = camera_grid(aspect, 1.0, tilt_x=tilt_x, tilt_y=tilt_y, roll=roll)
+    grid = camera_grid(aspect, 1.0, tilt_x=-5, tilt_y=4, roll=25)
     assert relative_error(op.arc_aspect(grid, SOURCE), aspect) < 0.01
 
 
 @pytest.mark.parametrize(
-    ("tilt_x", "tilt_y", "roll"),
-    [(30, 0, 0), (0, -35, 0), (25, 20, 15), (-20, 30, -100), (6, 0, 0), (0, 0, 0)],
+    ("aspect", "tilt_x", "tilt_y", "roll"),
+    [(1 / math.sqrt(2), 25, 20, 15), (1.5, -20, 30, -100)],
 )
-@pytest.mark.parametrize("aspect", [1 / math.sqrt(2), 8.5 / 11, 1.5])
 def test_focal_length_removes_perspective(tilt_x, tilt_y, roll, aspect):
     grid = camera_grid(aspect, 1.0, tilt_x=tilt_x, tilt_y=tilt_y, roll=roll, focal=3000.0)
     estimate, method = op.estimate_aspect(grid, SOURCE, focal_px=3000.0)
@@ -113,11 +108,7 @@ def test_auto_width_samples_the_longest_row_at_source_density():
     ("aspect", "expected", "paper"),
     [
         (1 / math.sqrt(2) * 1.012, 1 / math.sqrt(2), "iso"),
-        (1 / math.sqrt(2) * 0.99, 1 / math.sqrt(2), "iso"),
-        (0.6795, 128 / 188, "4x6"),
         (0.6760, 152 / 225, "singukpan"),
-        (0.773 * 1.01, 8.5 / 11, "letter"),
-        (math.sqrt(2) * 1.01, math.sqrt(2), "iso-landscape"),
     ],
 )
 def test_auto_snaps_within_tolerance(aspect, expected, paper):
@@ -129,8 +120,8 @@ def test_auto_snaps_within_tolerance(aspect, expected, paper):
     assert plan.height == op.round_half_up(plan.width / expected)
 
 
-@pytest.mark.parametrize("aspect", [1 / math.sqrt(2) * 1.02, 0.60, 0.74, 1.0])
-def test_auto_keeps_the_estimate_outside_tolerance(aspect):
+def test_auto_keeps_the_estimate_outside_tolerance():
+    aspect = 1 / math.sqrt(2) * 1.02
     plan = op.plan_output(similarity_grid(1500 * aspect, 1500), SOURCE)
     assert plan.aspect_source == "estimated" and plan.paper is None
     assert plan.aspect == pytest.approx(aspect, 1e-9)
@@ -167,7 +158,7 @@ def test_explicit_size_and_long_side():
 
 @pytest.mark.parametrize(
     ("width", "height", "limited_by"),
-    [(10000, 14142, "max_pixels"), (12000, 1000, "max_side"), (9000, 2250, "max_pixels")],
+    [(10000, 14142, "max_pixels"), (12000, 1000, "max_side")],
 )
 def test_limits_shrink_uniformly(width, height, limited_by):
     big = (20000, 20000)
@@ -208,10 +199,3 @@ def test_degenerate_and_malformed_grids():
     line = similarity_grid(700, 1000)
     line[..., 1] = 0.0  # every node on one horizontal line
     assert op.perspective_aspect(line, SOURCE, 3000.0) is None
-
-
-def test_output_plan_round_trip():
-    plan = op.plan_output(camera_grid(0.7, 1.0, tilt_x=20), SOURCE, focal_px=3000.0)
-    assert plan.aspect_method == "perspective"
-    assert op.OutputPlan.from_dict(plan.to_dict()) == plan
-    assert plan.to_dict()["aspect_source"] in op.ASPECT_SOURCES

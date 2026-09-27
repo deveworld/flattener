@@ -136,14 +136,6 @@ def oracle_dewarper(page, source_size, info=None):
     return Dewarper(model, CONFIG, torch.device("cpu"), dict(info or RELEASE_INFO))
 
 
-def fold(grid):
-    """Mirror the right half of the grid over its middle column: a fold."""
-    folded = grid.copy()
-    middle = grid.shape[1] // 2
-    folded[:, middle + 1 :] = grid[:, middle - 1 :: -1][:, : grid.shape[1] - middle - 1]
-    return folded
-
-
 def twist(grid):
     """Swap two interior node columns: cells fold, the outline stays."""
     twisted = grid.copy()
@@ -155,13 +147,6 @@ def shrink(factor):
     def change(grid):
         center = grid.mean(axis=(0, 1))
         return center + (grid - center) * factor
-
-    return change
-
-
-def shift(dx, dy=0.0):
-    def change(grid):
-        return grid + np.array([dx, dy])
 
     return change
 

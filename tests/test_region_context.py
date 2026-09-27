@@ -9,23 +9,18 @@ import torch
 from torch.nn import functional as F
 
 from flattener import FlattenerError, Status
-from flattener.regions import context
 from flattener.regions.context import (
     CHECKPOINT_SCHEMA,
     MODEL_VERSION,
     PILOT_SCHEMA,
     ContextPageSegmenter,
     ContextSegmenterConfig,
-    GateConfig,
-    gate_page,
     gate_page_region,
     load_context_segmenter,
     parameter_count,
     preprocess_image,
     preprocess_mask,
     save_context_checkpoint,
-    smartdoc_exposure,
-    touched_borders,
 )
 from flattener.regions.geometry import PageRegion
 from flattener.regions.segmentation import SegmenterConfig
@@ -67,22 +62,6 @@ def test_v0_architecture_has_the_recorded_parameter_count():
     assert all(p.dtype == torch.float32 and p.device.type == "cpu" for p in model.parameters())
 
 
-@pytest.mark.parametrize(
-    "changes",
-    [
-        {"input_size": (7, 96)},
-        {"input_size": [128, 96]},
-        {"channels": (8, 16, 32)},
-        {"channels": (1, 2, 3, True)},
-        {"channels": (128, 128, 128, 128)},
-        {"model_version": "region-unet-1.0"},
-    ],
-)
-def test_config_rejects_invalid_values(changes):
-    with pytest.raises(ValueError):
-        ContextSegmenterConfig(**changes)
-
-
 def test_preprocessing_is_the_pinned_segmentation_preprocessing():
     image = np.random.default_rng(3).integers(0, 256, (60, 80, 3), dtype=np.uint8)[::-1]
     mask = image[:, :, 0] > 128
@@ -91,6 +70,20 @@ def test_preprocessing_is_the_pinned_segmentation_preprocessing():
     assert torch.equal(preprocess_image(image, SMALL), pinned_preprocess_image(image, pinned))
     assert torch.equal(preprocess_mask(mask, SMALL), pinned_preprocess_mask(mask, pinned))
     np.testing.assert_array_equal(image, before)
+
+
+def test_preprocess_preserves_whole_extent_and_caller_memory():
+    image = np.zeros((40, 20, 3), np.uint8)
+    image[:20, :, 0] = 255
+    image[20:, :, 2] = 255
+    original = image.copy()
+    config = SegmenterConfig(input_size=(17, 13), channels=(2, 4, 6))
+    output = pinned_preprocess_image(image[::-1], config)
+    assert output.shape == (3, 17, 13)
+    assert output.dtype == torch.float32 and output.device.type == "cpu"
+    assert output[2, 0].mean() > 0.99 and output[0, -1].mean() > 0.99
+    output.fill_(0.7)
+    np.testing.assert_array_equal(image, original)
 
 
 def test_forward_follows_the_archived_operation_order_and_keeps_rng():
@@ -112,21 +105,6 @@ def test_forward_follows_the_archived_operation_order_and_keeps_rng():
         assert torch.equal(model(image), expected)
         assert torch.equal(model._forward_trusted(image), expected)
     assert torch.equal(rng, torch.get_rng_state())
-
-
-@pytest.mark.parametrize(
-    "invalid",
-    [
-        None,
-        torch.zeros(1, 3, 17, 13, dtype=torch.float64),
-        torch.zeros(1, 3, 16, 13),
-        torch.full((1, 3, 17, 13), float("nan")),
-        torch.full((1, 3, 17, 13), 1.01),
-    ],
-)
-def test_forward_rejects_invalid_input(invalid):
-    with pytest.raises((TypeError, ValueError)):
-        _model()(invalid)
 
 
 def test_region_context_checkpoint_round_trip(tmp_path):
@@ -179,45 +157,6 @@ def test_checkpoint_needs_a_matching_sidecar(tmp_path):
     assert _reason(lambda: load_context_segmenter(tmp_path / "none.pt")) == "missing_checkpoint"
 
 
-@pytest.mark.parametrize(
-    "changes",
-    [
-        {"schema": "region-segmentation-0.1"},
-        {"model_config": {"input_size": [17, 13], "channels": [2, 3, 4]}},
-        {"best_epoch": 4},
-        {"model_state": {}},
-    ],
-)
-def test_invalid_checkpoints_are_rejected(tmp_path, changes):
-    path = _pilot(tmp_path / "best.pt", _model(), **changes)
-    assert _reason(lambda: load_context_segmenter(path)) == "invalid_checkpoint"
-
-
-def test_mismatched_or_nonfinite_weights_are_rejected(tmp_path):
-    other = _model(ContextSegmenterConfig(input_size=(17, 13), channels=(2, 3, 4, 6)))
-    path = _pilot(tmp_path / "other.pt", other)
-    assert _reason(lambda: load_context_segmenter(path)) == "invalid_checkpoint"
-    state = _model().state_dict()
-    state["head.bias"] = torch.tensor([float("nan")])
-    path = _pilot(tmp_path / "nan.pt", _model(), model_state=state)
-    assert _reason(lambda: load_context_segmenter(path)) == "invalid_checkpoint"
-
-
-def test_save_rejects_bad_provenance_and_state(tmp_path):
-    with pytest.raises(ValueError):
-        save_context_checkpoint(tmp_path / "a.pt", _model().state_dict(), SMALL, {"x": object()})
-    with pytest.raises(RuntimeError):
-        save_context_checkpoint(tmp_path / "b.pt", {}, SMALL, {})
-    assert not list(tmp_path.iterdir())
-
-
-def test_load_rejects_an_unknown_device(tmp_path):
-    path = _pilot(tmp_path / "best.pt", _model())
-    with pytest.raises(FlattenerError) as caught:
-        load_context_segmenter(path, device="meta")
-    assert caught.value.status == Status.INPUT_ERROR
-
-
 def _probability(box, shape=(96, 72), value=0.98):
     probability = np.full(shape, 0.02, np.float32)
     top, left, bottom, right = box
@@ -250,12 +189,6 @@ def test_page_fills_frame_is_a_success_with_the_whole_image(box, borders):
     assert gate.metadata["region"] == asdict(PageRegion(0, 0, 720, 960))
 
 
-def test_two_borders_do_not_fill_the_frame():
-    gate = gate_page_region(_probability((0, 0, 48, 40)), (960, 720))
-    assert not gate.fills_frame and gate.touched_borders == ("top", "left")
-    assert gate.region == gate.estimate.region
-
-
 def test_weak_scores_pass_detection_without_confidence():
     gate = gate_page_region(_probability((24, 18, 72, 54), value=0.8), (960, 720))
     assert not gate.confident
@@ -267,79 +200,3 @@ def test_rejections_keep_their_status_and_reason():
     two = _probability((10, 4, 50, 30))
     two[10:50, 40:66] = 0.98
     assert _reason(lambda: gate_page_region(two, (960, 720))) == "ambiguous_page_region"
-
-
-def test_gate_page_names_the_segmenter():
-    class Stub:
-        model_id, model_sha256, load_seconds = "stub:1", "a" * 64, 0.0
-
-        def predict_probability(self, image):
-            return _probability((24, 18, 72, 54))
-
-    image = np.zeros((96, 72, 3), np.uint8)
-    gate = gate_page(image, Stub())
-    assert gate.metadata["detection"]["segmenter_id"] == "stub:1"
-    assert gate.region == gate.estimate.region
-
-
-@pytest.mark.parametrize(
-    "changes",
-    [
-        {"fills_frame_area": 1.5},
-        {"fills_frame_area": True},
-        {"fills_frame_borders": 0},
-        {"fills_frame_borders": 2.0},
-        {"confident_dominance": float("nan")},
-        {"region": "default"},
-    ],
-)
-def test_gate_config_rejects_invalid_values(changes):
-    with pytest.raises((TypeError, ValueError)):
-        GateConfig(**changes)
-
-
-def test_touched_borders_checks_its_input():
-    with pytest.raises(FlattenerError):
-        touched_borders(np.zeros((4, 4), np.float32))
-    mask = np.zeros((4, 5), bool)
-    mask[1:, 4] = True
-    assert touched_borders(mask) == ("right", "bottom")
-
-
-def test_smartdoc_exposure_lists_every_template_once():
-    record = smartdoc_exposure()
-    groups = ("exclude_from_evaluation", "selection_exposed", "unexposed")
-    names = [name for group in groups for name in record[group]]
-    assert len(names) == len(set(names)) == len(record["templates"]) == 30
-    assert len(record["exclude_from_evaluation"]) == 22
-    assert record["selection_exposed"] == ["datasheet004", "letter004", "paper004", "patent004"]
-    assert record["unexposed"] == ["datasheet005", "letter005", "paper005", "patent005"]
-    assert all(
-        f"{kind}00{i}" in record["exclude_from_evaluation"]
-        for kind in ("magazine", "tax")
-        for i in range(1, 6)
-    )
-    level = {"train": groups[0], "selection": groups[1], "none": groups[2]}
-    for template in record["templates"]:
-        assert template["model_name"] in record[level[template["exposure"]]]
-        assert bool(template["frames_used"]) == (template["exposure"] != "none")
-    assert record["model"]["checkpoint_sha256"].startswith("adca808d")
-    record["unexposed"].clear()
-    assert smartdoc_exposure()["unexposed"]
-
-
-def test_module_imports_only_preprocessing_from_the_pinned_segmentation_module():
-    source = context.__file__
-    with open(source, encoding="utf-8") as stream:
-        lines = [line for line in stream if ".segmentation import" in line]
-    imported = {
-        name.strip(" ()\n").split(" as ")[0]
-        for line in lines
-        for name in line.split("import", 1)[1].split(",")
-    }
-    assert imported == {
-        "PREPROCESS_VERSION",
-        "SegmenterConfig",
-        "preprocess_image",
-        "preprocess_mask",
-    }

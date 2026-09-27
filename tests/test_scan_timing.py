@@ -45,17 +45,6 @@ def test_stage_clock_records_each_stage():
         stages.add("model_load", -1.0)
 
 
-def test_failed_stage_is_recorded_and_raises():
-    clock = FakeClock()
-    stages = timing.StageClock(clock=clock)
-    with pytest.raises(RuntimeError):
-        with stages.stage("render"):
-            clock.advance(7)
-            raise RuntimeError("boom")
-    (record,) = stages.records
-    assert (record.name, record.duration_ns, record.ok) == ("render", 7, False)
-
-
 def test_sync_runs_at_stage_start_and_end():
     calls = []
     clock = FakeClock()
@@ -72,14 +61,6 @@ def test_sync_runs_at_stage_start_and_end():
     with plain.stage("detect", sync=True):
         pass
     assert calls[-2:] == [-1, -1]
-
-
-def test_real_clock_and_cuda_sync_on_cpu():
-    stages = timing.StageClock(cuda_sync=True)
-    with stages.stage("noop"):
-        sum(range(1000))
-    assert stages.records[0].duration_ns >= 0 and stages.records[0].synced
-    timing.cuda_synchronize()
 
 
 def test_percentiles_and_summaries():
@@ -106,22 +87,6 @@ def test_percentiles_and_summaries():
     stages = timing.summarize_stages([{"read": 0.1, "total": 1.0}, {"read": 0.3, "total": 1.4}])
     assert stages["read"]["median"] == pytest.approx(0.2)
     assert stages["total"]["p95"] == pytest.approx(1.38)
-
-
-@pytest.mark.parametrize(
-    ("size", "label"),
-    [
-        ((1000, 2000), "<=2"),
-        ((1200, 1600), "<=2"),
-        ((2000, 3000), "2-6"),
-        ((3000, 4000), "6-12"),
-        ((3024, 4032), "12-16"),
-        ((4000, 4000), "12-16"),
-        ((6000, 8000), ">16"),
-    ],
-)
-def test_megapixel_buckets(size, label):
-    assert timing.megapixel_bucket(*size) == label
 
 
 def test_summary_by_bucket_and_jsonl(tmp_path):

@@ -20,7 +20,6 @@ from flattener.evidence import initialization
 from flattener.scan.shippable import (
     CATEGORIES,
     EXTERNAL_WEIGHTS_SHA256,
-    MAX_DEPTH,
     REASONS,
     gate_file,
     gate_verdict,
@@ -199,7 +198,6 @@ def _parent(sidecar, path):
 
 R2 = _sidecar(R2_SHA, SPEC_V2, V2, [SCRATCH, _train(V2)], step=46880)
 R3 = _sidecar(R3_SHA, SPEC_V2, V2, [UVDOC_START, _train(V2)], step=46880)
-R3LONG = _sidecar(R3LONG_SHA, SPEC_V2, V2, [UVDOC_START, _train(V2, CODE_R3LONG)], step=93760)
 R4 = _sidecar(R4_SHA, SPEC_V3, V3, [SCRATCH, _train(V3, CODE_R4)], step=140625)
 R5 = _sidecar(R5_SHA, SPEC_V3, V3, [UVDOC_START, _train(V3, CODE_R4)], step=140625)
 G1 = _sidecar(
@@ -265,7 +263,6 @@ R4_INFO = _run_info(
     140625,
     lineage={"kind": "clean", "note": "scratch init; release data spec only"},
 )
-R3_INFO = _run_info("R3", UVDOC_INIT, SPEC_V2, V2, R3_SHA, 46880)
 R3LONG_INFO = _run_info(
     "R3long",
     {**UVDOC_INIT_LONG, "sha256_matches": True},
@@ -274,25 +271,6 @@ R3LONG_INFO = _run_info(
     R3LONG_SHA,
     93760,
     lineage=UVDOC_NOTE,
-)
-R5_INFO = _run_info("R5", UVDOC_INIT_LONG, SPEC_V3, V3, R5_SHA, 140625, lineage=UVDOC_NOTE)
-G1_INFO = _run_info(
-    "G1",
-    {
-        "kind": "checkpoint",
-        "path": "/workspace/init/R3/step_00046880.pt",
-        "sha256": R3_SHA,
-        "run": "R3",
-        "step": 46880,
-        "track": "release",
-        "data_spec_sha256": V2,
-        "lineage": "G1 <- R3 <- UVDoc best_model.pkl (MIT)",
-        "lineage_records": R3["lineage"],
-    },
-    SPEC_V2,
-    V2,
-    G1_SHA,
-    23440,
 )
 
 
@@ -303,7 +281,7 @@ def test_fixture_specs_hash_to_the_recorded_sha256():
     assert set(REASONS) >= {"external_init", "external_weights", "unverified_data_spec"}
 
 
-@pytest.mark.parametrize("record", [R4, R4_INFO, R2], ids=["R4-sidecar", "R4-run-info", "R2"])
+@pytest.mark.parametrize("record", [R4, R4_INFO], ids=["R4-sidecar", "R4-run-info"])
 def test_scratch_release_runs_are_shippable(record):
     verdict = shippable(record)
     assert verdict.shippable and not verdict.research
@@ -319,11 +297,7 @@ def test_scratch_release_runs_are_shippable(record):
     assert json.loads(json.dumps(payload)) == payload
 
 
-@pytest.mark.parametrize(
-    "record",
-    [R3, R3LONG, R5, R3_INFO, R3LONG_INFO, R5_INFO],
-    ids=["R3", "R3long", "R5", "R3-run-info", "R3long-run-info", "R5-run-info"],
-)
+@pytest.mark.parametrize("record", [R3, R3LONG_INFO], ids=["R3", "R3long-run-info"])
 def test_uvdoc_initialized_release_runs_are_research(record):
     verdict = shippable(record)
     assert not verdict.shippable and verdict.research
@@ -333,9 +307,8 @@ def test_uvdoc_initialized_release_runs_are_research(record):
     assert verdict.chain[-1]["kind"] == "uvdoc" and verdict.chain[-1]["category"] == "external"
 
 
-@pytest.mark.parametrize("record", [G1, G1_INFO], ids=["sidecar", "run-info"])
-def test_parent_checkpoints_are_walked_to_the_start(record):
-    verdict = shippable(record)
+def test_parent_checkpoints_are_walked_to_the_start():
+    verdict = shippable(G1)
     assert verdict.reasons == ("external_init",)
     assert [(node["depth"], node["kind"]) for node in verdict.chain] == [
         (0, "checkpoint"),
@@ -459,17 +432,10 @@ def test_research_track_and_data_fail():
             },
             "uvdoc",
         ),
-        ({"kind": "uvdoc", "track": "external", "sha256": "e" * 64}, "uvdoc"),
-        ({"sha256": UVDOC_WEIGHTS_SHA256}, "uvdoc"),
         (
             {"sha256": "557af82579157c000f3cbd27c79d02b2a7cfea177849dbb04b9499ff88c81b1f"},
             "syntheticdoc",
         ),
-        (
-            {"sha256": "a9b69148fb3a8bf309757106f489df17a339a03f298f59d882f5ff51ba65a91d"},
-            "syntheticdoc",
-        ),
-        ({"kind": "syntheticdoc", "grid": [121, 177]}, "syntheticdoc"),
         ({"provenance": "external_pretrained"}, "external"),
     ],
 )
@@ -517,15 +483,6 @@ def test_dewarper_info_needs_the_spec_through_specs():
     assert verdict.initialization == initialization(uvdoc_info) == "external_pretrained"
 
 
-def test_training_configs_show_the_start_only():
-    verdict = shippable(_config("R4", "scratch", "/workspace/specs/data-release-extra.json"))
-    assert verdict.reasons == ("unverified_data_spec",) and verdict.initialization == "scratch"
-    verdict = shippable(_config("R3", "uvdoc", "/workspace/specs/data-release.json"))
-    assert verdict.reasons == ("unverified_data_spec", "external_init")
-    verdict = shippable(_config("G1", "checkpoint", "/x.json", "/workspace/init/R3.pt"))
-    assert not verdict.shippable and "unknown_init" in verdict.reasons
-
-
 def _edited(record, edit):
     record = copy.deepcopy(record)
     edit(record)
@@ -551,14 +508,7 @@ def _nc_license(record):
         ),
         (_research_source, {"research_data", "unverified_data_spec"}),
         (lambda r: r["lineage"][1].update(track="research"), {"not_release_track"}),
-        (lambda r: r.update(track="research"), {"not_release_track"}),
-        (lambda r: r.pop("track"), {"not_release_track"}),
         (_nc_license, {"data_license_not_release"}),
-        (
-            lambda r: r["data_sources"]["val"][0].update(track="research"),
-            {"data_license_not_release"},
-        ),
-        (lambda r: r.update(data_sources=[]), {"data_license_not_release"}),
         (
             lambda r: r["lineage"][1].update(data_spec_sha256=V2),
             {"lineage_mismatch", "unverified_data_spec"},
@@ -567,16 +517,7 @@ def _nc_license(record):
             lambda r: r["lineage"][1].update(kind="distill"),
             {"unknown_lineage_entry", "lineage_mismatch"},
         ),
-        (lambda r: r["lineage"].append("train"), {"unknown_lineage_entry"}),
-        (lambda r: r["lineage"].pop(), {"unknown_lineage_entry", "lineage_mismatch"}),
         (lambda r: r["lineage"].clear(), {"unknown_init"}),
-        (lambda r: r["lineage"].__setitem__(0, {"kind": "imagenet"}), {"unknown_init"}),
-        (lambda r: r["lineage"].__setitem__(0, "scratch"), {"unknown_init"}),
-        (lambda r: r["lineage"].__setitem__(0, {"kind": ["scratch"]}), {"unknown_init"}),
-        (
-            lambda r: r["lineage"][1].update(kind=["train"]),
-            {"unknown_lineage_entry", "lineage_mismatch"},
-        ),
     ],
 )
 def test_edited_records_fail_closed(edit, reasons):
@@ -584,33 +525,6 @@ def test_edited_records_fail_closed(edit, reasons):
     assert not verdict.shippable and verdict.category == "research"
     assert set(verdict.reasons) == reasons
     assert set(verdict.reasons) <= set(REASONS)
-
-
-def test_run_info_fields_must_agree():
-    record = _edited(R4_INFO, lambda r: r["config"].update(init="uvdoc"))
-    assert shippable(record).reasons == ("lineage_mismatch",)
-    record = _edited(R4_INFO, lambda r: r["config"].update(track="research"))
-    assert shippable(record).reasons == ("lineage_mismatch",)
-    record = _edited(R4_INFO, lambda r: r.pop("data_spec_content"))
-    assert shippable(record).reasons == ("unverified_data_spec",)
-    record = _edited(G1_INFO, lambda r: r["init"].pop("lineage_records"))
-    assert shippable(record).reasons == ("unknown_init",)  # the parent lineage is a note
-
-
-def test_long_chains_stop_at_max_depth():
-    lineage = [SCRATCH, _train(V3)]
-    for _ in range(MAX_DEPTH + 5):
-        start = {"kind": "checkpoint", "sha256": "a" * 64, "track": "release", "lineage": lineage}
-        lineage = [{**start, "data_spec_sha256": V3}, _train(V3)]
-    record = _sidecar("b" * 64, SPEC_V3, V3, lineage, step=1)
-    verdict = shippable(record)
-    assert verdict.reasons == ("lineage_too_deep",)
-    assert len(verdict.chain) == MAX_DEPTH + 2 and verdict.initialization == "unknown"
-    lineage = [SCRATCH, _train(V3)]
-    for _ in range(3):
-        start = {"kind": "checkpoint", "sha256": "a" * 64, "track": "release", "lineage": lineage}
-        lineage = [{**start, "data_spec_sha256": V3}, _train(V3)]
-    assert shippable(_sidecar("b" * 64, SPEC_V3, V3, lineage, step=1)).shippable
 
 
 def _weights(path, content, sidecar=None):

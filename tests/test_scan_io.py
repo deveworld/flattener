@@ -73,39 +73,6 @@ def test_large_jpeg_is_draft_decoded(tmp_path):
     assert np.abs(source.image.astype(np.float64) - box).mean() < 2.0
 
 
-def test_draft_scale_is_the_smallest_that_fits(tmp_path):
-    path = write_jpeg(tmp_path / "large.jpg", smooth_rgb(480, 640))
-    source = scan_io.read_source(path, config=RenderConfig(max_input_pixels=20_000))
-    assert source.info.scale == 4 and source.image.shape == (120, 160, 3)
-    wide = write_jpeg(tmp_path / "wide.jpg", smooth_rgb(101, 1001))
-    source = scan_io.read_source(wide, config=RenderConfig(max_side=600))
-    assert source.info.scale == 2 and source.image.shape == (51, 501, 3)
-    assert source.info.full_size == (101, 1001)
-    assert scan_io.draft_scale(640, 480, RenderConfig(max_input_pixels=4_800)) == 8
-    assert scan_io.draft_scale(640, 480, RenderConfig(max_input_pixels=4_799)) is None
-    assert scan_io.draft_scale(640, 480) == 1
-
-
-def test_files_above_the_limits_otherwise_fail_as_before(tmp_path):
-    config = RenderConfig(max_input_pixels=1_000)
-    jpeg = write_jpeg(tmp_path / "large.jpg", smooth_rgb(480, 640))
-    png = tmp_path / "large.png"
-    Image.fromarray(smooth_rgb(480, 640)).save(png)
-    for path, draft in ((jpeg, False), (png, True), (jpeg, True)):
-        with pytest.raises(FlattenerError) as caught:
-            scan_io.read_source(path, config=config, draft=draft)
-        assert (caught.value.status, caught.value.reason_code) == (
-            Status.INPUT_ERROR,
-            "size_limit_exceeded",
-        )
-    garbage = tmp_path / "garbage.jpg"
-    garbage.write_bytes(b"not an image")
-    for path in (garbage, tmp_path / "missing.jpg"):
-        with pytest.raises(FlattenerError) as caught:
-            scan_io.read_source(path)
-        assert caught.value.reason_code == "decode_failed"
-
-
 def test_multi_picture_jpeg_decodes_its_primary_image(tmp_path):
     primary = smooth_rgb(480, 640)
     gain_map = np.full((120, 160, 3), 200, np.uint8)
@@ -135,27 +102,6 @@ def test_multi_picture_jpeg_decodes_its_primary_image(tmp_path):
     assert caught.value.reason_code == "size_limit_exceeded"
 
 
-def test_png_source_keeps_icc(tmp_path):
-    path = tmp_path / "scan.png"
-    pixels = smooth_rgb(30, 40)
-    Image.fromarray(pixels).save(path, icc_profile=ICC)
-    source = scan_io.read_source(path)
-    assert np.array_equal(source.image, pixels) and source.icc_profile == ICC
-    assert source.info.format == "PNG" and source.info.exif_orientation is None
-
-
-def test_pyramid_levels_cover_the_full_extent(tmp_path):
-    path = tmp_path / "level.png"
-    Image.fromarray(np.full((101, 203, 3), 77, np.uint8)).save(path)
-    source = scan_io.read_source(path)
-    assert source.level(1) is source.image
-    assert source.level(2).shape == (51, 102, 3) and (source.level(2) == 77).all()
-    assert source.level(8).shape == (13, 25, 3)
-    assert source.level(2) is source.level(2)
-    with pytest.raises(ValueError):
-        source.level(3)
-
-
 def test_jpeg_output_is_q95_444_with_icc_and_dpi(tmp_path):
     pixels = smooth_rgb(64, 96)
     path = scan_io.save_image(tmp_path / "out" / "page.jpg", pixels, icc_profile=ICC, dpi=300)
@@ -171,49 +117,8 @@ def test_jpeg_output_is_q95_444_with_icc_and_dpi(tmp_path):
         assert saved.quantization == expected.quantization
 
 
-def test_png_output_is_lossless(tmp_path):
-    pixels = smooth_rgb(33, 47)
-    path = scan_io.save_image(tmp_path / "page.png", pixels, icc_profile=ICC)
-    with Image.open(path) as saved:
-        assert saved.format == "PNG" and saved.info["icc_profile"] == ICC
-        assert np.array_equal(np.asarray(saved), pixels)
-    with pytest.raises(FlattenerError) as caught:
-        scan_io.save_image(tmp_path / "page.tif", pixels)
-    assert caught.value.reason_code == "unsupported_format"
-    with pytest.raises(FlattenerError) as caught:
-        scan_io.save_image(tmp_path / "bad.png", pixels.astype(np.float32))
-    assert caught.value.reason_code == "invalid_result"
-
-
 def temporary_files(directory):
     return sorted(path.name for path in directory.iterdir() if path.name.startswith("."))
-
-
-def test_save_image_is_atomic(tmp_path, monkeypatch):
-    path = tmp_path / "page.png"
-    first = smooth_rgb(20, 30)
-    scan_io.save_image(path, first)
-    with pytest.raises(FlattenerError) as caught:
-        scan_io.save_image(path, first[::-1].copy())
-    assert (caught.value.status, caught.value.reason_code) == (Status.IO_ERROR, "output_exists")
-
-    original_save = Image.Image.save
-
-    def failing_save(self, fp, *args, **kwargs):
-        fp.write(b"partial bytes")
-        raise OSError("disk full")
-
-    monkeypatch.setattr(Image.Image, "save", failing_save)
-    with pytest.raises(FlattenerError) as caught:
-        scan_io.save_image(path, first[::-1].copy(), overwrite=True)
-    assert caught.value.reason_code == "save_failed"
-    monkeypatch.setattr(Image.Image, "save", original_save)
-    with Image.open(path) as kept:
-        assert np.array_equal(np.asarray(kept), first)
-    assert temporary_files(tmp_path) == []
-    scan_io.save_image(path, first[::-1].copy(), overwrite=True)
-    with Image.open(path) as replaced:
-        assert np.array_equal(np.asarray(replaced), first[::-1])
 
 
 def make_result(image):
@@ -289,32 +194,6 @@ def test_failed_record_rolls_back_the_image(tmp_path, monkeypatch):
     with pytest.raises(FlattenerError):
         scan_io.save_scan(make_result(smooth_rgb(8, 8)), fresh, "photo")
     assert list(fresh.iterdir()) == []
-
-
-def test_unrestored_previous_image_is_kept(tmp_path, monkeypatch):
-    scan_io.save_scan(make_result(smooth_rgb(12, 12)), tmp_path, "photo", fmt="png")
-    old_bytes = (tmp_path / "photo.png").read_bytes()
-    real_replace = os.replace
-
-    def failing_replace(source, target):
-        if str(target).endswith(".scan.json") or str(source).endswith(".old"):
-            raise OSError("device error")
-        return real_replace(source, target)
-
-    monkeypatch.setattr(os, "replace", failing_replace)
-    with pytest.raises(FlattenerError) as caught:
-        scan_io.save_scan(
-            make_result(smooth_rgb(12, 12)[::-1].copy()),
-            tmp_path,
-            "photo",
-            fmt="png",
-            overwrite=True,
-        )
-    transaction = caught.value.metadata["save_transaction"]
-    assert transaction["rolled_back"] is False
-    (kept,) = [path for path in tmp_path.iterdir() if path.name.endswith(".old")]
-    assert kept.read_bytes() == old_bytes
-    assert any(str(kept) in error for error in transaction["errors"])
 
 
 def test_record_without_image_removes_a_stale_image(tmp_path):

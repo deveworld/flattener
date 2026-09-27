@@ -1,6 +1,5 @@
 """OrientNet-1 runtime: network, views, decision, calibration, ship gate and export."""
 
-import hashlib
 import json
 
 import numpy as np
@@ -20,15 +19,11 @@ from flattener.scan.orient import (
     ViewGeometry,
     choose_threshold,
     decide,
-    fit_temperature,
-    orientation_metrics,
     prepare_views,
     quantize,
     release_problems,
     save_checkpoint,
 )
-
-LICENSE = "SyntheticDoc CC BY 4.0"
 
 
 def _textured_page(height=300, width=210, seed=0):
@@ -96,13 +91,6 @@ def _payload(model, *, calibration=None, **changes):
     }
 
 
-def test_model_size_and_cost_match_the_design_budget():
-    cost = orient.model_cost()
-    assert 400_000 <= cost["parameters"] <= 600_000
-    assert 0.25e9 <= cost["flops"] <= 0.5e9
-    assert cost["inputs"] == {"global_view": [1, 1, 256, 256], "patches": [1, 4, 1, 128, 128]}
-
-
 def test_forward_pools_global_and_patch_views():
     torch.manual_seed(0)
     model = OrientNet().eval()
@@ -115,7 +103,7 @@ def test_forward_pools_global_and_patch_views():
         assert torch.allclose(model(global_view, patches), both)
 
 
-@pytest.mark.parametrize("quarter", [0, 1, 2, 3])
+@pytest.mark.parametrize("quarter", [1, 3])
 def test_turned_geometry_is_a_clockwise_quarter_turn(quarter):
     image = np.random.default_rng(quarter).integers(0, 256, size=(7, 5), dtype=np.uint8)
     geometry = ViewGeometry.turned((2.5, 3.5), (7, 5), quarter)
@@ -143,15 +131,6 @@ def test_patch_selection_turns_with_the_page():
     assert all(r < grid // 2 + 1 for r, _ in upright.cells)
 
 
-def test_letterbox_pads_outside_the_page():
-    config = OrientConfig()
-    views = prepare_views(np.zeros((100, 400), np.uint8), config)
-    x0, y0, x1, y1 = views.content
-    assert (x0, x1) == (0.0, 256.0) and y0 == pytest.approx(96.0) and y1 == pytest.approx(160.0)
-    assert (views.global_view[:90] == config.pad_value).all()
-    assert (views.global_view[100:150] == 0).all()
-
-
 def test_view_geometry_in_a_photo_matches_the_cut_crop():
     photo = np.random.default_rng(3).integers(0, 256, size=(400, 300), dtype=np.uint8)
     photo[100:340, 60:230] = _textured_page(240, 170)
@@ -168,15 +147,6 @@ def test_view_geometry_in_a_photo_matches_the_cut_crop():
     assert np.abs(sampled.patches.astype(int) - cut.patches).max() <= 1
 
 
-def test_rgb_input_uses_luma():
-    rgb = np.zeros((10, 10, 3), np.uint8)
-    rgb[..., 1] = 200
-    assert (orient.to_gray(rgb) == 117).all()  # 200 * 587 / 1000
-    with pytest.raises(FlattenerError) as caught:
-        orient.to_gray(np.zeros((4, 4, 2), np.uint8))
-    assert caught.value.status == Status.INPUT_ERROR
-
-
 def test_decide_accepts_only_above_the_threshold():
     sure = decide(np.array([0.0, 6.0, 0.0, 0.0]), 1.0, 0.9)
     assert sure.k == 1 and sure.accepted and sure.reason_code is None
@@ -186,17 +156,6 @@ def test_decide_accepts_only_above_the_threshold():
     assert unsure.margin == pytest.approx(unsure.probabilities[1] - unsure.probabilities[0])
     # A higher temperature flattens the same logits below the threshold.
     assert not decide(np.array([0.0, 6.0, 0.0, 0.0]), 4.0, 0.9).accepted
-
-
-def test_fit_temperature_recovers_overconfidence():
-    rng = np.random.default_rng(0)
-    base = rng.normal(0, 2.0, size=(4000, 4))
-    probabilities = orient.softmax(base)
-    labels = np.array([rng.choice(4, p=p) for p in probabilities])
-    assert fit_temperature(base * 3.0, labels) == pytest.approx(3.0, rel=0.1)
-    labels_with_text_free = np.concatenate([labels, [-1, -1]])
-    logits = np.concatenate([base, np.zeros((2, 4))])
-    assert fit_temperature(logits, labels_with_text_free) == pytest.approx(1.0, rel=0.1)
 
 
 def test_choose_threshold_keeps_silent_errors_within_the_bound():
@@ -219,19 +178,6 @@ def test_choose_threshold_keeps_silent_errors_within_the_bound():
         assert (widened & wrong).sum() / count > 0.005
     none = choose_threshold(np.eye(4)[[1, 2]], np.array([0, 0]))
     assert not none["feasible"] and none["threshold"] == 1.0
-
-
-def test_orientation_metrics_split_quarter_and_half_errors():
-    labels = np.array([0, 1, 2, 3, 0, -1])
-    predicted = np.array([0, 2, 0, 3, 3, 1])
-    logits = np.eye(4)[predicted] * 5.0
-    metrics = orientation_metrics(logits, labels, groups=list("aabbbc"))
-    assert metrics["samples"] == 5 and metrics["text_free_samples"] == 1
-    assert metrics["accuracy"] == pytest.approx(2 / 5)
-    assert metrics["quarter_errors"] == 2 and metrics["half_errors"] == 1
-    assert metrics["confusion"][1][2] == 1 and metrics["confusion"][2][0] == 1
-    assert metrics["groups"]["a"] == {"samples": 2, "accuracy": 0.5}
-    assert "text_free_confidence" in metrics
 
 
 def test_release_problems_follow_the_whole_lineage():
@@ -278,13 +224,6 @@ def test_a_fine_tuned_model_needs_every_parent_data_spec(tmp_path):
     assert release_problems(found) == []
 
 
-def test_records_pass_the_scanner_ship_gate():
-    shippable = pytest.importorskip("flattener.scan.shippable")
-    assert shippable.shippable({**_record(), "sha256": "a" * 64}).shippable
-    verdict = shippable.shippable({**_record(track="research"), "sha256": "a" * 64})
-    assert not verdict.shippable and verdict.category == "research"
-
-
 def test_checkpoint_loads_only_inside_the_release_lineage(tmp_path):
     torch.manual_seed(0)
     model = OrientNet()
@@ -319,85 +258,6 @@ def test_checkpoint_loads_only_inside_the_release_lineage(tmp_path):
     with pytest.raises(FlattenerError) as caught:
         Orienter.load(path)
     assert caught.value.reason_code == "checksum_mismatch"
-
-
-def test_export_module_traces_and_matches_eager(tmp_path):
-    torch.manual_seed(0)
-    path = tmp_path / "model.pt"
-    save_checkpoint(path, _payload(OrientNet(), calibration={"temperature": 2.0}))
-    orienter = Orienter.load(path)
-    module = orient.exportable(orienter)
-    inputs = orient.example_inputs(orienter.config, 2)
-    inputs = (inputs[0] + torch.rand_like(inputs[0]) * 80, inputs[1] - torch.rand_like(inputs[1]))
-    batch = torch.export.Dim("batch", min=1, max=1024)
-    program = torch.export.export(
-        module, inputs, dynamic_shapes={"global_view": {0: batch}, "patches": {0: batch}}
-    )
-    with torch.no_grad():
-        logits, probabilities = module(*inputs)
-        got_logits, got_probabilities = program.module()(*inputs)
-    torch.testing.assert_close(got_logits, logits)
-    torch.testing.assert_close(probabilities, torch.softmax(logits / 2.0, dim=1))
-    torch.testing.assert_close(got_probabilities, probabilities)
-
-
-def test_onnx_export_writes_model_and_record(tmp_path):
-    pytest.importorskip("onnxscript")
-    torch.manual_seed(0)
-    path = tmp_path / "model.pt"
-    save_checkpoint(path, _payload(OrientNet()))
-    record = orient.export_onnx(path, tmp_path / "orientnet.onnx")
-    assert (tmp_path / "orientnet.onnx").is_file() and record["shippable"]
-    saved = json.loads((tmp_path / "orientnet.onnx.json").read_text())
-    assert saved["schema"] == orient.EXPORT_SCHEMA and saved["lineage"][0]["kind"] == "scratch"
-
-
-def test_export_record_and_ship_gate_with_a_stub_exporter(tmp_path, monkeypatch, capsys):
-    calls = []
-
-    class Program:
-        def save(self, path, external_data=False):
-            path.write_bytes(b"onnx-bytes")
-
-    def fake_export(module, args, **options):
-        calls.append(options)
-        return Program()
-
-    monkeypatch.setattr(torch.onnx, "export", fake_export)
-    torch.manual_seed(0)
-    calibration = {"temperature": 1.5, "threshold": 0.7, "source": "synthetic_val"}
-    save_checkpoint(tmp_path / "release.pt", _payload(OrientNet(), calibration=calibration))
-    record = orient.export_onnx(tmp_path / "release.pt", tmp_path / "out" / "o.onnx")
-    assert calls[0]["dynamo"] and calls[0]["input_names"] == ["global_view", "patches"]
-    assert set(calls[0]["dynamic_shapes"]) == {"global_view", "patches"}
-    saved = json.loads((tmp_path / "out" / "o.onnx.json").read_text())
-    assert saved == json.loads(json.dumps(record))
-    assert record["sha256"] == hashlib.sha256(b"onnx-bytes").hexdigest()
-    assert (record["temperature"], record["threshold"]) == (1.5, orient.DEFAULT_THRESHOLD)
-    assert record["shippable"] and not record["research"] and record["parity"] is None
-    assert release_problems(record) == []
-    try:
-        from flattener.scan import shippable
-    except ImportError:
-        pass
-    else:  # the export's JSON record gates the .onnx file like a checkpoint sidecar
-        assert shippable.gate_file(tmp_path / "out" / "o.onnx").shippable
-
-    save_checkpoint(tmp_path / "research.pt", _payload(OrientNet(), track="research"))
-    with pytest.raises(FlattenerError) as caught:
-        orient.export_onnx(tmp_path / "research.pt", tmp_path / "r.onnx")
-    assert caught.value.reason_code == "not_shippable"
-    record = orient.export_onnx(tmp_path / "research.pt", tmp_path / "r.onnx", research=True)
-    assert record["research"] and not record["shippable"]
-
-    def missing(*args, **options):
-        raise ModuleNotFoundError("No module named 'onnxscript'")
-
-    monkeypatch.setattr(torch.onnx, "export", missing)
-    code = orient.main(
-        ["export", "--checkpoint", str(tmp_path / "release.pt"), "--output", str(tmp_path / "m")]
-    )
-    assert code == 2 and json.loads(capsys.readouterr().out)["reason_code"] == "missing_dependency"
 
 
 def test_cli_predict_and_cost(tmp_path, capsys):

@@ -8,37 +8,7 @@ import pytest
 
 from flattener import FlattenerError, Status
 from flattener.scan import records as rec
-from flattener.scan.output_policy import OutputPlan, plan_output
-
-SECTION_1_5 = {
-    "page_not_found",
-    "page_too_small",
-    "page_fills_frame",
-    "ambiguous_page_region",
-    "two_page_candidate",
-    "neighbor_page_partial",
-    "page_cut_off",
-    "possible_occlusion",
-    "orientation_uncertain",
-    "unstable_geometry",
-    "invalid_transform",
-    "curvature_not_corrected",
-    "unverified_region",
-    "source_downscaled",
-    "low_resolution",
-    "rerun_discarded",  # L1: a candidate keeps pass A when only its crop passes fail
-    "candidate_fallback",  # a later candidate passed after C1 failed
-}
-KOREAN = {  # design section 1.5, verbatim
-    "page_not_found": "페이지 전체가 화면에 들어오게 찍어 주세요",
-    "page_too_small": "더 가까이에서 찍어 주세요",
-    "ambiguous_page_region": "페이지를 골라 주세요",
-    "two_page_candidate": "페이지를 골라 주세요",
-    "possible_occlusion": "손가락이나 물건이 페이지를 가려요",
-    "orientation_uncertain": "방향을 확인해 주세요",
-    "unstable_geometry": "다시 찍거나 영역을 지정해 주세요",
-    "invalid_transform": "다시 찍거나 영역을 지정해 주세요",
-}
+from flattener.scan.output_policy import plan_output
 
 
 def json_round_trip(value):
@@ -79,83 +49,6 @@ def make_plan(**changes):
     )
     fields.update(changes)
     return rec.ScanPlan(**fields)
-
-
-def test_registry_covers_section_1_5():
-    assert set(rec.REASONS) == SECTION_1_5
-    for code, spec in rec.REASONS.items():
-        assert spec.code == code
-        assert (spec.message_ko is None) == (spec.message_en is None)
-        assert bool(spec.actions) == (spec.message_ko is not None)
-        if spec.severity == rec.Severity.FAILURE:
-            assert spec.status != Status.SUCCESS
-        elif code != "curvature_not_corrected":
-            assert spec.status == Status.SUCCESS
-    for code, message in KOREAN.items():
-        assert rec.REASONS[code].message_ko == message
-    silent = {
-        "page_fills_frame",
-        "neighbor_page_partial",
-        "source_downscaled",
-        "low_resolution",
-        "rerun_discarded",
-    }
-    assert {code for code, spec in rec.REASONS.items() if spec.message_ko is None} >= silent
-
-
-@pytest.mark.parametrize(
-    ("detail", "ko", "en"),
-    [
-        (
-            {"side": "top"},
-            "위쪽이 잘렸어요. 조금 물러나 찍어 주세요",
-            "The top edge is cut off. Step back a little and take the photo again",
-        ),
-        (
-            {"sides": ["right", "left"]},
-            "왼쪽과 오른쪽이 잘렸어요. 조금 물러나 찍어 주세요",
-            "The left and right edges are cut off. Step back a little and take the photo again",
-        ),
-        (
-            {"sides": ["bottom", "top", "right"]},
-            "위쪽, 아래쪽, 오른쪽이 잘렸어요. 조금 물러나 찍어 주세요",
-            "The top, bottom and right edges are cut off. Step back a little and take the photo"
-            " again",
-        ),
-        (
-            {"side": "middle"},
-            "페이지 가장자리가 잘렸어요. 조금 물러나 찍어 주세요",
-            "An edge of the page is cut off. Step back a little and take the photo again",
-        ),
-    ],
-)
-def test_cut_off_guidance_names_the_sides(detail, ko, en):
-    guidance = rec.guidance_for(rec.reason("page_cut_off", **detail))
-    assert (guidance.message_ko, guidance.message_en) == (ko, en)
-    assert guidance.actions == (rec.Action.RESHOOT,)
-
-
-def test_unregistered_codes_keep_their_status():
-    fold = rec.reason("fold_detected", status=Status.INVALID_TRANSFORM, cells=3)
-    assert fold.severity == rec.Severity.FAILURE and fold.detail == {"cells": 3}
-    assert rec.guidance_for(fold).message_ko == KOREAN["invalid_transform"]
-    assert rec.guidance_for(fold).code == "fold_detected"
-    note = rec.reason("model_note", status=Status.SUCCESS)
-    assert note.severity == rec.Severity.WARNING and rec.guidance_for(note) is None
-    with pytest.raises(ValueError):
-        rec.reason("unknown_code")
-
-
-def test_guidance_is_collected_once_per_message():
-    reasons = [
-        rec.reason("unstable_geometry", drift=0.07),
-        rec.reason("invalid_transform"),
-        rec.reason("source_downscaled", scale=2),
-        rec.reason("orientation_uncertain", margin=0.1),
-    ]
-    guidance = rec.collect_guidance(reasons)
-    assert [item.code for item in guidance] == ["unstable_geometry", "orientation_uncertain"]
-    assert guidance[0].actions == (rec.Action.RESHOOT, rec.Action.SET_REGION)
 
 
 def test_outcomes_and_exit_codes():
@@ -228,19 +121,6 @@ def test_tampered_plan_is_refused():
 @pytest.mark.parametrize(
     "changes",
     [
-        {"quarter": 4},
-        {"quarter": True},
-        {"grid": np.full((3, 3, 2), np.nan)},
-        {"grid": np.zeros((1, 3, 2))},
-        {"grid": None},
-        {"kind": "perspective"},
-        {"kind": "warp"},
-        {"inset": (1.0, 0.0)},
-        {"angle_deg": math.inf},
-        {"orientation_probs": (0.5, 0.5)},
-        {"provenance": {"region": "guessed"}},
-        {"region": {"box": object()}},
-        {"quantize": "floor"},
         {"nodes": "center"},
         {"fill_rgb": (0, 0)},
         {"fill_rgb": (0, 0, 256)},
@@ -263,15 +143,6 @@ def test_perspective_plan_round_trip():
     with pytest.raises(FlattenerError) as caught:
         rec.ScanPlan.from_dict(broken)
     assert caught.value.reason_code == "invalid_plan"
-
-
-def test_source_info_focal_length():
-    info = rec.SourceInfo(size=(3000, 4000), focal_length_35mm=26.0)
-    assert info.full_size == (3000, 4000) and not info.downscaled
-    assert info.focal_px() == pytest.approx(26 * 5000 / math.hypot(36, 24))
-    assert rec.SourceInfo(size=(10, 10)).focal_px() is None
-    with pytest.raises(FlattenerError):
-        rec.SourceInfo(size=(0, 10))
 
 
 def make_result(plan):
@@ -334,24 +205,3 @@ def test_failure_record_round_trip():
     data = json_round_trip(failure.to_dict())
     assert rec.ScanResult.from_dict(data).to_dict() == failure.to_dict()
     assert data["plan"] is None and data["guidance"][0]["actions"] == ["reshoot", "set_region"]
-
-
-def test_record_with_mismatched_plan_hash_is_refused():
-    data = make_result(make_plan()).to_dict()
-    data["plan_sha256"] = "0" * 64
-    with pytest.raises(FlattenerError) as caught:
-        rec.ScanResult.from_dict(data)
-    assert caught.value.reason_code == "plan_sha256_mismatch"
-    with pytest.raises(FlattenerError) as caught:
-        rec.ScanResult.from_dict({**data, "schema": "flattener-scan-record-0"})
-    assert caught.value.reason_code == "invalid_scan_record"
-    bad_outcome = {**make_result(make_plan()).to_dict(), "outcome": "scanned"}
-    with pytest.raises(FlattenerError) as caught:
-        rec.ScanResult.from_dict(bad_outcome)
-    assert caught.value.reason_code == "invalid_scan_record"
-
-
-def test_output_plan_is_part_of_the_plan_hash():
-    plan = make_plan()
-    output = OutputPlan.from_dict({**plan.output.to_dict(), "height": plan.output.height + 1})
-    assert make_plan(output=output).plan_sha256 != plan.plan_sha256

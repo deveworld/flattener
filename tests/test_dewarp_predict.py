@@ -1,5 +1,6 @@
 """Dewarp prediction: grid conventions, checkpoint loading, output quantization, the
-grid-level inset, crop-and-rerun with deskew, and the DocUNet batch CLI."""
+grid-level inset, crop-and-rerun with deskew, the DocUNet batch CLI and batches run by
+another pipeline."""
 
 import json
 import os
@@ -24,6 +25,8 @@ from flattener.dewarp.coords import (
 )
 from flattener.dewarp.model import DewarpModelConfig, UVDocNet
 from flattener.dewarp.predict import (
+    DEFAULT_PIPELINE,
+    BatchInput,
     Dewarper,
     canvas_size,
     canvas_to_source,
@@ -36,6 +39,8 @@ from flattener.dewarp.predict import (
     predict_grid,
     quantize_rgb,
     rectify,
+    rectify_batch,
+    rerun_box,
     rerun_grid,
     resolve_inset,
     sample_rgb,
@@ -533,3 +538,139 @@ def test_rectify_renders_the_composed_map_from_the_original_image(convention):
     )
     expected = predict.render_unchecked(image, truth, (255, 255, 255))
     assert np.abs(result.image.astype(int) - expected).max() <= 1
+
+
+# Rerun boxes and rectify_batch with another pipeline
+
+
+class Tilted(torch.nn.Module):
+    """A seeded UVDocNet whose grid is added to a page turned by ``angle`` at 70% of the
+    view, so crop passes and deskew have something to do (a bare random network predicts
+    a collapsed grid)."""
+
+    def __init__(self, config, seed=0, angle=8.0):
+        super().__init__()
+        torch.manual_seed(seed)
+        self.net = UVDocNet(config).eval()
+        gh, gw = config.grid_size
+        nodes = np.stack(np.meshgrid(edge_positions(gw), edge_positions(gh)), -1) * 0.7
+        theta = np.radians(angle)
+        rotation = np.array([[np.cos(theta), -np.sin(theta)], [np.sin(theta), np.cos(theta)]])
+        base = (nodes @ rotation.T).transpose(2, 0, 1).astype(np.float32)
+        self.register_buffer("base", torch.from_numpy(base)[None])
+
+    def forward(self, x):
+        grid, grid3d = self.net(x)
+        return self.base + 0.5 * grid, grid3d
+
+
+def _tilted_dewarper(config=None, seed=0, sha="seeded-uvdocnet"):
+    config = config or DewarpModelConfig(input_size=(96, 72), grid_size=(9, 7), num_filter=4)
+    info = {"sha256": sha, "kind": "checkpoint", "step": 1, "track": "release"}
+    return Dewarper(Tilted(config, seed).eval(), config, torch.device("cpu"), info)
+
+
+def _image(seed=3, size=(150, 200)):
+    return np.random.default_rng(seed).integers(0, 256, (*size, 3), dtype=np.uint8)
+
+
+def test_rerun_box_limits_and_skips():
+    size = (200, 200)  # square: turning normalized values turns source pixels alike
+    theta = np.radians(60.0)
+    rotation = np.array([[np.cos(theta), -np.sin(theta)], [np.sin(theta), np.cos(theta)]])
+    nodes = np.stack(np.meshgrid(edge_positions(7), edge_positions(9)), -1) * 0.4 @ rotation.T
+    box, angle, record = rerun_box(nodes, size, deskew=True)
+    assert angle == 0.0 and record["deskew_skipped"] == "angle_above_limit"
+    box, angle, record = rerun_box(nodes, size, deskew=True, max_angle_deg=None)
+    assert record["deskew_skipped"] is None and angle == pytest.approx(60.0)
+    box, angle, record = rerun_box(nodes, size)
+    assert angle == 0.0 and record["angle_deg"] is None and box is not None
+    point = np.zeros((9, 7, 2))
+    assert (
+        rerun_box(point, size)[0] is None and rerun_box(point, size)[2]["skipped"] == "empty_crop"
+    )
+    broken = nodes.copy()
+    broken[0, 0] = np.nan
+    assert rerun_box(broken, size)[2]["skipped"] == "non_finite_outline"
+
+
+def _inputs(images):
+    return [
+        BatchInput(f"{index}.png", f"{index} copy.png", lambda image=image: image)
+        for index, image in enumerate(images)
+    ]
+
+
+def test_the_batch_writes_what_rectify_renders(tmp_path):
+    rerun, deskew = 1, True
+    dewarper = _tilted_dewarper()
+    images = [_image(seed) for seed in (5, 6, 7)]
+    report = rectify_batch(
+        dewarper, _inputs(images), tmp_path, force_render=True, rerun=rerun, deskew=deskew
+    )
+    assert report["pipeline"] == DEFAULT_PIPELINE
+    assert report["evidence"]["pipeline"] == DEFAULT_PIPELINE
+    for index, image in enumerate(images):
+        result = rectify(
+            dewarper,
+            image,
+            render_config=RenderConfig(on_error="return"),
+            allow_unchecked=True,
+            rerun=rerun,
+            deskew=deskew,
+        )
+        with Image.open(tmp_path / f"{index}.png") as written:
+            assert np.asarray(written).tobytes() == result.image.tobytes()
+        item = report["items"][index]
+        assert item["status"] == str(result.status)
+        assert item["crops"] == json.loads(json.dumps(result.metadata["dewarp"]["crops"]))
+
+
+def _pipeline_rectifier(dewarper, calls):
+    def rectify_one(image, output_size):
+        calls.append(output_size)
+        result = rectify(
+            dewarper, image, output_size, render_config=RenderConfig(on_error="return")
+        )
+        result.metadata["batch_item"] = {"outcome": "rectified", "status": "ignored"}
+        return result
+
+    return rectify_one
+
+
+def test_predictions_of_another_pipeline_are_refused(tmp_path):
+    dewarper = _tilted_dewarper()
+    inputs = _inputs([_image(8), _image(9)])
+    rectify_batch(dewarper, inputs, tmp_path, force_render=True)
+    calls = []
+    other = {"name": "flattener.scan", "passes": 1}
+    with pytest.raises(FlattenerError, match="another pipeline") as error:
+        rectify_batch(
+            dewarper,
+            inputs,
+            tmp_path,
+            force_render=True,
+            rectifier=_pipeline_rectifier(dewarper, calls),
+            pipeline=other,
+        )
+    assert error.value.status == Status.IO_ERROR and error.value.reason_code == "output_exists"
+    assert calls == []
+    report = rectify_batch(
+        dewarper,
+        inputs,
+        tmp_path,
+        overwrite=True,
+        rectifier=_pipeline_rectifier(dewarper, calls),
+        pipeline=other,
+    )
+    assert len(calls) == 2 and report["pipeline"] == other
+    assert [item["outcome"] for item in report["items"]] == ["rectified", "rectified"]
+    assert all(item["status"] != "ignored" for item in report["items"])
+    # The same pipeline keeps its outputs; the default pipeline is now the other one.
+    again = rectify_batch(
+        dewarper, inputs, tmp_path, rectifier=_pipeline_rectifier(dewarper, calls), pipeline=other
+    )
+    assert len(calls) == 2 and again["counts"]["kept"] == 2
+    with pytest.raises(FlattenerError, match="another pipeline"):
+        rectify_batch(dewarper, inputs, tmp_path)
+    assert prediction_record(tmp_path)["pipeline"] == other
