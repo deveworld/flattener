@@ -104,6 +104,11 @@ def _no_rerun() -> dict[str, Any]:
     return {"passes": 0, "deskew": False, **dict.fromkeys(keys)}
 
 
+def _rectify_pipeline() -> dict[str, Any]:
+    """``flattener.dewarp.predict.DEFAULT_PIPELINE``: predictions made by ``rectify``."""
+    return {"name": "rectify"}
+
+
 def prediction_record(predictions_dir: str | os.PathLike[str]) -> dict[str, Any] | None:
     """What ``flattener.dewarp.predict`` recorded about a predictions directory.
 
@@ -114,7 +119,9 @@ def prediction_record(predictions_dir: str | os.PathLike[str]) -> dict[str, Any]
     current-format record without the field predates the option and has none; ``None``
     for other formats), ``rerun`` (the recorded crop-and-rerun settings,
     ``flattener.dewarp.predict.rerun_record``; a current-format record without the field
-    holds whole-image predictions; ``None`` for other formats), ``complete`` (whether the
+    holds whole-image predictions; ``None`` for other formats), ``pipeline`` (the
+    recorded pipeline identity; a current-format record without the field was made by
+    ``rectify``; ``None`` for other formats), ``complete`` (whether the
     batch finished; ``None`` for records that predate the flag), ``outputs`` (the recorded
     output file names) and ``failures``: output file name -> status, reason and whether a
     forced image was written. Items of the older ``flattener-dewarp-docunet-1`` format
@@ -167,6 +174,9 @@ def prediction_record(predictions_dir: str | os.PathLike[str]) -> dict[str, Any]
         "quantize": payload.get("quantize", "round" if schema == PREDICTIONS_SCHEMA else None),
         "inset": payload.get("inset", _no_inset() if schema == PREDICTIONS_SCHEMA else None),
         "rerun": payload.get("rerun", _no_rerun() if schema == PREDICTIONS_SCHEMA else None),
+        "pipeline": payload.get(
+            "pipeline", _rectify_pipeline() if schema == PREDICTIONS_SCHEMA else None
+        ),
         "inputs": payload.get("inputs"),
         "complete": payload.get("complete") if schema == PREDICTIONS_SCHEMA else None,
         "items": len(items),

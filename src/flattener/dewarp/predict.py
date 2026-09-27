@@ -50,6 +50,11 @@ settings are recorded as ``rerun`` (``rerun_record``) in the printed JSON,
 ``predictions.json`` and their evidence block, and every pass (crop box, angle, whether
 it turned the crop or why it was skipped) as ``crops``; an output of one setting is never
 kept by a run with another.
+
+``rectify_batch`` also takes another pipeline (``rectifier``, for example the scanner
+of ``flattener.scan``) with its identity record (``pipeline``, recorded in
+``predictions.json`` and the evidence block). A directory that holds predictions of
+another pipeline is refused, as one of other weights is.
 """
 
 from __future__ import annotations
@@ -100,6 +105,7 @@ DOCUNET_INPUT = re.compile(r"^(\d+)_(\d+) copy\.png$")
 PREDICTIONS_SCHEMA = "flattener-dewarp-predictions-2"
 QUANTIZE_MODES = ("round", "truncate")  # round: flattener.render; truncate: paper protocol
 EXIT_FAILED = 1  # some image failed its checks (also when it was force-rendered)
+DEFAULT_PIPELINE: dict[str, Any] = {"name": "rectify"}  # rectify_batch without a rectifier
 
 # Grid-level insets (ex, ey) in normalized output units: output coordinate u in [-1, 1]
 # shows the page position (1 - e) u of the predicted grid, so each side moves in by
@@ -549,26 +555,22 @@ def canvas_input(
     )
 
 
-def crop_pass(
-    dewarper: Dewarper, image: NDArray[np.uint8], grid: NDArray, deskew: bool = False
-) -> tuple[NDArray[np.float64], dict[str, Any]]:
-    """One rerun pass on ``image`` from ``grid`` (flattener values of ``image``): the new
-    grid in flattener values of ``image`` and the pass record.
+def rerun_box(
+    grid: NDArray,
+    source_size: tuple[int, int],
+    *,
+    deskew: bool = False,
+    max_angle_deg: float | None = DESKEW_MAX_DEG,
+) -> tuple[tuple[int, int, int, int] | None, float, dict[str, Any]]:
+    """Crop box and angle of the next rerun pass from ``grid`` (flattener values of a
+    ``source_size`` image), and the pass record so far.
 
-    The crop is ``crop_box`` of the grid's outline (``outline_points``). Without a turn,
-    the model sees the crop resized like a whole image (``predict_grid``). With
-    ``deskew`` and a usable angle of at most ``DESKEW_MAX_DEG`` (``estimate_page_angle``),
-    it sees the crop turned upright on a canvas that keeps all of it (``canvas_input``).
-    The prediction is composed with ``canvas_to_source``. A pass whose outline is not
-    finite (``non_finite_outline``) or whose box is under ``MIN_CROP_PIXELS`` on an axis
-    (``empty_crop``) keeps ``grid``.
-
-    The record holds ``outline_box`` (the outline's bounds, source pixels), ``box``
-    (left, top, right, bottom), ``angle_deg`` (the estimate; ``None`` without deskew or
-    when unusable), ``deskew_skipped`` (why the crop was not turned: the estimate's
-    reason or ``angle_above_limit``), ``rotated``, ``canvas_size`` (height, width in
-    source pixels) and ``skipped`` (why the pass kept ``grid``)."""
-    source_size = image.shape[:2]
+    The box is ``crop_box`` of the grid's outline (``outline_points``); it is ``None``
+    when the outline is not finite (``skipped: non_finite_outline``) or the box is under
+    ``MIN_CROP_PIXELS`` on an axis (``skipped: empty_crop``). With ``deskew`` the angle is
+    ``estimate_page_angle`` when that estimate is usable and at most ``max_angle_deg``
+    either way (``None``: no limit); otherwise it is 0 and ``deskew_skipped`` says why
+    (the estimate's reason or ``angle_above_limit``). See ``crop_pass`` for the record."""
     record: dict[str, Any] = {
         "outline_box": None,
         "box": None,
@@ -581,32 +583,74 @@ def crop_pass(
     outline = outline_points(grid, source_size)
     if not np.isfinite(outline).all():
         record["skipped"] = "non_finite_outline"
-        return np.asarray(grid, dtype=np.float64), record
+        return None, 0.0, record
     record["outline_box"] = [*outline.min(axis=0).tolist(), *outline.max(axis=0).tolist()]
     box = crop_box(outline, source_size)
     left, top, right, bottom = box
     record["box"] = list(box)
     if min(right - left, bottom - top) < MIN_CROP_PIXELS:
         record["skipped"] = "empty_crop"
-        return np.asarray(grid, dtype=np.float64), record
+        return None, 0.0, record
     angle = 0.0
     if deskew:
         estimate, reason = estimate_page_angle(grid, source_size)
-        if reason is None and abs(estimate) > DESKEW_MAX_DEG:
+        if reason is None and max_angle_deg is not None and abs(estimate) > max_angle_deg:
             reason = "angle_above_limit"
         record.update(angle_deg=estimate, deskew_skipped=reason)
         angle = estimate if reason is None else 0.0
+    return box, angle, record
+
+
+def crop_pass_box(
+    dewarper: Dewarper,
+    image: NDArray[np.uint8],
+    box: tuple[int, int, int, int],
+    angle_deg: float = 0.0,
+) -> tuple[NDArray[np.float64], dict[str, Any]]:
+    """One pass on the whole-pixel crop ``box`` (left, top, right, bottom) of ``image``:
+    the predicted grid in flattener values of ``image`` and ``{"rotated", "canvas_size"}``.
+
+    For no angle the model sees the crop resized like a whole image (``predict_grid``).
+    Otherwise it sees the crop turned by ``-angle_deg`` on the canvas that keeps all of it
+    (``canvas_size``, ``canvas_input``). The prediction is placed in the source with
+    ``canvas_to_source``. Angles past 45 degrees either way turn the canvas as they are;
+    ``flattener.scan.placement`` places exact quarter turns."""
+    left, top, right, bottom = box
     crop = image[top:bottom, left:right]
-    canvas = canvas_size(box, angle)
-    if angle == 0.0:
+    canvas = canvas_size(box, angle_deg)
+    if angle_deg == 0.0:
         raw = predict_grid(dewarper, crop)
     else:
-        raw = predict_input(dewarper, canvas_input(dewarper, crop, angle, canvas))
-        record["rotated"] = True
-    record["canvas_size"] = list(canvas)
+        raw = predict_input(dewarper, canvas_input(dewarper, crop, angle_deg, canvas))
     local = _flattener_values(raw, dewarper.config.grid_convention, canvas)
-    matrix, offset = canvas_to_source(box, angle, canvas, source_size)
+    matrix, offset = canvas_to_source(box, angle_deg, canvas, image.shape[:2])
+    record = {"rotated": angle_deg != 0.0, "canvas_size": list(canvas)}
     return local @ matrix.T + offset, record
+
+
+def crop_pass(
+    dewarper: Dewarper, image: NDArray[np.uint8], grid: NDArray, deskew: bool = False
+) -> tuple[NDArray[np.float64], dict[str, Any]]:
+    """One rerun pass on ``image`` from ``grid`` (flattener values of ``image``): the new
+    grid in flattener values of ``image`` and the pass record.
+
+    The box and angle come from ``rerun_box`` (the outline's ``crop_box``; with
+    ``deskew`` a usable ``estimate_page_angle`` of at most ``DESKEW_MAX_DEG``), and the
+    prediction from ``crop_pass_box``. A pass whose outline is not finite
+    (``non_finite_outline``) or whose box is under ``MIN_CROP_PIXELS`` on an axis
+    (``empty_crop``) keeps ``grid``.
+
+    The record holds ``outline_box`` (the outline's bounds, source pixels), ``box``
+    (left, top, right, bottom), ``angle_deg`` (the estimate; ``None`` without deskew or
+    when unusable), ``deskew_skipped`` (why the crop was not turned: the estimate's
+    reason or ``angle_above_limit``), ``rotated``, ``canvas_size`` (height, width in
+    source pixels) and ``skipped`` (why the pass kept ``grid``)."""
+    box, angle, record = rerun_box(grid, image.shape[:2], deskew=deskew)
+    if box is None:
+        return np.asarray(grid, dtype=np.float64), record
+    composed, placed = crop_pass_box(dewarper, image, box, angle)
+    record.update(placed)
+    return composed, record
 
 
 def rerun_grid(
@@ -766,6 +810,10 @@ def load_rgb(path: str | Path) -> NDArray[np.uint8]:
         return np.array(ImageOps.exif_transpose(image).convert("RGB"))
 
 
+# rectifier(image, output_size) -> RenderResult: one image of a batch through a pipeline.
+Rectifier = Callable[[NDArray[np.uint8], "tuple[int, int] | None"], RenderResult]
+
+
 @dataclass(frozen=True, slots=True)
 class BatchInput:
     """One image of a batch: output file name, input label and a loader."""
@@ -826,21 +874,16 @@ def _still_matches(
 
 
 def _batch_item(
-    dewarper: Dewarper,
     task: BatchInput,
     target: Path,
     previous: dict[str, Any] | None,
-    config: RenderConfig,
     force_render: bool,
-    quantize: str,
-    inset: Inset = None,
-    rerun: int = 0,
-    deskew: bool = False,
+    rectify_one: Rectifier,
 ) -> dict[str, Any]:
     """Keep, render or refuse one input; the file at ``target`` always matches the item.
 
-    ``previous`` comes only from a record of the same render settings, quantization,
-    inset and rerun settings."""
+    ``previous`` comes only from a record of the same pipeline, render settings,
+    quantization, inset and rerun settings. ``rectify_one`` renders the image."""
     item: dict[str, Any] = {"input": task.source, "output": task.output}
     try:
         image = task.load()
@@ -848,17 +891,7 @@ def _batch_item(
         if previous is not None and target.is_file():
             if _still_matches(previous, task, image, digest, force_render):
                 return {**previous, "action": "kept"}
-        result = rectify(
-            dewarper,
-            image,
-            task.output_size,
-            render_config=config,
-            allow_unchecked=force_render,
-            quantize=quantize,
-            inset=inset,
-            rerun=rerun,
-            deskew=deskew,
-        )
+        result = rectify_one(image, task.output_size)
     except (FlattenerError, OSError) as error:
         target.unlink(missing_ok=True)  # an older image no longer matches this input
         status = error.status if isinstance(error, FlattenerError) else Status.IO_ERROR
@@ -872,6 +905,9 @@ def _batch_item(
         )
     else:
         target.unlink(missing_ok=True)  # an older image no longer matches the record
+    dewarp = result.metadata.get("dewarp") or {}
+    size = task.output_size
+    output_size = dewarp.get("output_size") or list(image.shape[:2] if size is None else size)
     item.update(
         action="written" if result.image is not None else "not_written",
         status=str(result.status),
@@ -879,25 +915,57 @@ def _batch_item(
         forced=bool(result.metadata.get("forced_render")),
         size=list(image.shape[:2]),
         input_sha256=digest,
-        output_size=result.metadata["dewarp"]["output_size"],
+        output_size=list(output_size),
         validation=_validation_summary(result),
-        crops=result.metadata["dewarp"]["crops"],
-        seconds=result.metadata["dewarp"]["seconds"],
+        crops=dewarp.get("crops", []),
+        seconds=dewarp.get("seconds"),
     )
+    extra = result.metadata.get("batch_item")
+    if isinstance(extra, dict):
+        item.update({key: value for key, value in extra.items() if key not in item})
     return item
 
 
 def prediction_evidence(
-    dewarper: Dewarper, quantize: str, inset: Inset = None, rerun: int = 0, deskew: bool = False
+    dewarper: Dewarper,
+    quantize: str,
+    inset: Inset = None,
+    rerun: int = 0,
+    deskew: bool = False,
+    pipeline: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """The evidence block of a prediction record, with its output quantization, inset and
-    rerun settings."""
+    """The evidence block of a prediction record, with its output quantization, inset,
+    rerun settings and pipeline."""
     return {
         **evidence("predictions", dewarper.info),
         "quantize": quantize,
         "inset": inset_record(inset),
         "rerun": rerun_record(rerun, deskew),
+        "pipeline": pipeline_record(pipeline),
     }
+
+
+def pipeline_record(pipeline: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The pipeline identity of a predictions record: ``DEFAULT_PIPELINE`` (``rectify``)
+    for ``None``, else a JSON dict with a non-empty string ``name`` and the settings
+    that make its outputs differ from other pipelines' (checked for JSON only)."""
+    if pipeline is None:
+        return dict(DEFAULT_PIPELINE)
+    if not isinstance(pipeline, dict) or not isinstance(pipeline.get("name"), str):
+        raise _rerun_error("pipeline must be a dict with a string 'name'")
+    if not pipeline["name"]:
+        raise _rerun_error("pipeline name must not be empty")
+    try:
+        return _plain(pipeline)
+    except (TypeError, ValueError) as error:
+        raise _rerun_error(f"pipeline must be JSON data: {error}") from None
+
+
+def recorded_pipeline(record: dict[str, Any] | None) -> dict[str, Any]:
+    """The pipeline of a predictions record; a record without one predates the option
+    and was made by ``rectify``."""
+    value = record.get("pipeline") if isinstance(record, dict) else None
+    return value if isinstance(value, dict) else dict(DEFAULT_PIPELINE)
 
 
 def rectify_batch(
@@ -913,26 +981,41 @@ def rectify_batch(
     inset: Inset = None,
     rerun: int = 0,
     deskew: bool = False,
+    rectifier: Rectifier | None = None,
+    pipeline: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Rectify ``inputs`` into ``output_dir`` and record every item in ``predictions.json``.
 
     Each item records the check status and reason code and the sha256 of the decoded
     input. An image that fails a check is written only with ``force_render``
     (``forced: true``). Without ``overwrite``, an output that ``predictions.json`` lists
-    as written is kept with its recorded status when the weights, render settings,
-    quantization, inset, rerun settings, input label, input pixels and sizes are unchanged
-    (a forced image only by a forced run); every other input is rendered again. A record
-    without ``quantize`` predates the option and holds rounded images; one without
-    ``inset`` holds images without inset; one without ``rerun`` holds whole-image
-    predictions. A directory holding predictions of other weights or of an older format,
-    or outputs without a ``predictions.json``, is refused. The report names the current
-    weights, quantization, inset and rerun settings before any image is written, and says
+    as written is kept with its recorded status when the weights, pipeline, render
+    settings, quantization, inset, rerun settings, input label, input pixels and sizes are
+    unchanged (a forced image only by a forced run); every other input is rendered again.
+    A record without ``quantize`` predates the option and holds rounded images; one
+    without ``inset`` holds images without inset; one without ``rerun`` holds whole-image
+    predictions; one without ``pipeline`` was made by ``rectify``. A directory holding
+    predictions of other weights, of another pipeline or of an older format, or outputs
+    without a ``predictions.json``, is refused. The report names the current weights,
+    pipeline, quantization, inset and rerun settings before any image is written, and says
     ``complete: false`` until the last input is done; images are written atomically. Each
     item records its crop passes (``crops``, see ``crop_pass``).
+
+    ``rectifier(image, output_size)`` replaces ``rectify`` for another pipeline and needs
+    a ``pipeline`` record (``pipeline_record``); it returns a ``RenderResult`` that
+    follows the batch rules itself: no image for a failed check unless it forces one
+    (``metadata["forced_render"]``). ``metadata["dewarp"]`` may give ``output_size``,
+    ``crops`` and ``seconds``, and ``metadata["batch_item"]`` extra item fields. The
+    settings arguments are then only recorded and should describe that pipeline.
     """
     check_quantize(quantize)
     inset_info = inset_record(inset)
     rerun_info = rerun_record(rerun, deskew)
+    if rectifier is not None and pipeline is None:
+        raise _rerun_error("a rectifier needs a pipeline record")
+    if rectifier is None and pipeline is not None and pipeline_record(pipeline) != DEFAULT_PIPELINE:
+        raise _rerun_error("a pipeline other than rectify needs its rectifier")
+    pipeline_info = pipeline_record(pipeline)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     report_path = output_dir / "predictions.json"
@@ -951,6 +1034,13 @@ def rectify_batch(
                 "output_exists",
                 f"{report_path} has an older format; use --overwrite",
             )
+        if recorded_pipeline(previous) != pipeline_info:
+            raise FlattenerError(
+                Status.IO_ERROR,
+                "output_exists",
+                f"{output_dir} holds predictions of another pipeline "
+                f"({recorded_pipeline(previous).get('name')!r}); use --overwrite",
+            )
         same_quantize = previous.get("quantize", "round") == quantize
         same_inset = recorded_inset(previous.get("inset")) == resolve_inset(inset)
         same_rerun = recorded_rerun(previous.get("rerun")) == rerun_info
@@ -963,16 +1053,32 @@ def rectify_batch(
             "output_exists",
             f"{output_dir} holds outputs without predictions.json; use --overwrite",
         )
+    if rectifier is None:
+
+        def rectifier(image: NDArray[np.uint8], size: tuple[int, int] | None) -> RenderResult:
+            return rectify(
+                dewarper,
+                image,
+                size,
+                render_config=config,
+                allow_unchecked=force_render,
+                quantize=quantize,
+                inset=inset,
+                rerun=rerun,
+                deskew=deskew,
+            )
+
     report = {
         "schema": PREDICTIONS_SCHEMA,
         "created_utc": utc_now(),
         "model": dewarper.info,
-        "evidence": prediction_evidence(dewarper, quantize, inset, rerun, deskew),
+        "evidence": prediction_evidence(dewarper, quantize, inset, rerun, deskew, pipeline),
         **(fields or {}),
         "force_render": force_render,
         "quantize": quantize,
         "inset": inset_info,
         "rerun": rerun_info,
+        "pipeline": pipeline_info,
         "render_config": asdict(config),
         "complete": False,
         "counts": _count([]),
@@ -982,9 +1088,7 @@ def rectify_batch(
     for task in inputs:
         target = output_dir / task.output
         previous = previous_items.get(task.output)
-        item = _batch_item(
-            dewarper, task, target, previous, config, force_render, quantize, inset, rerun, deskew
-        )
+        item = _batch_item(task, target, previous, force_render, rectifier)
         report["items"].append(item)
         report["counts"] = _count(report["items"])
         write_json(report_path, report)
