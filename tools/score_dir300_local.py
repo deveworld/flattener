@@ -12,7 +12,7 @@ Steps:
      CACHE/dir300/pred-Q/RUN. Images that predictions.json lists for the same weights,
      quantization and inputs are kept.
   2. ``flattener.benchmark dir300`` scores them (MS-SSIM, LD, AD, plain means over the
-     300 pairs) into outputs/dewarp-runs/RUN/dir300.json, or dir300-Q.json for
+     300 pairs) into CACHE/scores/RUN/dir300.json, or dir300-Q.json for
      Q=truncate. An existing report is kept when its prediction hashes, quantization and
      SIFT-flow sources match; a report of other images or settings stops the script, and
      --overwrite replaces it.
@@ -21,7 +21,7 @@ Steps:
      Tesseract executable and eng.traineddata also match. Its numbers are comparable
      only when the report says so (see flattener.benchmark.ocr).
 
-outputs/dewarp-runs/RUN/ also gets dir300-predictions.json or dir300-predictions-Q.json
+CACHE/scores/RUN/ also gets dir300-predictions.json or dir300-predictions-Q.json
 (the prediction record, no images). Images (about 9 MB each) stay under CACHE:
 $FLATTENER_CACHE_DIR, default ~/.cache/flattener.
 
@@ -67,7 +67,7 @@ def build_parser() -> argparse.ArgumentParser:
         "runs/my-run/checkpoints/step_00046880.pt my-run --quantize truncate",
     )
     parser.add_argument("checkpoint", type=Path, help="dewarp checkpoint or UVDoc best_model.pkl")
-    parser.add_argument("run", help="run name: reports go to outputs/dewarp-runs/RUN/")
+    parser.add_argument("run", help=f"run name: reports go to {local.RUNS_DIR}/RUN/")
     parser.add_argument("--device", default="cpu", help="prediction device; default %(default)s")
     parser.add_argument(
         "--threads",
@@ -295,7 +295,7 @@ def main(argv: list[str] | None = None) -> int:
         env = local.child_env(cache, args.threads, args.siftflow_source)
     except FileNotFoundError as error:
         raise SystemExit(f"error: {error}") from None
-    out_dir = local.RUNS_DIR / args.run
+    out_dir = cache / "scores" / args.run
     out_dir.mkdir(parents=True, exist_ok=True)
 
     record, predict_wall = predict(args, cache, env)

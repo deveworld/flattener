@@ -21,7 +21,7 @@ Steps:
      predictions.json lists for the same weights, quantization, inset, rerun settings
      and inputs are kept.
   2. ``flattener.benchmark docunet`` scores them with all three conventions and
-     ``--ref-resize R`` into outputs/dewarp-runs/RUN/docunet-R.json, or
+     ``--ref-resize R`` into CACHE/scores/RUN/docunet-R.json, or
      docunet-R-truncate.json for Q=truncate (default: docunet-once.json), with
      ``-inset-L``, ``-rerunR`` and ``-deskew`` before .json as set. An existing report
      is kept when its prediction hashes, ref-resize, quantization, inset and rerun
@@ -31,19 +31,19 @@ Steps:
      ``flattener.benchmark docunet-stress`` predicts and scores the
      stress variants (default: full_frame, rot90, rot270, small_page) into
      CACHE/stress/RUN and copies stress.json and each variant's docunet.json and
-     predictions.json to outputs/dewarp-runs/RUN/stress/.
+     predictions.json to CACHE/scores/RUN/stress/.
   4. With ``--ocr``: ``flattener.benchmark ocr`` (DocTr protocol, Setting 1 and 2) into
-     outputs/dewarp-runs/RUN/ocr-doctr.json, or ocr-doctr-Q.json for Q=truncate
+     CACHE/scores/RUN/ocr-doctr.json, or ocr-doctr-Q.json for Q=truncate
      (``-inset-L``, ``-rerunR`` and ``-deskew`` before .json as set). An existing
      report is kept when its prediction hashes, Tesseract executable and eng.traineddata
      match. Its numbers are comparable only when the report says so (a Tesseract build
      that passed the OCR score check, see flattener.benchmark.ocr).
 
-outputs/dewarp-runs/RUN/ also gets predictions.json, or predictions-truncate.json for
+CACHE/scores/RUN/ also gets predictions.json, or predictions-truncate.json for
 Q=truncate (the prediction record, no images; ``-inset-L``, ``-rerunR`` and ``-deskew``
 before .json as set). Each quantization, ref-resize, inset and rerun setting has its own
 file names, so one setting never overwrites another's images or reports.
-Images stay under CACHE: $FLATTENER_CACHE_DIR, default ~/.cache/flattener.
+Reports and images stay under CACHE: $FLATTENER_CACHE_DIR, default ~/.cache/flattener.
 
 Published DocUNet numbers (UVDoc, SyntheticDoc) come from outputs saved with truncation
 and scored with the UVDoc script (``--quantize truncate --ref-resize uvdoc_view2_double``);
@@ -86,7 +86,7 @@ from flattener.dewarp.predict import (
 
 REPO = Path(__file__).resolve().parents[1]
 CROP_DIR = REPO / "outputs/benchmarks/docunet/crop"
-RUNS_DIR = REPO / "outputs/dewarp-runs"
+RUNS_DIR = siftflow.cache_root() / "scores"  # default report folder; --cache-dir moves it
 CONVENTIONS = ("128_excl64", "130_raw", "130_rot64")
 STRESS_VARIANTS = ("crop", "full_frame", "rot90", "rot270", "small_page")
 QUANTIZE_MODES = ("round", "truncate")  # flattener.dewarp.predict --quantize
@@ -114,7 +114,7 @@ def build_parser() -> argparse.ArgumentParser:
         "runs/my-run/checkpoints/step_00003600.pt my-run --stress rot90 small_page",
     )
     parser.add_argument("checkpoint", type=Path, help="dewarp checkpoint or UVDoc best_model.pkl")
-    parser.add_argument("run", help="run name: reports go to outputs/dewarp-runs/RUN/")
+    parser.add_argument("run", help=f"run name: reports go to {RUNS_DIR}/RUN/")
     parser.add_argument("--device", default="cpu", help="prediction device; default %(default)s")
     parser.add_argument(
         "--threads",
@@ -538,7 +538,7 @@ def main(argv: list[str] | None = None) -> int:
         env = child_env(cache, args.threads, args.siftflow_source)
     except FileNotFoundError as error:
         raise SystemExit(f"error: {error}") from None
-    out_dir = RUNS_DIR / args.run
+    out_dir = cache / "scores" / args.run
     out_dir.mkdir(parents=True, exist_ok=True)
 
     record, predict_wall = predict(args, cache, env)

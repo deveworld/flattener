@@ -55,10 +55,10 @@ CONVENTION_DESCRIPTIONS = {
 REF_RESIZE_MODES = ("once", "uvdoc_view2_double")
 DEFAULT_WORKERS = 2
 DEFAULT_REFERENCE_PATTERN = "docunet-reference-{k}.png"
-DEFAULT_REFERENCES_DIR = Path("outputs/dataset/files")
+DEFAULT_REFERENCES_DIR = Path("outputs/benchmarks/docunet/reference")
 
 # SHA-256 of the 65 DocUNet flatbed scans (scan.zip, scan/{k}.png) as distributed
-# by the DocUNet authors; identical to outputs/dataset/manifest.json.
+# by the DocUNet authors; identical to outputs/benchmarks/docunet/manifest.json.
 REFERENCE_SHA256 = {
     1: "6e7b954887cbda909f864ef1034039fc1f88672a188a7682eae86989a78d1820",
     2: "a0c79a3c801cb55ccf5ecab8d355f4064960830d0188ba4b8889d902acacbb13",

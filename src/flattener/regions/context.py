@@ -1,6 +1,6 @@
 """Region-context U-Net page gate (``region-context-unet-2.0``).
 
-The architecture is ported from the locator study (``outputs/coordinate-fold/locator.zip``,
+The architecture is ported from the locator study (``outputs/models/locator.zip``,
 ``source.tar:src/flattener/regions/context_segmentation.py``). Preprocessing is the pinned
 ``regions.segmentation`` function: the full image extent, bilinear with antialiasing, as
 float32 in [0, 1]. The model returns one page-mask logit map at ``config.input_size``.

@@ -3,7 +3,7 @@
 The fixtures copy fields of real checkpoint sidecars and run-info files: the scratch
 run on 409k pages, the UVDoc-start runs on 199k pages (normal and long), the
 89x61-grid trial and the UVDoc-recipe reproduction. Run names inside the copied
-records are the real folder names; outputs/README.md gives their plain names.
+records are the real folder names; outputs/models/scores.json gives their plain names.
 """
 
 import copy

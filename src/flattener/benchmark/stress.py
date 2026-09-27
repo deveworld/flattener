@@ -68,7 +68,7 @@ VARIANTS = {
     "small_page": "crop covering 10-25% of a plain textured canvas",
 }
 DEFAULT_CROP_DIR = Path("outputs/benchmarks/docunet/crop")
-DEFAULT_PHOTO_DIR = Path("outputs/dataset/files")
+DEFAULT_PHOTO_DIR = Path("outputs/benchmarks/docunet/photo")
 CROP_PATTERN = "{k}_{m} copy.png"
 PHOTO_PATTERN = "docunet-photo-{k}_{m}.jpg"
 PAGE_FRACTION = (0.1, 0.25)
