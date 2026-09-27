@@ -9,6 +9,7 @@
   출처: [Google Fonts 고정 버전](https://github.com/google/fonts/tree/b38c5c93af322c45f633e17ac440ec1e6c94d489/ofl/notosanskr), [noto-cjk 원본](https://github.com/notofonts/noto-cjk/tree/523d033d6cb47f4a80c58a35753646f5c3608a78).
   SIL OFL-1.1, © 2014–2021 Adobe, Reserved Font Name `Source`. 원문: [OFL.txt](src/flattener/assets/fonts/OFL.txt).
   SHA-256: `194018e6b2b293a7964f037b25c0249ce1418bc9ab3c971060a03aa57861e252`.
+- **`benchmark/dir300.py`**: [DocGeoNet](https://github.com/fh2019ustc/DocGeoNet)(비상업 조건)의 DIR300 규약(`ssim_ld_eval_DIR300.m`, `OCR_eval_DIR300.py`)은 직접 구현했고, 파일 짝짓기, OCR 목록(`ocr_img_DIR300.txt`의 90장), 상수만 사실로 인용합니다.
 - **`benchmark/matlab.py`, `benchmark/siftflow.py`**: [OARDoc](https://github.com/GreatV/oardoc/tree/9c45c0e783748554a83abea482924a2443294bef)의 `oardoc/metrics/uvdoc.py`와 `oardoc/metrics/siftflow.py`를 고친 코드입니다. [Apache-2.0](https://www.apache.org/licenses/LICENSE-2.0), © OARDoc authors. 변경 사항은 각 파일 머리말에 있습니다.
   `siftflow.py`의 coarse-to-fine 구동부(`SiftFlow._coarse_to_fine`, `_level_offset`)는 OARDoc처럼 SIFT flow 패키지의 `SIFTflowc2f.m` 제어 흐름과 매개변수 일정을 Python으로 옮긴 것입니다. 이 부분의 배포 여부는 소유자가 정합니다.
 - **`benchmark/ocr.py`의 `prepare_like_pytesseract`**: [pytesseract](https://github.com/madmaze/pytesseract) 0.3.8 `prepare()`를 문장 단위로 따릅니다. [Apache-2.0](https://www.apache.org/licenses/LICENSE-2.0), © pytesseract authors. OCR 입력을 공개 규약과 바이트 단위로 맞추기 위한 것입니다. DocTr·UVDoc OCR 규약은 직접 구현했고 OCR 문서 목록만 인용합니다.

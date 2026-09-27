@@ -4,7 +4,8 @@
 ``docunet``, ``ocr``, ``calibrate``, ``docunet-stress`` and ``uvdoc`` take ``--workers``
 (default 2).
 Scoring LD/AD needs your copy of the SIFT-flow C++ sources: pass ``--siftflow-source
-DIR`` or set ``FLATTENER_SIFTFLOW_SOURCE``.
+DIR`` or set ``FLATTENER_SIFTFLOW_SOURCE``. ``dir300-predict``, ``dir300`` and
+``dir300-ocr`` run the DIR300 benchmark.
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ import shlex
 import sys
 from pathlib import Path
 
-from . import calibration, docunet, metrics, ocr, siftflow, stress, uvdoc
+from . import calibration, dir300, docunet, metrics, ocr, siftflow, stress, uvdoc
 from .reporting import write_json_atomic
 
 _EPILOG = """\
@@ -31,6 +32,10 @@ examples:
   python -m flattener.benchmark uvdoc-prepare UVDoc_benchmark.zip
   python -m flattener.benchmark uvdoc-predict --weights best_model.pkl --output-dir OUT
   python -m flattener.benchmark uvdoc OUT --output reports/uvdoc.json
+  python -m flattener.benchmark dir300-predict --weights best_model.pkl \\
+      --output-dir dir300/uvdoc --force-render --quantize truncate
+  python -m flattener.benchmark dir300 dir300/uvdoc --output reports/dir300.json
+  python -m flattener.benchmark dir300-ocr dir300/uvdoc --output reports/dir300-ocr.json
 """
 
 
@@ -125,6 +130,36 @@ def _add_uvdoc_root(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_dir300_common(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("predictions", type=Path, help="directory of rectified outputs")
+    parser.add_argument(
+        "--pattern",
+        default=dir300.DEFAULT_PATTERN,
+        help="prediction file name with {k} (document 1-300); DocGeoNet's outputs are "
+        "{k}_rec.png; default %(default)s",
+    )
+    parser.add_argument("--output", type=Path, required=True, help="report JSON path")
+    parser.add_argument("--overwrite", action="store_true", help="replace an existing report")
+    parser.add_argument(
+        "--references-dir",
+        type=Path,
+        default=dir300.DEFAULT_REFERENCES_DIR,
+        help="the 300 DIR300 references gt/{k}.png; default %(default)s",
+    )
+    parser.add_argument(
+        "--no-verify-references",
+        action="store_true",
+        help="accept references whose bytes differ from the official DIR300 files",
+    )
+    parser.add_argument(
+        "--workers",
+        type=_positive_int,
+        default=docunet.DEFAULT_WORKERS,
+        help="parallel worker processes/threads; default %(default)s (1 torch thread each)",
+    )
+    parser.add_argument("--quiet", action="store_true", help="no per-image progress on stderr")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m flattener.benchmark",
@@ -205,6 +240,75 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="accept scans whose bytes differ from the published DocUNet scans",
     )
+
+    rectify300 = commands.add_parser(
+        "dir300-predict",
+        help="rectify the 300 DIR300 photos with a dewarp model",
+        description="Rectify dist/{k}.png into OUT/{k}.png at each photo's own size and "
+        "record every check in OUT/predictions.json (see flattener.dewarp.predict). Exit "
+        "status 1 when an image failed its checks.",
+    )
+    rectify300.add_argument("--weights", required=True, help="dewarp checkpoint or best_model.pkl")
+    rectify300.add_argument("--output-dir", type=Path, required=True)
+    rectify300.add_argument(
+        "--inputs-dir",
+        type=Path,
+        default=dir300.DEFAULT_INPUTS_DIR,
+        help="the 300 DIR300 photos dist/{k}.png; default %(default)s",
+    )
+    rectify300.add_argument("--device", default="cpu")
+    rectify300.add_argument(
+        "--threads", type=_positive_int, default=2, help="torch threads; default %(default)s"
+    )
+    rectify300.add_argument(
+        "--force-render",
+        action="store_true",
+        help="write images whose map fails the geometry checks (the failures are still "
+        "recorded); published methods are scored that way",
+    )
+    rectify300.add_argument(
+        "--quantize",
+        choices=("round", "truncate"),  # flattener.dewarp.predict.QUANTIZE_MODES
+        default="round",
+        help="uint8 conversion: round (flattener.render) or truncate (floor(x*255), as "
+        "published outputs were saved); default %(default)s",
+    )
+    rectify300.add_argument("--overwrite", action="store_true", help="predict every image again")
+    rectify300.add_argument(
+        "--no-verify-inputs",
+        action="store_true",
+        help="accept photos whose bytes differ from the official DIR300 files",
+    )
+
+    score300 = commands.add_parser(
+        "dir300",
+        help="MS-SSIM / LD / AD on DIR300",
+        description="Score PREDICTIONS/{k}.png against gt/{k}.png (k = 1-300) as DocGeoNet "
+        "ssim_ld_eval_DIR300.m does, with AD from PaperEdge evalAlignedUnwarp.m; plain "
+        "means over the 300 pairs.",
+    )
+    _add_dir300_common(score300)
+    _add_siftflow(score300)
+    score300.add_argument(
+        "--ad-solver",
+        choices=metrics.AD_SOLVERS,
+        default=metrics.DEFAULT_AD_SOLVER,
+        help="AD alignment solver reported as 'ad' (both are always stored); default %(default)s",
+    )
+    score300.add_argument(
+        "--ms-ssim-only",
+        action="store_true",
+        help="skip SIFT flow (no LD/AD); the report is marked not comparable",
+    )
+
+    reading300 = commands.add_parser(
+        "dir300-ocr",
+        help="OCR edit distance / CER on the DIR300 OCR subset",
+        description="OCR the 90 DIR300 images of DocGeoNet's ocr_img_DIR300.txt with the "
+        "protocol of its OCR_eval_DIR300.py (Tesseract defaults, raw strings, plain means).",
+    )
+    _add_dir300_common(reading300)
+    _add_tesseract(reading300)
 
     calibrate = commands.add_parser(
         "calibrate",
@@ -488,6 +592,57 @@ def main(argv: list[str] | None = None) -> int:
         )
         _write_report(args.output, report, args.overwrite)
         print(json.dumps(report["summary"], indent=2, sort_keys=True))
+        return 0
+    if args.command == "dir300-predict":
+        import torch
+
+        from ..dewarp.predict import load_dewarper
+
+        torch.set_num_threads(args.threads)
+        record = dir300.predict_dir300(
+            load_dewarper(args.weights, device=args.device),
+            args.output_dir,
+            inputs_dir=args.inputs_dir,
+            verify_inputs=not args.no_verify_inputs,
+            overwrite=args.overwrite,
+            force_render=args.force_render,
+            quantize=args.quantize,
+        )
+        print(json.dumps(record["counts"]))
+        return 0 if record["counts"]["failed"] == 0 else 1
+    if args.command == "dir300":
+        _check_output(args.output, args.overwrite)
+        build = None
+        if not args.ms_ssim_only:
+            build = siftflow.build_siftflow(args.siftflow_source, cache_dir=args.cache_dir)
+        report = dir300.evaluate_dir300(
+            args.predictions,
+            build=build,
+            pattern=args.pattern,
+            ad_solver=args.ad_solver,
+            references_dir=args.references_dir,
+            verify_references=not args.no_verify_references,
+            workers=args.workers,
+            progress=None if args.quiet else dir300.print_progress,
+        )
+        _write_report(args.output, report, args.overwrite)
+        print(json.dumps(report["summary"], indent=2, sort_keys=True))
+        print(dir300.format_comparison(report["summary"]))
+        return 0
+    if args.command == "dir300-ocr":
+        _check_output(args.output, args.overwrite)
+        report = dir300.evaluate_dir300_ocr(
+            args.predictions,
+            engine=_tesseract(args),
+            pattern=args.pattern,
+            references_dir=args.references_dir,
+            verify_references=not args.no_verify_references,
+            workers=args.workers,
+            progress=None if args.quiet else ocr.print_progress,
+        )
+        _write_report(args.output, report, args.overwrite)
+        print(json.dumps(report["summary"], indent=2, sort_keys=True))
+        print(dir300.format_comparison(report["summary"]))
         return 0
     # calibrate
     runs = tuple(args.run or calibration.RUNS)

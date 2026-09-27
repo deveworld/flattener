@@ -3,12 +3,14 @@
 ``score_pair`` scores one rectified image against its scan (MS-SSIM always; LD and
 AD with a SIFT-flow backend). ``evaluate_docunet`` and ``evaluate_ocr`` score a
 directory of DocUNet predictions and return JSON-ready reports; ``predict_uvdoc`` and
-``evaluate_uvdoc`` run the UVDoc benchmark protocol. SIFT flow (Ce Liu)
+``evaluate_uvdoc`` run the UVDoc benchmark protocol; ``predict_dir300``,
+``evaluate_dir300`` and ``evaluate_dir300_ocr`` run DIR300. SIFT flow (Ce Liu)
 is compiled at run time from sources the user supplies (``load_siftflow``). Command
 line: ``python -m flattener.benchmark``.
 """
 
 from .calibration import evaluate_gates, run_calibration, summarize_calibration
+from .dir300 import evaluate_dir300, evaluate_dir300_ocr, predict_dir300
 from .docunet import (
     CONVENTIONS,
     DEFAULT_WORKERS,
@@ -61,6 +63,8 @@ __all__ = [
     "build_siftflow",
     "character_error_rate",
     "convention_views",
+    "evaluate_dir300",
+    "evaluate_dir300_ocr",
     "evaluate_docunet",
     "evaluate_gates",
     "evaluate_ocr",
@@ -68,6 +72,7 @@ __all__ = [
     "levenshtein",
     "load_siftflow",
     "local_distortion",
+    "predict_dir300",
     "predict_uvdoc",
     "prepare_reference",
     "read_image",

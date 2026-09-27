@@ -12,6 +12,7 @@ and whether they count as a real-photo result of a new model.
 * ``docunet_standard``: DocUNet crops scored with ``flattener.benchmark``.
 * ``docunet_stress``: DocUNet stress variants (whole photos, quarter turns, small pages).
 * ``uvdoc_benchmark``: the 50 UVDoc benchmark photos scored with ``flattener.benchmark``.
+* ``dir300_standard``: the 300 DIR300 photos scored with ``flattener.benchmark``.
 * ``predictions``: rectified images without scores (``predictions.json``).
 * ``evaluator_calibration``: the evaluator checked against published outputs.
 
@@ -24,7 +25,7 @@ where an own checkpoint's training started: ``scratch``, ``external_pretrained``
 UVDoc weights, also through a parent checkpoint) or ``unknown``.
 
 ``new_model_real_photo`` is true only for real-photo benchmark results (DocUNet standard
-or stress, UVDoc benchmark) of an own checkpoint that is not a smoke run, whatever its
+or stress, UVDoc benchmark, DIR300) of an own checkpoint that is not a smoke run, whatever its
 initialization. ``evidence_kind`` is one label for the whole record:
 ``external_pretrained``, then ``smoke_training``, then ``new_model_real_photo``, and
 otherwise the measurement.
@@ -41,10 +42,13 @@ MEASUREMENTS = (
     "docunet_standard",
     "docunet_stress",
     "uvdoc_benchmark",
+    "dir300_standard",
     "predictions",
     "evaluator_calibration",
 )
-REAL_PHOTO_MEASUREMENTS = frozenset({"docunet_standard", "docunet_stress", "uvdoc_benchmark"})
+REAL_PHOTO_MEASUREMENTS = frozenset(
+    {"docunet_standard", "docunet_stress", "uvdoc_benchmark", "dir300_standard"}
+)
 PROVENANCES = ("own_checkpoint", "own_previous_model", "external_pretrained", "unknown")
 INITIALIZATIONS = ("scratch", "external_pretrained", "unknown")
 SMOKE_STEPS = 10_000

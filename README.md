@@ -108,15 +108,31 @@ python -m flattener.benchmark uvdoc OUT --output reports/uvdoc.json
 - 채점: `uwp_texture`(기본값, `--pred-type`)를 평평한 텍스처 `texture_sample/{id}.png`와 비교합니다. DocUNet과 같은 MATLAB 에뮬레이션(회색 변환, 텍스처를 598,400화소로 한 번 리사이즈, MS-SSIM, SIFT flow, AD, LD)을 쓰고, 50장 전체의 평균을 냅니다. 비교 기준은 UVDoc README erratum의 50장 값(UVDoc 0.785 / AD 0.119)입니다. 논문 본문 표는 절반만 쓴 값입니다.
 - 평가기 검증: UVDoc이 공개한 결과 이미지(`UVDocBenchmark_results.zip`)는 MS-SSIM 0.7854, AD 0.1186, LD 6.812로 erratum 값과 AADD 표 S1의 LD 6.810에 맞습니다. UVDoc MIT 가중치를 CPU에서 다시 예측하면 공개 이미지와 화소값이 최대 1 다르고, 점수는 0.7854 / 0.1201 / 6.890입니다. LD·AD 차이는 대부분 샘플 00040 한 장의 SIFT flow에서 나옵니다(LD +2.87, AD +0.079).
 
+DIR300(실사진 300장, OCR 90장)은 DocGeoNet의 공개 규약(`ssim_ld_eval_DIR300.m`, `OCR_eval_DIR300.py`)으로 채점합니다. DocGeoNet 코드는 비상업 조건이라 규약 설명을 보고 직접 구현했습니다.
+
+```bash
+python -m flattener.benchmark dir300-predict --weights CKPT --output-dir OUT --force-render
+python -m flattener.benchmark dir300 OUT --output reports/dir300.json
+python -m flattener.benchmark dir300-ocr OUT --output reports/dir300-ocr.json
+```
+
+- 자료는 `outputs/benchmarks/dir300/`의 `dist300/`(입력 사진)과 `gt300/`(평평한 기준 이미지)이고, 비상업 평가 전용입니다(`LICENSE.md`, `provenance.json`). 두 폴더는 공식 파일과 해시가 같아야 합니다(`--no-verify-inputs`, `--no-verify-references`로 끕니다). 공식 파일은 248번 기준 이미지를 `248.PNG`로 저장해 두어서 대소문자를 가리지 않고 찾습니다.
+- 예측: 사진마다 원래 크기로 보정해 `OUT/{k}.png`에 씁니다. 가장 큰 사진(3472×4624)이 렌더러 기본 한도 1,600만 화소를 넘기 때문에 DIR300 예측만 한도를 2,000만 화소로 둡니다.
+- 채점: 보정 결과 `k`를 `gt300/{k}.png`와 짝짓습니다. 둘 다 회색으로 바꾼 뒤 기준 이미지를 `sqrt(598400/H/W)`배로(DocUNet과 같은 598,400화소), 보정 결과를 그 크기로 리사이즈합니다. MS-SSIM·LD는 DocUNet `evalUnwarp.m`, AD는 PaperEdge `evalAlignedUnwarp.m`과 같고, 300쌍의 단순 평균입니다. DocGeoNet 공개 결과처럼 `{k}_rec.png`로 저장한 폴더는 `--pattern "{k}_rec.png"`로 채점합니다.
+- OCR: DocGeoNet 목록(`ocr_img_DIR300.txt`)의 90장을 pytesseract 기본값으로 읽고, ED와 CER(= ED / 기준 문자열 길이)의 단순 평균을 냅니다. 보정 결과는 저장된 크기 그대로 읽습니다. `comparable` 조건은 DocUNet OCR과 같습니다.
+- DIR300 사진에는 배경이 함께 찍혀 있습니다. 사진 전체를 한 번에 펴는 단일 단계 모델은 페이지를 먼저 찾거나 잘라 다시 돌리는 방법보다 점수가 크게 낮고, 논문 표에는 두 방식이 섞여 있습니다. 예를 들어 UVDoc은 전처리 없이 0.622 / 7.73 / 0.218(TADoc 표), DocRes 위치 찾기를 붙이면 0.676 / 4.83 / 0.165(Q-DRFormer)입니다.
+- `tools/score_dir300_local.py CKPT RUN [--quantize truncate] [--ocr]`는 예측과 채점을 한 번에 하고 `outputs/dewarp-runs/RUN/dir300*.json`에 저장합니다. 예측 이미지(장당 약 9 MB)는 `~/.cache/flattener/dir300/`에 둡니다.
+- 평가기 검증: UVDoc MIT 가중치로 사진마다 원래 크기로 예측하고 `floor(x*255)`로 저장하면(`--quantize truncate`) 0.6215 / 7.742 / 0.2183으로, TADoc 표의 0.622 / 7.73 / 0.218과 MS-SSIM −0.0005, LD +0.012, AD +0.0003 차이입니다. 보고서는 `outputs/dewarp-runs/uvdoc-mit/dir300-truncate.json`에 있습니다(`external_pretrained`).
+
 ## 결과의 근거 구분
 
 `predictions.json`, 학습 로그·`status.json`·`best.json`, `flattener.benchmark` 보고서에는 `evidence` 항목이 들어갑니다. `evidence_kind` 하나로 결과의 종류를 구분합니다.
 
-- `new_model_real_photo`: 직접 학습한 체크포인트(1만 스텝 이상)로 DocUNet 실사진(표준 크롭 또는 스트레스 변형)이나 UVDoc 벤치마크 사진을 보정하고 채점한 결과입니다. 새 모델의 실사진 성능 향상으로 세는 결과는 이것 하나입니다.
+- `new_model_real_photo`: 직접 학습한 체크포인트(1만 스텝 이상)로 DocUNet 실사진(표준 크롭 또는 스트레스 변형), UVDoc 벤치마크 사진, DIR300 사진을 보정하고 채점한 결과입니다. 새 모델의 실사진 성능 향상으로 세는 결과는 이것 하나입니다.
 - `gt_crop_validation`, `gt_full_frame_validation`: 학습 중 검증입니다. 정답이 있는 샘플을 정답 페이지 영역에 맞춰 자르거나 전체 화면으로 넣어 잽니다. 학습 상태를 확인하는 용도입니다.
 - `external_pretrained`: UVDoc 공개 가중치, 논문 저자가 공개한 결과처럼 밖에서 학습한 모델의 결과입니다. 위 예제의 UVDoc 가중치와 기준선이 여기에 들어가며, 비교 기준으로 씁니다.
 - `smoke_training`: 1만 스텝 미만으로 학습한 체크포인트의 결과입니다. 코드가 도는지 확인하는 용도입니다.
-- `docunet_standard`, `docunet_stress`, `uvdoc_benchmark`: 예측 폴더에 `predictions.json`이 없어 모델 출처를 모르거나, 예전 좌표 모델(`own_previous_model`)을 채점한 결과입니다.
+- `docunet_standard`, `docunet_stress`, `uvdoc_benchmark`, `dir300_standard`: 예측 폴더에 `predictions.json`이 없어 모델 출처를 모르거나, 예전 좌표 모델(`own_previous_model`)을 채점한 결과입니다.
 - `evaluator_calibration`은 평가기 보정(G1–G4) 보고서, `predictions`는 점수 없이 예측만 담은 기록, `training_loss`는 학습 로그와 `status.json`의 학습 손실입니다. `calibration.json`은 목록에 올린 보고서마다 `evidence`를 붙이고, 그전에 만든 보고서 파일은 해시가 기록돼 있어 그대로 둡니다.
 
 `measurement`(무엇을 쟀는지), `model_provenance`(`own_checkpoint`, `own_previous_model`, `external_pretrained`), `checkpoint_step`, `initialization`도 함께 기록합니다. `initialization`은 직접 학습한 체크포인트의 출발점(`scratch` 또는 UVDoc 가중치인 `external_pretrained`)입니다. UVDoc 가중치에서 시작한 미세조정도 `new_model_real_photo`로 세고, 향상 폭은 같은 변형의 UVDoc 기준선과 비교해 읽습니다.
