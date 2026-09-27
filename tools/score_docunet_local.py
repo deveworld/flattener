@@ -4,33 +4,40 @@ Usage (from any directory; put --stress after CHECKPOINT and RUN):
   .venv/bin/python tools/score_docunet_local.py CHECKPOINT RUN [--stress [VARIANT ...]]
   .venv/bin/python tools/score_docunet_local.py CHECKPOINT RUN \
       --quantize truncate --ref-resize uvdoc_view2_double    # the published protocol
+  .venv/bin/python tools/score_docunet_local.py CHECKPOINT RUN \
+      --quantize truncate --ref-resize uvdoc_view2_double --inset syntheticdoc_half_cell
   .venv/bin/python tools/score_docunet_local.py CHECKPOINT RUN --ocr \
       --tesseract TREE/tesseract.exe --tesseract-launcher wine   # UB-Mannheim 5.0.1 via Wine
 
 Steps:
   1. ``flattener.dewarp.predict docunet`` rectifies the 130 crops with ``--force-render``
-     (published methods are scored that way) and ``--quantize Q`` into CACHE/pred/RUN
-     (Q=round, the default) or CACHE/pred-Q/RUN. Images that predictions.json lists for
-     the same weights, quantization and inputs are kept.
+     (published methods are scored that way), ``--quantize Q`` and ``--inset I`` into
+     CACHE/pred/RUN (Q=round and no inset, the defaults), CACHE/pred-Q/RUN, or
+     CACHE/pred[-Q]-inset-L/RUN with an inset (L: the preset name or the values, see
+     ``flattener.dewarp.predict.inset_label``). Images that predictions.json lists for
+     the same weights, quantization, inset and inputs are kept.
   2. ``flattener.benchmark docunet`` scores them with all three conventions and
      ``--ref-resize R`` into outputs/dewarp-runs/RUN/docunet-R.json, or
-     docunet-R-truncate.json for Q=truncate (default: docunet-once.json). An existing
-     report is kept when its prediction hashes, ref-resize and quantization match; a
-     report of other images or settings stops the script, and --overwrite replaces it.
-  3. With ``--stress`` (default --quantize and --ref-resize only):
+     docunet-R-truncate.json for Q=truncate (default: docunet-once.json), with
+     ``-inset-L`` before .json for an inset. An existing report is kept when its
+     prediction hashes, ref-resize, quantization and inset match; a report of other
+     images or settings stops the script, and --overwrite replaces it.
+  3. With ``--stress`` (default --quantize, --ref-resize and no inset only):
      ``flattener.benchmark docunet-stress`` predicts and scores the
      stress variants (default: full_frame, rot90, rot270, small_page) into
      CACHE/stress/RUN and copies stress.json and each variant's docunet.json and
      predictions.json to outputs/dewarp-runs/RUN/stress/.
   4. With ``--ocr``: ``flattener.benchmark ocr`` (DocTr protocol, Setting 1 and 2) into
-     outputs/dewarp-runs/RUN/ocr-doctr.json, or ocr-doctr-Q.json for Q=truncate. An
-     existing report is kept when its prediction hashes, Tesseract executable and
-     eng.traineddata match. Its numbers are comparable only when the report says so
-     (a Tesseract build that passed gate G4, see flattener.benchmark.ocr).
+     outputs/dewarp-runs/RUN/ocr-doctr.json, or ocr-doctr-Q.json for Q=truncate
+     (``-inset-L`` before .json for an inset). An existing report is kept when its
+     prediction hashes, Tesseract executable and eng.traineddata match. Its numbers are
+     comparable only when the report says so (a Tesseract build that passed gate G4, see
+     flattener.benchmark.ocr).
 
 outputs/dewarp-runs/RUN/ also gets predictions.json, or predictions-truncate.json for
-Q=truncate (the prediction record, no images). Each quantization and ref-resize has its
-own file names, so one setting never overwrites another's images or reports.
+Q=truncate (the prediction record, no images; ``-inset-L`` before .json for an inset).
+Each quantization, ref-resize and inset has its own file names, so one setting never
+overwrites another's images or reports.
 Images stay under CACHE: $FLATTENER_CACHE_DIR, default ~/.cache/flattener.
 
 Published DocUNet numbers (UVDoc, SyntheticDoc) come from outputs saved with truncation
@@ -61,6 +68,13 @@ import time
 from pathlib import Path
 
 from flattener.benchmark import ocr, siftflow
+from flattener.dewarp.predict import (
+    INSET_PRESETS,
+    inset_label,
+    parse_inset,
+    recorded_inset,
+    resolve_inset,
+)
 
 REPO = Path(__file__).resolve().parents[1]
 CROP_DIR = REPO / "outputs/benchmarks/docunet/crop"
@@ -119,6 +133,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_REF_RESIZE,
         help="scan resize of the scorer: once (DocUNet/DocTr/PaperEdge) or "
         "uvdoc_view2_double (UVDoc script); default %(default)s",
+    )
+    parser.add_argument(
+        "--inset",
+        type=parse_inset,
+        default=None,
+        help="move the page outline inward before rendering (flattener.dewarp.predict "
+        "--inset): " + ", ".join(INSET_PRESETS) + ", E or EX,EY; default 0",
     )
     parser.add_argument(
         "--stress",
@@ -211,38 +232,57 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def prediction_dir(cache: Path, run_name: str, quantize: str) -> Path:
-    """Prediction images of RUN: CACHE/pred/RUN for round, CACHE/pred-Q/RUN otherwise."""
-    base = "pred" if quantize == DEFAULT_QUANTIZE else f"pred-{quantize}"
-    return cache / base / run_name
-
-
-def report_name(ref_resize: str, quantize: str) -> str:
-    """docunet-R.json, with -Q before .json unless Q is round (default docunet-once.json)."""
+def _suffix(quantize: str, inset=None) -> str:
+    """-Q unless Q is round, then -inset-L for an inset (``inset_label``)."""
     suffix = "" if quantize == DEFAULT_QUANTIZE else f"-{quantize}"
-    return f"docunet-{ref_resize}{suffix}.json"
+    label = inset_label(inset)
+    return suffix + (f"-inset-{label}" if label else "")
 
 
-def record_name(quantize: str) -> str:
-    """predictions.json for round, predictions-Q.json otherwise."""
-    return "predictions.json" if quantize == DEFAULT_QUANTIZE else f"predictions-{quantize}.json"
+def prediction_dir(cache: Path, run_name: str, quantize: str, inset=None) -> Path:
+    """Prediction images of RUN: CACHE/pred/RUN for round without inset, otherwise
+    CACHE/pred-Q/RUN, CACHE/pred-inset-L/RUN or CACHE/pred-Q-inset-L/RUN."""
+    return cache / f"pred{_suffix(quantize, inset)}" / run_name
 
 
-def ocr_report_name(quantize: str) -> str:
-    """ocr-doctr.json for round, ocr-doctr-Q.json otherwise."""
-    return "ocr-doctr.json" if quantize == DEFAULT_QUANTIZE else f"ocr-doctr-{quantize}.json"
+def report_name(ref_resize: str, quantize: str, inset=None) -> str:
+    """docunet-R.json, with -Q before .json unless Q is round and -inset-L for an inset
+    (default docunet-once.json)."""
+    return f"docunet-{ref_resize}{_suffix(quantize, inset)}.json"
+
+
+def record_name(quantize: str, inset=None) -> str:
+    """predictions.json for round without inset, predictions-Q[-inset-L].json otherwise."""
+    return f"predictions{_suffix(quantize, inset)}.json"
+
+
+def ocr_report_name(quantize: str, inset=None) -> str:
+    """ocr-doctr.json for round without inset, ocr-doctr-Q[-inset-L].json otherwise."""
+    return f"ocr-doctr{_suffix(quantize, inset)}.json"
+
+
+def record_inset(record: dict | None) -> tuple[float, float]:
+    """(ex, ey) of a predictions record or a report's ``predictions_record``; one
+    without the field predates the option and has no inset."""
+    return recorded_inset((record or {}).get("inset"))
 
 
 def ocr_report_matches(
-    report_path: Path, pred_dir: Path, engine: dict, quantize: str = DEFAULT_QUANTIZE
+    report_path: Path,
+    pred_dir: Path,
+    engine: dict,
+    quantize: str = DEFAULT_QUANTIZE,
+    inset=None,
 ) -> bool:
     """Whether the OCR report read exactly the current images (DocTr protocol, images
-    quantized by ``quantize``) with the Tesseract executable and eng.traineddata that
-    ``engine`` (``Tesseract.metadata()``) describes."""
+    quantized by ``quantize`` with ``inset``) with the Tesseract executable and
+    eng.traineddata that ``engine`` (``Tesseract.metadata()``) describes."""
     report = json.loads(report_path.read_text(encoding="utf-8"))
     if report.get("config", {}).get("protocols") != ["doctr"]:
         return False
     if (report.get("predictions_record") or {}).get("quantize", DEFAULT_QUANTIZE) != quantize:
+        return False
+    if record_inset(report.get("predictions_record")) != resolve_inset(inset):
         return False
     used = report.get("tesseract") or {}
 
@@ -268,10 +308,11 @@ def report_matches(
     source_sha256: str,
     ref_resize: str = DEFAULT_REF_RESIZE,
     quantize: str = DEFAULT_QUANTIZE,
+    inset=None,
 ) -> bool:
     """Whether the report scored exactly the current images with these settings (all
-    conventions, ``ref_resize``, images quantized by ``quantize``) and the same SIFT-flow
-    sources."""
+    conventions, ``ref_resize``, images quantized by ``quantize`` with ``inset``) and the
+    same SIFT-flow sources."""
     report = json.loads(report_path.read_text(encoding="utf-8"))
     config = report.get("config", {})
     if config.get("ref_resize") != ref_resize:
@@ -280,6 +321,8 @@ def report_matches(
         return False
     # Reports made before predictions recorded the quantization scored rounded images.
     if (report.get("predictions_record") or {}).get("quantize", DEFAULT_QUANTIZE) != quantize:
+        return False
+    if record_inset(report.get("predictions_record")) != resolve_inset(inset):
         return False
     if not report.get("comparable"):
         return False
@@ -292,13 +335,23 @@ def report_matches(
     return all(sha256_file(pred_dir / f"{key}.png") == scored[key] for key in current)
 
 
+def inset_argument(inset) -> list[str]:
+    """``--inset`` for the child commands; none without an inset."""
+    if resolve_inset(inset) == resolve_inset(None):
+        return []
+    if isinstance(inset, str):
+        return ["--inset", inset]
+    ex, ey = resolve_inset(inset)
+    return ["--inset", f"{ex!r},{ey!r}"]
+
+
 def predict(args, cache: Path, env: dict[str, str]) -> tuple[dict, float]:
-    images = prediction_dir(cache, args.run, args.quantize)
+    images = prediction_dir(cache, args.run, args.quantize, args.inset)
     command = [
         sys.executable, "-m", "flattener.dewarp.predict",
         "--weights", str(args.checkpoint), "--device", args.device,
         "docunet", "--input-dir", str(CROP_DIR), "--output-dir", str(images),
-        "--force-render", "--quantize", args.quantize,
+        "--force-render", "--quantize", args.quantize, *inset_argument(args.inset),
     ]  # fmt: skip
     if args.overwrite:
         command.append("--overwrite")
@@ -310,16 +363,19 @@ def predict(args, cache: Path, env: dict[str, str]) -> tuple[dict, float]:
         raise SystemExit(f"error: {images}/predictions.json is incomplete")
     if record.get("quantize", DEFAULT_QUANTIZE) != args.quantize:
         raise SystemExit(f"error: {images}/predictions.json holds other quantization")
+    if record_inset(record) != resolve_inset(args.inset):
+        raise SystemExit(f"error: {images}/predictions.json holds another inset")
     return record, wall
 
 
 def score(args, cache: Path, env: dict[str, str], out_dir: Path) -> tuple[dict, str]:
-    images = prediction_dir(cache, args.run, args.quantize)
-    report_path = out_dir / report_name(args.ref_resize, args.quantize)
+    images = prediction_dir(cache, args.run, args.quantize, args.inset)
+    report_path = out_dir / report_name(args.ref_resize, args.quantize, args.inset)
     if report_path.is_file() and not args.overwrite:
         source = siftflow.resolve_source_dir(env["FLATTENER_SIFTFLOW_SOURCE"])
         digest = siftflow.source_tree_sha256(source)
-        if report_matches(report_path, images, digest, args.ref_resize, args.quantize):
+        settings = (args.ref_resize, args.quantize, args.inset)
+        if report_matches(report_path, images, digest, *settings):
             return json.loads(report_path.read_text(encoding="utf-8")), "kept"
         raise SystemExit(f"error: {report_path} scores other images or settings; pass --overwrite")
     command = [
@@ -361,15 +417,15 @@ def stress(args, cache: Path, env: dict[str, str], out_dir: Path) -> dict:
 
 
 def run_ocr(args, cache: Path, env: dict[str, str], out_dir: Path) -> tuple[dict, str]:
-    images = prediction_dir(cache, args.run, args.quantize)
-    report_path = out_dir / ocr_report_name(args.quantize)
+    images = prediction_dir(cache, args.run, args.quantize, args.inset)
+    report_path = out_dir / ocr_report_name(args.quantize, args.inset)
     tessdata = None if args.tessdata_dir is None else str(args.tessdata_dir)
     launcher = args.tesseract_launcher or ""
     if report_path.is_file() and not args.overwrite:
         engine = ocr.Tesseract(
             args.tesseract, tessdata_dir=tessdata, launcher=tuple(shlex.split(launcher))
         ).metadata()
-        if ocr_report_matches(report_path, images, engine, args.quantize):
+        if ocr_report_matches(report_path, images, engine, args.quantize, args.inset):
             return json.loads(report_path.read_text(encoding="utf-8")), "kept"
         raise SystemExit(f"error: {report_path} read other images or Tesseract; pass --overwrite")
     command = [
@@ -409,8 +465,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.siftflow_source is None and not os.environ.get("FLATTENER_SIFTFLOW_SOURCE"):
         raise SystemExit("error: pass --siftflow-source DIR or set FLATTENER_SIFTFLOW_SOURCE")
     default_protocol = (args.quantize, args.ref_resize) == (DEFAULT_QUANTIZE, DEFAULT_REF_RESIZE)
-    if args.stress is not None and not default_protocol:
-        raise SystemExit("error: --stress runs with the default --quantize and --ref-resize only")
+    label = inset_label(args.inset)
+    if args.stress is not None and (not default_protocol or label):
+        raise SystemExit(
+            "error: --stress runs with the default --quantize and --ref-resize and no --inset only"
+        )
     lower_priority()
     cache_value = args.cache_dir or os.environ.get("FLATTENER_CACHE_DIR") or "~/.cache/flattener"
     cache = Path(cache_value).expanduser().resolve()
@@ -426,12 +485,13 @@ def main(argv: list[str] | None = None) -> int:
     per_image = sum(item["seconds"] for item in written) / len(written) if written else None
     report, score_state = score(args, cache, env, out_dir)
     shutil.copyfile(
-        prediction_dir(cache, args.run, args.quantize) / "predictions.json",
-        out_dir / record_name(args.quantize),
+        prediction_dir(cache, args.run, args.quantize, args.inset) / "predictions.json",
+        out_dir / record_name(args.quantize, args.inset),
     )
 
     counts = record["counts"]
     settings = "" if default_protocol else f" quantize={args.quantize} ref_resize={args.ref_resize}"
+    settings += f" inset={label}" if label else ""
     parts = [
         f"{args.run} step={record['model'].get('step')}{settings}",
         f"128_excl64 {metric_text(report['summary']['128_excl64'])}",

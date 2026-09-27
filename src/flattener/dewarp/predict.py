@@ -26,6 +26,15 @@ DocUNet outputs were saved (``(x * 255).astype(uint8)``, the paper protocol). Ch
 failure statuses, ``--force-render`` and the exit status are the same in both modes. The
 mode is recorded in the printed JSON, in ``predictions.json`` and in their evidence
 block, and an output of one mode is never kept by a run of the other.
+
+``--inset`` moves the page outline inward before rendering: the output shows the page
+region ``[-(1 - e), 1 - e]`` of the predicted grid on each axis, that is ``e / 2`` of
+the page extent less on each side, scaled to the full output (see ``INSET_PRESETS``
+and ``dense_backward_map``). It is applied to the backward map, so the renderer's
+checks, failure statuses, ``--force-render`` and the exit status are the same as
+without it. It takes a preset name, one value for both axes or ``EX,EY``; the default
+0 keeps the map unchanged. The inset is recorded like the quantization, and an output
+of one inset is never kept by a run with another.
 """
 
 from __future__ import annotations
@@ -52,7 +61,16 @@ from ..contracts import FlattenerError, RenderConfig, RenderResult, Status
 from ..evidence import evidence
 from ..renderer import render
 from .checkpoint import CHECKPOINT_SCHEMA, atomic_write, read_checkpoint, utc_now, write_json
-from .coords import grid_to_map, uvdoc_dense_map
+from .coords import (
+    _apply,
+    _grid,
+    _size,
+    align_corners_to_flattener,
+    center_positions,
+    grid_to_map,
+    interpolation_matrix,
+    uvdoc_dense_map,
+)
 from .model import (
     UVDOC_CONFIG,
     UVDOC_REVISION,
@@ -67,6 +85,34 @@ DOCUNET_INPUT = re.compile(r"^(\d+)_(\d+) copy\.png$")
 PREDICTIONS_SCHEMA = "flattener-dewarp-predictions-2"
 QUANTIZE_MODES = ("round", "truncate")  # round: flattener.render; truncate: paper protocol
 EXIT_FAILED = 1  # some image failed its checks (also when it was force-rendered)
+
+# Grid-level insets (ex, ey) in normalized output units: output coordinate u in [-1, 1]
+# shows the page position (1 - e) u of the predicted grid, so each side moves in by
+# e / 2 of the page extent.
+#
+# syntheticdoc_half_cell: the inset of SyntheticDoc's own inference (repository
+# training/model.py and training/inference.py at aabd9cf). Its model predicts a
+# backward map of bm_out_size (121, 177), 121 rows (y) by 177 columns (x); the
+# training loader resamples the released 177-row by 121-column maps into that shape.
+# The map is center aligned: value (i, j) belongs to the page position
+# ((2j + 1) / 177 - 1, (2i + 1) / 121 - 1). Inference resizes it to the image with
+# F.interpolate(align_corners=True), which puts the outer values on the outer output
+# pixel centers, so output coordinate u shows the page position
+# (1 - 1/n) u Wo / (Wo - 1) for n map cells and Wo output pixels on that axis, and
+# (1 - 1/n) u for a large output. Hence e = 1/n, half a map cell per side:
+# x 1/177 (1/354 = 0.282% of the page width per side), y 1/121 (1/242 = 0.413% of the
+# page height per side). The framing analysis took the map as 121 columns by 177 rows
+# (the released orientation) and so had the two axes swapped (0.41% x, 0.28% y).
+# The outermost column and row of SyntheticDoc's training targets come from PIL's
+# resize of the released maps (edge value held in x, a clipped filter in y) and sit a
+# little further in (x 1/121, y about 0.0097); the preset follows the resize geometry.
+SYNTHETICDOC_MAP_SIZE = (121, 177)  # bm_out_size: rows (y), columns (x)
+INSET_PRESETS: dict[str, tuple[float, float]] = {
+    # half a map cell per side on each axis: (ex, ey) = (1 / columns, 1 / rows)
+    "syntheticdoc_half_cell": (1 / SYNTHETICDOC_MAP_SIZE[1], 1 / SYNTHETICDOC_MAP_SIZE[0]),
+}
+NO_INSET = (0.0, 0.0)
+Inset = str | float | tuple[float, float] | None
 
 
 @dataclass(slots=True)
@@ -182,16 +228,47 @@ def predict_grid(dewarper: Dewarper, image: NDArray[np.uint8]) -> NDArray[np.flo
     return grid2d[0].permute(1, 2, 0).float().cpu().numpy()
 
 
+def _grid_index(count: int, nodes: int, inset: float, convention: str) -> NDArray[np.float64]:
+    """Fractional grid-node index that each of ``count`` output pixels samples on one axis.
+
+    ``flattener``: pixel center u = (2k + 1) / count - 1 on the edge-aligned grid, as
+    ``grid_to_map``. ``uvdoc``: pixel k on node k (nodes - 1) / (count - 1), as
+    upstream's align_corners=True interpolation. The inset scales the position about
+    the page center by ``1 - inset`` before it is looked up."""
+    if convention == "uvdoc":
+        position = np.linspace(-1.0, 1.0, count, dtype=np.float64)
+    else:
+        position = center_positions(count)
+    return ((1.0 - inset) * position + 1.0) / 2.0 * (nodes - 1)
+
+
 def dense_backward_map(
     grid: NDArray[np.float32],
     convention: str,
     output_size: tuple[int, int],
     source_size: tuple[int, int],
+    inset: Inset = None,
 ) -> NDArray[np.float32]:
-    """Flattener backward map at ``output_size`` for a grid in ``convention``."""
+    """Flattener backward map at ``output_size`` for a grid in ``convention``.
+
+    With an inset ``(ex, ey)`` (``resolve_inset``), output coordinate u = (ux, uy) in
+    [-1, 1] gets the value that the map without inset has at ((1 - ex) ux, (1 - ey) uy):
+    the grid is sampled on the page region [-(1 - e), 1 - e] and the outline moves in by
+    e / 2 of the page extent per side. No inset returns the plain map unchanged."""
+    ex, ey = resolve_inset(inset)
+    if (ex, ey) == NO_INSET:
+        if convention == "uvdoc":
+            return uvdoc_dense_map(grid, output_size, source_size)
+        return grid_to_map(grid, output_size)
+    array = _grid(grid, "grid")  # the checks of grid_to_map and uvdoc_dense_map
+    height, width = _size(output_size, "output_size")
+    gh, gw = array.shape[:2]
+    rows = interpolation_matrix(_grid_index(height, gh, ey, convention), gh, extrapolate=False)
+    cols = interpolation_matrix(_grid_index(width, gw, ex, convention), gw, extrapolate=False)
+    dense = _apply(rows, array, cols)
     if convention == "uvdoc":
-        return uvdoc_dense_map(grid, output_size, source_size)
-    return grid_to_map(grid, output_size)
+        return align_corners_to_flattener(dense, source_size)
+    return dense
 
 
 def check_quantize(quantize: str) -> None:
@@ -201,6 +278,74 @@ def check_quantize(quantize: str) -> None:
             "invalid_config",
             f"quantize must be one of {QUANTIZE_MODES}, got {quantize!r}",
         )
+
+
+def _inset_error(message: str) -> FlattenerError:
+    return FlattenerError(Status.INPUT_ERROR, "invalid_config", message)
+
+
+def resolve_inset(inset: Inset) -> tuple[float, float]:
+    """``(ex, ey)`` of an inset: ``None`` (no inset), a name of ``INSET_PRESETS``, one
+    value for both axes or an ``(ex, ey)`` pair, each in ``[0, 1)``."""
+    if inset is None:
+        return NO_INSET
+    if isinstance(inset, str):
+        if inset not in INSET_PRESETS:
+            raise _inset_error(f"inset preset must be one of {tuple(INSET_PRESETS)}, got {inset!r}")
+        return INSET_PRESETS[inset]
+    values = (inset, inset) if not isinstance(inset, (tuple, list)) else tuple(inset)
+    if len(values) != 2 or any(
+        isinstance(v, bool) or not isinstance(v, (int, float, np.floating)) for v in values
+    ):
+        raise _inset_error(f"inset must be a preset name, a number or (ex, ey), got {inset!r}")
+    ex, ey = float(values[0]), float(values[1])
+    if not (0 <= ex < 1 and 0 <= ey < 1):
+        raise _inset_error(f"inset values must be in [0, 1), got {(ex, ey)}")
+    return ex, ey
+
+
+def inset_record(inset: Inset) -> dict[str, Any]:
+    """How an inset is recorded: ``{"x": ex, "y": ey, "preset": name or None}``."""
+    ex, ey = resolve_inset(inset)
+    return {"x": ex, "y": ey, "preset": inset if isinstance(inset, str) else None}
+
+
+def recorded_inset(record: dict[str, Any] | None) -> tuple[float, float]:
+    """``(ex, ey)`` of a recorded inset; a record without one predates the option."""
+    if not isinstance(record, dict):
+        return NO_INSET
+    return float(record.get("x", 0.0)), float(record.get("y", 0.0))
+
+
+def parse_inset(text: str) -> str | float | tuple[float, float]:
+    """``--inset``: a preset name, ``E`` (both axes) or ``EX,EY``."""
+    if text in INSET_PRESETS:
+        return text
+    try:
+        values = tuple(float(part) for part in text.split(","))
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"expected one of {', '.join(INSET_PRESETS)}, E or EX,EY; got {text!r}"
+        ) from None
+    if len(values) not in (1, 2):
+        raise argparse.ArgumentTypeError(f"expected E or EX,EY; got {text!r}")
+    inset = values[0] if len(values) == 1 else (values[0], values[1])
+    try:
+        resolve_inset(inset)
+    except FlattenerError as error:
+        raise argparse.ArgumentTypeError(str(error)) from None
+    return inset
+
+
+def inset_label(inset: Inset) -> str:
+    """Short name of an inset for file names: the preset name, ``E`` or ``EXxEY``;
+    empty for no inset."""
+    ex, ey = resolve_inset(inset)
+    if isinstance(inset, str):
+        return inset
+    if (ex, ey) == NO_INSET:
+        return ""
+    return f"{ex:g}" if ex == ey else f"{ex:g}x{ey:g}"
 
 
 def quantize_rgb(values: NDArray[np.float32], quantize: str) -> NDArray[np.uint8]:
@@ -263,6 +408,7 @@ def rectify(
     render_config: RenderConfig | None = None,
     allow_unchecked: bool = False,
     quantize: str = "round",
+    inset: Inset = None,
 ) -> RenderResult:
     """Predict and render through ``flattener.render`` and its checks.
 
@@ -277,6 +423,10 @@ def rectify(
     image over the same valid pixels and stores ``floor(clip(x, 0, 1) * 255)``. Checks,
     statuses and the failure policy are the same; ``metadata["dewarp"]["quantize"]``
     records the mode.
+
+    ``inset`` (``resolve_inset``) moves the outline inward on the backward map before it
+    is rendered (``dense_backward_map``), so every check runs on the inset map;
+    ``metadata["dewarp"]["inset"]`` records it (``inset_record``).
     """
     started = time.perf_counter()
     config = RenderConfig() if render_config is None else render_config
@@ -285,9 +435,11 @@ def rectify(
             Status.INPUT_ERROR, "invalid_config", "render_config must be RenderConfig"
         )
     check_quantize(quantize)
+    inset_info = inset_record(inset)
     size = tuple(image.shape[:2]) if output_size is None else tuple(output_size)
     grid = predict_grid(dewarper, image)
-    backward_map = dense_backward_map(grid, dewarper.config.grid_convention, size, image.shape[:2])
+    convention = dewarper.config.grid_convention
+    backward_map = dense_backward_map(grid, convention, size, image.shape[:2], inset)
     result = render(image, backward_map, config=replace(config, on_error="return"))
     if result.status != Status.SUCCESS:
         if allow_unchecked and result.status == Status.INVALID_TRANSFORM:
@@ -308,6 +460,7 @@ def rectify(
         "grid_size": list(grid.shape[:2]),
         "output_size": list(size),
         "quantize": quantize,
+        "inset": inset_info,
         "seconds": time.perf_counter() - started,
     }
     return result
@@ -386,10 +539,12 @@ def _batch_item(
     config: RenderConfig,
     force_render: bool,
     quantize: str,
+    inset: Inset = None,
 ) -> dict[str, Any]:
     """Keep, render or refuse one input; the file at ``target`` always matches the item.
 
-    ``previous`` comes only from a record of the same render settings and quantization."""
+    ``previous`` comes only from a record of the same render settings, quantization and
+    inset."""
     item: dict[str, Any] = {"input": task.source, "output": task.output}
     try:
         image = task.load()
@@ -404,6 +559,7 @@ def _batch_item(
             render_config=config,
             allow_unchecked=force_render,
             quantize=quantize,
+            inset=inset,
         )
     except (FlattenerError, OSError) as error:
         target.unlink(missing_ok=True)  # an older image no longer matches this input
@@ -432,9 +588,13 @@ def _batch_item(
     return item
 
 
-def prediction_evidence(dewarper: Dewarper, quantize: str) -> dict[str, Any]:
-    """The evidence block of a prediction record, with its output quantization."""
-    return {**evidence("predictions", dewarper.info), "quantize": quantize}
+def prediction_evidence(dewarper: Dewarper, quantize: str, inset: Inset = None) -> dict[str, Any]:
+    """The evidence block of a prediction record, with its output quantization and inset."""
+    return {
+        **evidence("predictions", dewarper.info),
+        "quantize": quantize,
+        "inset": inset_record(inset),
+    }
 
 
 def rectify_batch(
@@ -447,6 +607,7 @@ def rectify_batch(
     render_config: RenderConfig | None = None,
     fields: dict[str, Any] | None = None,
     quantize: str = "round",
+    inset: Inset = None,
 ) -> dict[str, Any]:
     """Rectify ``inputs`` into ``output_dir`` and record every item in ``predictions.json``.
 
@@ -454,15 +615,16 @@ def rectify_batch(
     input. An image that fails a check is written only with ``force_render``
     (``forced: true``). Without ``overwrite``, an output that ``predictions.json`` lists
     as written is kept with its recorded status when the weights, render settings,
-    quantization, input label, input pixels and sizes are unchanged (a forced image only
-    by a forced run); every other input is rendered again. A record without ``quantize``
-    predates the option and holds rounded images. A directory holding predictions of
-    other weights or of an older format, or outputs without a ``predictions.json``, is
-    refused. The report names the current weights and quantization before any image is
-    written, and says ``complete: false`` until the last input is done; images are
-    written atomically.
+    quantization, inset, input label, input pixels and sizes are unchanged (a forced image
+    only by a forced run); every other input is rendered again. A record without
+    ``quantize`` predates the option and holds rounded images; one without ``inset`` holds
+    images without inset. A directory holding predictions of other weights or of an older
+    format, or outputs without a ``predictions.json``, is refused. The report names the
+    current weights, quantization and inset before any image is written, and says
+    ``complete: false`` until the last input is done; images are written atomically.
     """
     check_quantize(quantize)
+    inset_info = inset_record(inset)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     report_path = output_dir / "predictions.json"
@@ -482,7 +644,8 @@ def rectify_batch(
                 f"{report_path} has an older format; use --overwrite",
             )
         same_quantize = previous.get("quantize", "round") == quantize
-        if previous.get("render_config") == _plain(asdict(config)) and same_quantize:
+        same_inset = recorded_inset(previous.get("inset")) == resolve_inset(inset)
+        if previous.get("render_config") == _plain(asdict(config)) and same_quantize and same_inset:
             previous_items = {item["output"]: item for item in previous.get("items", [])}
     elif not overwrite and any((output_dir / item.output).is_file() for item in inputs):
         raise FlattenerError(
@@ -494,10 +657,11 @@ def rectify_batch(
         "schema": PREDICTIONS_SCHEMA,
         "created_utc": utc_now(),
         "model": dewarper.info,
-        "evidence": prediction_evidence(dewarper, quantize),
+        "evidence": prediction_evidence(dewarper, quantize, inset),
         **(fields or {}),
         "force_render": force_render,
         "quantize": quantize,
+        "inset": inset_info,
         "render_config": asdict(config),
         "complete": False,
         "counts": _count([]),
@@ -507,7 +671,7 @@ def rectify_batch(
     for task in inputs:
         target = output_dir / task.output
         previous = previous_items.get(task.output)
-        item = _batch_item(dewarper, task, target, previous, config, force_render, quantize)
+        item = _batch_item(dewarper, task, target, previous, config, force_render, quantize, inset)
         report["items"].append(item)
         report["counts"] = _count(report["items"])
         write_json(report_path, report)
@@ -542,6 +706,7 @@ def rectify_docunet(
     overwrite: bool = False,
     force_render: bool = False,
     quantize: str = "round",
+    inset: Inset = None,
 ) -> dict[str, Any]:
     """Rectify every ``{k}_{m} copy.png`` into ``{k}_{m}.png`` at the crop's own size.
 
@@ -555,6 +720,7 @@ def rectify_docunet(
         force_render=force_render,
         fields={"input_dir": str(Path(input_dir)), "inputs": "docunet_crop"},
         quantize=quantize,
+        inset=inset,
     )
 
 
@@ -573,18 +739,26 @@ def main(argv: list[str] | None = None) -> int:
         "uint8 conversion of the sampled image: round (default, flattener.render) or "
         "truncate (floor(x*255), the paper protocol); checks and exit status are the same"
     )
+    inset_help = (
+        "move the page outline inward before rendering: a preset ("
+        + ", ".join(INSET_PRESETS)
+        + "), E for both axes or EX,EY, in normalized units (each side moves in by E/2 of "
+        "the page extent); checks and exit status are the same; default 0"
+    )
     single = commands.add_parser("image")
     single.add_argument("--input", required=True)
     single.add_argument("--output", required=True)
     single.add_argument("--output-size", type=int, nargs=2, metavar=("HEIGHT", "WIDTH"))
     single.add_argument("--force-render", action="store_true", help=force_help)
     single.add_argument("--quantize", choices=QUANTIZE_MODES, default="round", help=quantize_help)
+    single.add_argument("--inset", type=parse_inset, default=None, help=inset_help)
     batch = commands.add_parser("docunet")
     batch.add_argument("--input-dir", required=True)
     batch.add_argument("--output-dir", required=True)
     batch.add_argument("--overwrite", action="store_true")
     batch.add_argument("--force-render", action="store_true", help=force_help)
     batch.add_argument("--quantize", choices=QUANTIZE_MODES, default="round", help=quantize_help)
+    batch.add_argument("--inset", type=parse_inset, default=None, help=inset_help)
     args = parser.parse_args(argv)
     dewarper = load_dewarper(args.weights, device=args.device)
     if args.command == "image":
@@ -596,6 +770,7 @@ def main(argv: list[str] | None = None) -> int:
             render_config=RenderConfig(on_error="return"),
             allow_unchecked=args.force_render,
             quantize=args.quantize,
+            inset=args.inset,
         )
         output = Path(args.output)
         removed = False
@@ -611,7 +786,8 @@ def main(argv: list[str] | None = None) -> int:
             "reason": result.reason_code,
             "forced": bool(result.metadata.get("forced_render")),
             "quantize": args.quantize,
-            "evidence": prediction_evidence(dewarper, args.quantize),
+            "inset": inset_record(args.inset),
+            "evidence": prediction_evidence(dewarper, args.quantize, args.inset),
         }
         print(json.dumps(summary))
         return 0 if result.status == Status.SUCCESS else EXIT_FAILED
@@ -622,6 +798,7 @@ def main(argv: list[str] | None = None) -> int:
         overwrite=args.overwrite,
         force_render=args.force_render,
         quantize=args.quantize,
+        inset=args.inset,
     )
     print(json.dumps(report["counts"]))
     return 0 if report["counts"]["failed"] == 0 else EXIT_FAILED

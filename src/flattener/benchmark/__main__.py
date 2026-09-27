@@ -46,6 +46,13 @@ def _positive_int(text: str) -> int:
     return value
 
 
+def parse_inset(text: str):
+    """``--inset`` as ``flattener.dewarp.predict`` reads it."""
+    from ..dewarp.predict import parse_inset as parse
+
+    return parse(text)
+
+
 def _add_common(parser: argparse.ArgumentParser, *, predictions: bool = True) -> None:
     if predictions:
         parser.add_argument("predictions", type=Path, help="directory of rectified outputs")
@@ -418,6 +425,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--threads", type=_positive_int, default=2, help="torch threads; default %(default)s"
     )
     rectify.add_argument("--overwrite", action="store_true", help="predict every image again")
+    rectify.add_argument(
+        "--inset",
+        type=parse_inset,
+        default=None,
+        help="move the outline inward before sampling (flattener.dewarp.predict --inset): "
+        "a preset name, E or EX,EY; default 0",
+    )
     rectify.add_argument("--no-verify-inputs", action="store_true", help="accept other image bytes")
     rectify.add_argument("--quiet", action="store_true", help="no per-image progress")
 
@@ -526,6 +540,7 @@ def main(argv: list[str] | None = None) -> int:
             verify_inputs=not args.no_verify_inputs,
             overwrite=args.overwrite,
             log=None if args.quiet else lambda text: print(text, file=sys.stderr, flush=True),
+            inset=args.inset,
         )
         print(json.dumps(record["counts"]))
         return 0

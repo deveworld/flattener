@@ -62,6 +62,52 @@ def test_stress_runs_only_with_the_default_protocol(tmp_path, monkeypatch):
         tool.main([str(weights), "r1", "--ref-resize", "uvdoc_view2_double", "--stress"])
 
 
+def test_an_inset_gets_its_own_files_and_reports(tmp_path, monkeypatch):
+    preset = "syntheticdoc_half_cell"
+    args = tool.build_parser().parse_args(["model.pt", "r1", "--inset", preset])
+    assert args.inset == preset
+    assert tool.build_parser().parse_args(["model.pt", "r1"]).inset is None
+    assert tool.prediction_dir(tmp_path, "r1", "round", None) == tmp_path / "pred" / "r1"
+    assert tool.prediction_dir(tmp_path, "r1", "round", 0.0) == tmp_path / "pred" / "r1"
+    assert tool.prediction_dir(tmp_path, "r1", "truncate", preset) == (
+        tmp_path / f"pred-truncate-inset-{preset}" / "r1"
+    )
+    assert tool.report_name("uvdoc_view2_double", "truncate", preset) == (
+        f"docunet-uvdoc_view2_double-truncate-inset-{preset}.json"
+    )
+    assert tool.report_name("once", "round", (0.01, 0.02)) == "docunet-once-inset-0.01x0.02.json"
+    assert tool.record_name("truncate", preset) == f"predictions-truncate-inset-{preset}.json"
+    assert tool.ocr_report_name("round", 0.02) == "ocr-doctr-inset-0.02.json"
+    assert tool.inset_argument(None) == tool.inset_argument(0.0) == []
+    assert tool.inset_argument(preset) == ["--inset", preset]
+    assert tool.inset_argument((0.01, 0.02)) == ["--inset", "0.01,0.02"]
+    images = tmp_path / "pred"
+    images.mkdir()
+    (images / "1_1.png").write_bytes(b"image")
+    record = {"quantize": "truncate", "inset": {"x": 1 / 177, "y": 1 / 121, "preset": preset}}
+    report = {
+        "config": {"ref_resize": "uvdoc_view2_double", "conventions": list(tool.CONVENTIONS)},
+        "comparable": True,
+        "siftflow": {"source_sha256": "s"},
+        "inputs": {"predictions": {"1_1": tool.sha256_file(images / "1_1.png")}},
+        "predictions_record": record,
+    }
+    path = tmp_path / "report.json"
+    path.write_text(json.dumps(report))
+    settings = (images, "s", "uvdoc_view2_double", "truncate")
+    assert tool.report_matches(path, *settings, preset)
+    assert not tool.report_matches(path, *settings)
+    assert not tool.report_matches(path, *settings, 0.01)
+    del record["inset"]  # scored before the field: no inset
+    path.write_text(json.dumps(report))
+    assert tool.report_matches(path, *settings) and not tool.report_matches(path, *settings, preset)
+    weights = tmp_path / "model.pt"
+    weights.write_bytes(b"")
+    monkeypatch.setenv("FLATTENER_SIFTFLOW_SOURCE", str(tmp_path))
+    with pytest.raises(SystemExit, match="--inset"):
+        tool.main([str(weights), "r1", "--inset", preset, "--stress"])
+
+
 def test_ocr_reports_have_their_own_names_and_match_engine_and_images(tmp_path):
     assert tool.ocr_report_name("round") == "ocr-doctr.json"
     assert tool.ocr_report_name("truncate") == "ocr-doctr-truncate.json"
