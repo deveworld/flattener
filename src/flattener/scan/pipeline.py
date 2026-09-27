@@ -141,7 +141,7 @@ from .views import VIEW_SOURCES, crop_placement, run_view
 
 BUNDLE_SCHEMA = "flattener-scan-bundle-1"
 PIPELINE_NAME = "flattener.scan"
-PIPELINE_VERSION = 2  # 2: the gate is a hint (page_region_larger), settle pass
+PIPELINE_VERSION = 3  # 2: the gate is a hint, settle pass; 3: page evidence (scan.look)
 AUTO_PASSES = 1
 PASS_CHOICES = ("auto", 0, 1, 2)
 ORIENT_MODES = ("model", "none", "oracle")
