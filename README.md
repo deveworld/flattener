@@ -106,6 +106,7 @@ python -m flattener.benchmark uvdoc OUT --output reports/uvdoc.json
 - 자료는 https://igl.ethz.ch/projects/uvdoc/UVDoc_benchmark.zip (775 MB)에서 받습니다. `uvdoc-prepare`는 압축 파일의 SHA-256을 확인하고 `outputs/benchmarks/uvdoc-bench/`에 푼 뒤 `manifest.json`(출처 URL, 압축 파일과 파일별 해시)을 씁니다.
 - 예측: 모델은 사진 `img/{id}.png`을 보고, 예측한 격자는 `warped_textures/{id}.png`에 그 크기로 적용합니다. 이 텍스처는 평평한 텍스처를 사진과 똑같이 휘어 놓은 것으로, 조명과 배경이 없습니다. 쌍선형 보간, 원본 바깥은 0, `floor(x*255)` 저장까지 공개 코드와 같습니다. 결과는 `OUT/uwp_texture/`, 같은 격자를 사진에 적용한 결과는 `OUT/uwp_img/`에 둡니다. 모든 이미지를 저장하고 `flattener.render` 검사 결과는 `OUT/predictions.json`에 남깁니다.
 - 채점: `uwp_texture`(기본값, `--pred-type`)를 평평한 텍스처 `texture_sample/{id}.png`와 비교합니다. DocUNet과 같은 MATLAB 에뮬레이션(회색 변환, 텍스처를 598,400화소로 한 번 리사이즈, MS-SSIM, SIFT flow, AD, LD)을 쓰고, 50장 전체의 평균을 냅니다. 비교 기준은 UVDoc README erratum의 50장 값(UVDoc 0.785 / AD 0.119)입니다. 논문 본문 표는 절반만 쓴 값입니다.
+- 평가기 검증: UVDoc이 공개한 결과 이미지(`UVDocBenchmark_results.zip`)는 MS-SSIM 0.7854, AD 0.1186, LD 6.812로 erratum 값과 AADD 표 S1의 LD 6.810에 맞습니다. UVDoc MIT 가중치를 CPU에서 다시 예측하면 공개 이미지와 화소값이 최대 1 다르고, 점수는 0.7854 / 0.1201 / 6.890입니다. LD·AD 차이는 대부분 샘플 00040 한 장의 SIFT flow에서 나옵니다(LD +2.87, AD +0.079).
 
 ## 결과의 근거 구분
 
