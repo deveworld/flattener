@@ -7,7 +7,7 @@ roots, so a run resumes on another machine with the same spec.
 
 | Variable | Used by | Points to |
 |---|---|---|
-| `FLATTENER_CACHE` | `data-release.json` | directory holding `syntheticdoc-release/`, the copy written by `tools/syntheticdoc/compact.py` |
+| `FLATTENER_CACHE` | `data-release.json`, `train-release-perspective.json` | directory holding `syntheticdoc-release/`, the copy written by `tools/syntheticdoc/compact.py`, and `backgrounds/` |
 | `FLATTENER_DATA` | `data-research-doc3d-uvdoc.json`, `data-release-raw.json` | data root with `research/doc3d` and `research/uvdoc_final`, or with `release/syntheticdoc` (the full-resolution SyntheticDoc download of `tools/syntheticdoc/sdtool.py`) |
 | `FLATTENER_RUNS` | `train-*.json` | parent directory of run outputs |
 | `FLATTENER_UVDOC_WEIGHTS` | `train-release-uvdoc-init.json` | UVDoc `model/best_model.pkl` (MIT; sha256 `7e90861b…da23`) |
@@ -43,6 +43,26 @@ output resized to 89x61 (the like-for-like figure on 89x61 nodes) and 12.7 px as
 89x61 model before training. The 45x31 target resized to 89x61 has a mean EPE of 0.04 px
 against the 89x61 target, so on SyntheticDoc maps the denser grid adds little the 45x31
 grid cannot represent.
+
+`train-release-perspective.json` repeats the recipe of the best release model so far
+(scratch, 9.0M samples at batch 64) with composites on 30% of the samples: the page is placed on a new background with one
+homography (in-plane tilt, corner shifts up to 12% of the page, page area 5-100% of the
+frame) that maps the image and the target grid alike. Models trained on SyntheticDoc
+alone undo only about two thirds of the foreshortening of a tilted camera, which is most
+of the gap to UVDoc on its benchmark. The backgrounds are CC0 textures:
+
+```sh
+python tools/backgrounds/fetch_polyhaven.py --output "$FLATTENER_CACHE/backgrounds/polyhaven-768" \
+    --count 300 --categories floor wall wood fabric plaster plaster-concrete concrete tiles \
+    leather metal indoor clean cotton denim wool fleece "raw wood"
+```
+
+The `tilt15` validation view shows the same pages through a tilted camera (frame
+corners moved by up to 15%). `python -m flattener.dewarp.probe` compares a checkpoint's
+page and tilt views on the val split: grid error in percent of the page diagonal and
+the under-correction factor (0: the foreshortening is undone, 1: it is left in). On 200
+local SyntheticDoc val renders that best release model scored 0.27% / 0.01 on the page
+view and 2.02% / 0.40 on the tilted view.
 
 On Windows `cmd.exe`, set the variables with `set FLATTENER_CACHE=E:\cache` and so on.
 Command-line options (`--output-dir`, `--data-spec`, `--init-path`, `--num-workers`, ...)
