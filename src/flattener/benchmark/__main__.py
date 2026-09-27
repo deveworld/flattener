@@ -53,6 +53,28 @@ def parse_inset(text: str):
     return parse(text)
 
 
+def parse_rerun(text: str) -> int:
+    """``--rerun`` as ``flattener.dewarp.predict`` reads it."""
+    from ..dewarp.predict import parse_rerun as parse
+
+    return parse(text)
+
+
+def _add_rerun(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--rerun",
+        type=parse_rerun,
+        default=0,
+        help="crop passes after the whole-image prediction (flattener.dewarp.predict "
+        "--rerun); default 0",
+    )
+    parser.add_argument(
+        "--deskew",
+        action="store_true",
+        help="with --rerun: turn each crop upright (flattener.dewarp.predict --deskew)",
+    )
+
+
 def _add_common(parser: argparse.ArgumentParser, *, predictions: bool = True) -> None:
     if predictions:
         parser.add_argument("predictions", type=Path, help="directory of rectified outputs")
@@ -281,6 +303,7 @@ def build_parser() -> argparse.ArgumentParser:
         "published outputs were saved); default %(default)s",
     )
     rectify300.add_argument("--overwrite", action="store_true", help="predict every image again")
+    _add_rerun(rectify300)
     rectify300.add_argument(
         "--no-verify-inputs",
         action="store_true",
@@ -432,6 +455,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="move the outline inward before sampling (flattener.dewarp.predict --inset): "
         "a preset name, E or EX,EY; default 0",
     )
+    _add_rerun(rectify)
     rectify.add_argument("--no-verify-inputs", action="store_true", help="accept other image bytes")
     rectify.add_argument("--quiet", action="store_true", help="no per-image progress")
 
@@ -489,7 +513,10 @@ def _check_output(path: Path, overwrite: bool) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if getattr(args, "deskew", False) and args.rerun == 0:
+        parser.error("--deskew needs --rerun 1 or more")
     if args.command == "build-siftflow":
         build = siftflow.build_siftflow(
             args.siftflow_source, cache_dir=args.cache_dir, verbose=args.verbose
@@ -541,6 +568,8 @@ def main(argv: list[str] | None = None) -> int:
             overwrite=args.overwrite,
             log=None if args.quiet else lambda text: print(text, file=sys.stderr, flush=True),
             inset=args.inset,
+            rerun=args.rerun,
+            deskew=args.deskew,
         )
         print(json.dumps(record["counts"]))
         return 0
@@ -622,6 +651,8 @@ def main(argv: list[str] | None = None) -> int:
             overwrite=args.overwrite,
             force_render=args.force_render,
             quantize=args.quantize,
+            rerun=args.rerun,
+            deskew=args.deskew,
         )
         print(json.dumps(record["counts"]))
         return 0 if record["counts"]["failed"] == 0 else 1

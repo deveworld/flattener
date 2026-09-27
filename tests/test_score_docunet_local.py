@@ -108,6 +108,52 @@ def test_an_inset_gets_its_own_files_and_reports(tmp_path, monkeypatch):
         tool.main([str(weights), "r1", "--inset", preset, "--stress"])
 
 
+def test_rerun_settings_get_their_own_files_and_reports(tmp_path, monkeypatch):
+    from flattener.dewarp.predict import rerun_record
+
+    args = tool.build_parser().parse_args(["model.pt", "r1", "--rerun", "1", "--deskew"])
+    assert (args.rerun, args.deskew) == (1, True)
+    assert tool.build_parser().parse_args(["model.pt", "r1"]).rerun == 0
+    assert tool.prediction_dir(tmp_path, "r1", "round", None, 0) == tmp_path / "pred" / "r1"
+    assert tool.prediction_dir(tmp_path, "r1", "round", None, 1) == tmp_path / "pred-rerun1" / "r1"
+    assert tool.prediction_dir(tmp_path, "r1", "truncate", 0.02, 2, True) == (
+        tmp_path / "pred-truncate-inset-0.02-rerun2-deskew" / "r1"
+    )
+    assert tool.report_name("once", "round", None, 1, True) == "docunet-once-rerun1-deskew.json"
+    assert tool.record_name("truncate", None, 1) == "predictions-truncate-rerun1.json"
+    assert tool.ocr_report_name("round", None, 3) == "ocr-doctr-rerun3.json"
+    assert tool.rerun_argument() == [] and tool.rerun_argument(0) == []
+    assert tool.rerun_argument(2, True) == ["--rerun", "2", "--deskew"]
+    images = tmp_path / "pred"
+    images.mkdir()
+    (images / "1_1.png").write_bytes(b"image")
+    record = {"quantize": "round", "rerun": rerun_record(1, True)}
+    report = {
+        "config": {"ref_resize": "once", "conventions": list(tool.CONVENTIONS)},
+        "comparable": True,
+        "siftflow": {"source_sha256": "s"},
+        "inputs": {"predictions": {"1_1": tool.sha256_file(images / "1_1.png")}},
+        "predictions_record": record,
+    }
+    path = tmp_path / "report.json"
+    path.write_text(json.dumps(report))
+    settings = (images, "s", "once", "round", None)
+    assert tool.report_matches(path, *settings, 1, True)
+    assert not tool.report_matches(path, *settings)
+    assert not tool.report_matches(path, *settings, 1)
+    assert not tool.report_matches(path, *settings, 2, True)
+    del record["rerun"]  # scored before the field: whole-image predictions
+    path.write_text(json.dumps(report))
+    assert tool.report_matches(path, *settings) and not tool.report_matches(path, *settings, 1)
+    weights = tmp_path / "model.pt"
+    weights.write_bytes(b"")
+    monkeypatch.setenv("FLATTENER_SIFTFLOW_SOURCE", str(tmp_path))
+    with pytest.raises(SystemExit, match="--rerun"):
+        tool.main([str(weights), "r1", "--rerun", "1", "--stress"])
+    with pytest.raises(SystemExit, match="--deskew"):
+        tool.main([str(weights), "r1", "--deskew"])
+
+
 def test_ocr_reports_have_their_own_names_and_match_engine_and_images(tmp_path):
     assert tool.ocr_report_name("round") == "ocr-doctr.json"
     assert tool.ocr_report_name("truncate") == "ocr-doctr-truncate.json"

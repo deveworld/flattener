@@ -22,6 +22,11 @@ Prediction (:func:`predict_uvdoc`, as ``uvdocBenchmark_pred.py``):
 * An inset (``flattener.dewarp.predict.resolve_inset``, default none) moves the
   outline inward on the dense map before sampling, as ``flattener.dewarp.predict``
   does; it is recorded in ``predictions.json`` and its evidence block.
+* Crop passes (``rerun``, optionally ``deskew``; default none) refine the grid on crops
+  of the photo as ``flattener.dewarp.predict.rerun_grid`` does. The composed grid holds
+  flattener values of the photo, which address the texture's pixels by the same
+  normalized positions; both outputs then sample with align_corners=False, also for
+  UVDoc weights. The settings and each image's passes are recorded.
 
 Scoring (:func:`evaluate_uvdoc`, as ``evalScriptUVDoc.m`` with the default
 ``--pred-type uwp_texture``): each prediction against the flat texture
@@ -247,6 +252,8 @@ def unwarp(
     grid: NDArray[np.floating],
     convention: str,
     inset: Any = None,
+    *,
+    flattener_values: bool = False,
 ) -> NDArray[np.uint8]:
     """Apply a model grid (Gh, Gw, 2) to ``image`` at its own size, as upstream
     ``bilinear_unwarping`` followed by ``(x * 255).astype(uint8)``.
@@ -254,8 +261,9 @@ def unwarp(
     ``convention`` ``"uvdoc"``: the upstream code path (align_corners=True
     interpolation and sampling). ``"flattener"``: the dense flattener map sampled
     with align_corners=False. Both pad with zeros outside the source. With an
-    ``inset`` both sample ``flattener.dewarp.predict.dense_backward_map`` of the grid
-    with align_corners=False.
+    ``inset`` or ``flattener_values`` (a rerun's composed grid of flattener values,
+    ``flattener.dewarp.predict.rerun_grid``) both sample
+    ``flattener.dewarp.predict.dense_backward_map`` of the grid with align_corners=False.
     """
     import torch
     from torch.nn import functional as F
@@ -269,9 +277,9 @@ def unwarp(
     source = torch.from_numpy(image.transpose(2, 0, 1) / 255.0).float().unsqueeze(0)
     if convention not in ("uvdoc", "flattener"):
         raise ValueError(f"unknown grid convention {convention!r}")
-    no_inset = resolve_inset(inset) == NO_INSET
+    upstream = resolve_inset(inset) == NO_INSET and not flattener_values
     with torch.inference_mode():
-        if convention == "uvdoc" and no_inset:
+        if convention == "uvdoc" and upstream:
             points = torch.from_numpy(np.ascontiguousarray(grid.transpose(2, 0, 1)))
             points = points.float().unsqueeze(0)
             dense = F.interpolate(
@@ -280,7 +288,9 @@ def unwarp(
             sampled = F.grid_sample(source, dense, align_corners=True)
         else:
             size = (height, width)
-            dense = dense_backward_map(grid, convention, size, size, inset)
+            dense = dense_backward_map(
+                grid, convention, size, size, inset, flattener_values=flattener_values
+            )
             sampled = F.grid_sample(
                 source,
                 torch.from_numpy(dense).unsqueeze(0),
@@ -301,7 +311,12 @@ def _write_png(path: Path, pixels: NDArray[np.uint8]) -> str:
 
 
 def _check_status(
-    texture: NDArray[np.uint8], grid: NDArray, convention: str, inset: Any = None
+    texture: NDArray[np.uint8],
+    grid: NDArray,
+    convention: str,
+    inset: Any = None,
+    *,
+    flattener_values: bool = False,
 ) -> dict[str, Any]:
     """``flattener.render``'s checks of the dense map on the texture (recorded only)."""
     from ..contracts import RenderConfig
@@ -311,7 +326,7 @@ def _check_status(
     size = texture.shape[:2]
     result = render(
         texture,
-        dense_backward_map(grid, convention, size, size, inset),
+        dense_backward_map(grid, convention, size, size, inset, flattener_values=flattener_values),
         config=RenderConfig(on_error="return"),
     )
     stats = result.metadata.get("validation")
@@ -332,6 +347,8 @@ def predict_uvdoc(
     overwrite: bool = False,
     log: Callable[[str], None] | None = None,
     inset: Any = None,
+    rerun: int = 0,
+    deskew: bool = False,
 ) -> dict[str, Any]:
     """Rectify the 50 samples into ``output_dir/{uwp_texture,uwp_img}/{id}.png``.
 
@@ -341,15 +358,26 @@ def predict_uvdoc(
     output file, ``inputs: "uvdoc_benchmark"``), and a failed check sets ``forced``.
     Without ``overwrite`` an existing ``predictions.json`` stops the run. ``inset``
     (``flattener.dewarp.predict.resolve_inset``) moves the outline inward on the dense
-    map of both outputs and of the checks; ``predictions.json`` records it.
+    map of both outputs and of the checks; ``predictions.json`` records it. ``rerun``
+    crop passes (with ``deskew``) refine the grid on the photo
+    (``flattener.dewarp.predict.rerun_grid``) before both outputs and the checks;
+    ``predictions.json`` records the settings and each item its passes (``crops``).
     """
-    from ..dewarp.predict import inset_record, load_rgb, predict_grid, prediction_evidence
+    from ..dewarp.predict import (
+        inset_record,
+        load_rgb,
+        predict_grid,
+        prediction_evidence,
+        rerun_grid,
+        rerun_record,
+    )
 
     root, output = Path(root).expanduser().resolve(), Path(output_dir)
     record_path = output / "predictions.json"
     if record_path.exists() and not overwrite:
         raise FileExistsError(f"{record_path} exists; pass overwrite to predict again")
     inset_info = inset_record(inset)  # refuses an invalid inset before any work
+    rerun_info = rerun_record(rerun, deskew)  # and invalid rerun settings
     photos = hash_folder(root, "img", verify=verify_inputs)
     textures = hash_folder(root, "warped_textures", verify=verify_inputs)
     convention = dewarper.config.grid_convention
@@ -357,7 +385,7 @@ def predict_uvdoc(
         "schema": PREDICTIONS_SCHEMA,
         "created_utc": utc_now(),
         "model": dewarper.info,
-        "evidence": prediction_evidence(dewarper, "truncate", inset),
+        "evidence": prediction_evidence(dewarper, "truncate", inset, rerun, deskew),
         "inputs": "uvdoc_benchmark",
         "root": str(root),
         "inputs_verified": verify_inputs,
@@ -365,6 +393,7 @@ def predict_uvdoc(
         "force_render": True,
         "quantize": "truncate",
         "inset": inset_info,
+        "rerun": rerun_info,
         "protocol": {key: PROTOCOL[key] for key in ("model_input", *PRED_TYPES, "sampling")},
         "complete": False,
         "counts": {},
@@ -376,13 +405,17 @@ def predict_uvdoc(
         name = sample_name(sample)
         photo = load_rgb(root / "img" / name)
         texture = load_rgb(root / "warped_textures" / name)
-        grid = predict_grid(dewarper, photo)
-        check = _check_status(texture, grid, convention, inset)
+        if rerun:
+            grid, crops = rerun_grid(dewarper, photo, rerun, deskew)
+        else:
+            grid, crops = predict_grid(dewarper, photo), []
+        values = {"flattener_values": rerun > 0}
+        check = _check_status(texture, grid, convention, inset, **values)
         sources = {"uwp_texture": ("warped_textures", texture), "uwp_img": ("img", photo)}
         items = []
         for pred_type, (folder, source) in sources.items():
             target = output / pred_type / name
-            digest = _write_png(target, unwarp(source, grid, convention, inset))
+            digest = _write_png(target, unwarp(source, grid, convention, inset, **values))
             items.append(
                 {
                     "input": f"img/{name}",
@@ -396,6 +429,7 @@ def predict_uvdoc(
                     "forced": check["status"] != "success",
                     "size": list(photo.shape[:2]),
                     "output_size": list(source.shape[:2]),
+                    "crops": crops,
                 }
             )
         seconds = time.perf_counter() - started

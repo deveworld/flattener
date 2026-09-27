@@ -98,6 +98,12 @@ def _no_inset() -> dict[str, Any]:
     return {"x": 0.0, "y": 0.0, "preset": None}
 
 
+def _no_rerun() -> dict[str, Any]:
+    """``flattener.dewarp.predict.rerun_record()``: the whole-image prediction alone."""
+    keys = ("margin", "max_angle_deg", "min_agreement")
+    return {"passes": 0, "deskew": False, **dict.fromkeys(keys)}
+
+
 def prediction_record(predictions_dir: str | os.PathLike[str]) -> dict[str, Any] | None:
     """What ``flattener.dewarp.predict`` recorded about a predictions directory.
 
@@ -106,13 +112,15 @@ def prediction_record(predictions_dir: str | os.PathLike[str]) -> dict[str, Any]
     record without the field predates the option and was rounded; ``None`` for other
     formats), ``inset`` (the recorded ``{"x", "y", "preset"}`` inset of the outline; a
     current-format record without the field predates the option and has none; ``None``
-    for other formats), ``complete`` (whether the batch finished; ``None`` for records
-    that predate the flag), ``outputs`` (the recorded output file names) and ``failures``:
-    output file name -> status, reason and whether a forced image was written. Items of
-    the older ``flattener-dewarp-docunet-1`` format that were rendered unchecked
-    (``fallback``) count as ``invalid_transform``; that format ran no coverage check.
-    Returns ``None`` when the directory has no record; ``failures`` and ``outputs`` are
-    ``None`` for a record of another format.
+    for other formats), ``rerun`` (the recorded crop-and-rerun settings,
+    ``flattener.dewarp.predict.rerun_record``; a current-format record without the field
+    holds whole-image predictions; ``None`` for other formats), ``complete`` (whether the
+    batch finished; ``None`` for records that predate the flag), ``outputs`` (the recorded
+    output file names) and ``failures``: output file name -> status, reason and whether a
+    forced image was written. Items of the older ``flattener-dewarp-docunet-1`` format
+    that were rendered unchecked (``fallback``) count as ``invalid_transform``; that
+    format ran no coverage check. Returns ``None`` when the directory has no record;
+    ``failures`` and ``outputs`` are ``None`` for a record of another format.
     """
     path = Path(predictions_dir) / PREDICTIONS_FILE
     if not path.is_file():
@@ -158,6 +166,7 @@ def prediction_record(predictions_dir: str | os.PathLike[str]) -> dict[str, Any]
         "force_render": payload.get("force_render"),
         "quantize": payload.get("quantize", "round" if schema == PREDICTIONS_SCHEMA else None),
         "inset": payload.get("inset", _no_inset() if schema == PREDICTIONS_SCHEMA else None),
+        "rerun": payload.get("rerun", _no_rerun() if schema == PREDICTIONS_SCHEMA else None),
         "inputs": payload.get("inputs"),
         "complete": payload.get("complete") if schema == PREDICTIONS_SCHEMA else None,
         "items": len(items),
@@ -202,8 +211,8 @@ def report_evidence(
     Stress-variant inputs make it ``docunet_stress``, UVDoc benchmark inputs
     ``uvdoc_benchmark``; anything else is scored as the standard DocUNet benchmark
     (``measurement`` overrides this). Without a record the model provenance is
-    ``unknown``. ``quantize`` is the record's output quantization and ``inset`` its
-    outline inset (``None`` when unknown).
+    ``unknown``. ``quantize`` is the record's output quantization, ``inset`` its
+    outline inset and ``rerun`` its crop-and-rerun settings (``None`` when unknown).
     """
     inputs = "" if record is None else str(record.get("inputs") or "")
     if measurement is None:
@@ -215,4 +224,5 @@ def report_evidence(
         **evidence(measurement, None if record is None else record["model"]),
         "quantize": None if record is None else record.get("quantize"),
         "inset": None if record is None else record.get("inset"),
+        "rerun": None if record is None else record.get("rerun"),
     }

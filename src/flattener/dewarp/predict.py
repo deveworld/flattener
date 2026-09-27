@@ -35,6 +35,21 @@ checks, failure statuses, ``--force-render`` and the exit status are the same as
 without it. It takes a preset name, one value for both axes or ``EX,EY``; the default
 0 keeps the map unchanged. The inset is recorded like the quantization, and an output
 of one inset is never kept by a run with another.
+
+``--rerun R`` adds R crop passes after the whole-image prediction (default 0: the
+whole-image prediction alone, unchanged). Each pass takes the page outline of the current
+map (its boundary grid nodes, in source pixels), crops the outline's axis-aligned box
+plus ``RERUN_MARGIN`` of the page extent per side (whole pixels, clipped to the image),
+predicts again on the crop and composes that grid with the crop's placement into
+coordinates of the original image, so the final map samples the original image once.
+``--deskew`` (with ``--rerun``) also estimates the page angle from the outline's top and
+bottom edges and, when the estimate is usable and at most ``DESKEW_MAX_DEG``, turns the
+crop upright on a larger canvas before the prediction (``crop_pass``). The final map
+goes through the same checks, failure statuses, ``--force-render`` and exit status. The
+settings are recorded as ``rerun`` (``rerun_record``) in the printed JSON,
+``predictions.json`` and their evidence block, and every pass (crop box, angle, whether
+it turned the crop or why it was skipped) as ``crops``; an output of one setting is never
+kept by a run with another.
 """
 
 from __future__ import annotations
@@ -113,6 +128,12 @@ INSET_PRESETS: dict[str, tuple[float, float]] = {
 }
 NO_INSET = (0.0, 0.0)
 Inset = str | float | tuple[float, float] | None
+
+# Crop-and-rerun defaults, fixed before any benchmark result was looked at.
+RERUN_MARGIN = 0.04  # per side, fraction of the page extent: the middle of training's 0-8%
+DESKEW_MAX_DEG = 45.0  # a page estimated to turn further is cropped without turning
+DESKEW_MIN_AGREEMENT = 0.5  # least mean resultant length of the edge directions
+MIN_CROP_PIXELS = 2  # a crop box narrower or lower than this skips the pass
 
 
 @dataclass(slots=True)
@@ -211,21 +232,31 @@ def ieee_float32() -> Iterator[None]:
             cudnn.allow_tf32, matmul.allow_tf32 = saved
 
 
-def predict_grid(dewarper: Dewarper, image: NDArray[np.uint8]) -> NDArray[np.float32]:
-    """Raw 2-D model output as (Gh, Gw, 2), in the model's grid convention."""
+def model_input(dewarper: Dewarper, image: NDArray[np.uint8]) -> torch.Tensor:
+    """``image`` as the (1, 3, H, W) float model input: resized to the input size
+    (bilinear, align_corners=False, no antialias)."""
     _check_image(image)
     tensor = torch.tensor(image).to(dewarper.device)
     tensor = tensor.permute(2, 0, 1).unsqueeze(0).float().div_(255)
-    tensor = F.interpolate(
+    return F.interpolate(
         tensor,
         size=dewarper.config.input_size,
         mode="bilinear",
         align_corners=False,
         antialias=False,
     )
+
+
+def predict_input(dewarper: Dewarper, tensor: torch.Tensor) -> NDArray[np.float32]:
+    """Raw 2-D model output for a model input, as (Gh, Gw, 2)."""
     with torch.inference_mode(), ieee_float32():
         grid2d, _ = dewarper.model(tensor)
     return grid2d[0].permute(1, 2, 0).float().cpu().numpy()
+
+
+def predict_grid(dewarper: Dewarper, image: NDArray[np.uint8]) -> NDArray[np.float32]:
+    """Raw 2-D model output as (Gh, Gw, 2), in the model's grid convention."""
+    return predict_input(dewarper, model_input(dewarper, image))
 
 
 def _grid_index(count: int, nodes: int, inset: float, convention: str) -> NDArray[np.float64]:
@@ -248,15 +279,20 @@ def dense_backward_map(
     output_size: tuple[int, int],
     source_size: tuple[int, int],
     inset: Inset = None,
+    *,
+    flattener_values: bool = False,
 ) -> NDArray[np.float32]:
     """Flattener backward map at ``output_size`` for a grid in ``convention``.
 
     With an inset ``(ex, ey)`` (``resolve_inset``), output coordinate u = (ux, uy) in
     [-1, 1] gets the value that the map without inset has at ((1 - ex) ux, (1 - ey) uy):
     the grid is sampled on the page region [-(1 - e), 1 - e] and the outline moves in by
-    e / 2 of the page extent per side. No inset returns the plain map unchanged."""
+    e / 2 of the page extent per side. No inset returns the plain map unchanged.
+
+    ``flattener_values``: the grid already holds flattener values of the source (a
+    rerun's composed grid, ``rerun_grid``); ``convention`` then only places the nodes."""
     ex, ey = resolve_inset(inset)
-    if (ex, ey) == NO_INSET:
+    if (ex, ey) == NO_INSET and not (convention == "uvdoc" and flattener_values):
         if convention == "uvdoc":
             return uvdoc_dense_map(grid, output_size, source_size)
         return grid_to_map(grid, output_size)
@@ -266,7 +302,7 @@ def dense_backward_map(
     rows = interpolation_matrix(_grid_index(height, gh, ey, convention), gh, extrapolate=False)
     cols = interpolation_matrix(_grid_index(width, gw, ex, convention), gw, extrapolate=False)
     dense = _apply(rows, array, cols)
-    if convention == "uvdoc":
+    if convention == "uvdoc" and not flattener_values:
         return align_corners_to_flattener(dense, source_size)
     return dense
 
@@ -348,6 +384,247 @@ def inset_label(inset: Inset) -> str:
     return f"{ex:g}" if ex == ey else f"{ex:g}x{ey:g}"
 
 
+def _rerun_error(message: str) -> FlattenerError:
+    return FlattenerError(Status.INPUT_ERROR, "invalid_config", message)
+
+
+def rerun_record(rerun: int = 0, deskew: bool = False) -> dict[str, Any]:
+    """How crop-and-rerun settings are recorded: ``passes``, ``deskew`` and the rules that
+    apply (``margin`` with passes, ``max_angle_deg`` and ``min_agreement`` with deskew;
+    ``None`` otherwise). Refuses a negative or non-integer ``rerun`` and deskew without
+    passes."""
+    if isinstance(rerun, bool) or not isinstance(rerun, (int, np.integer)) or rerun < 0:
+        raise _rerun_error(f"rerun must be an integer >= 0, got {rerun!r}")
+    if not isinstance(deskew, bool):
+        raise _rerun_error(f"deskew must be a bool, got {deskew!r}")
+    if deskew and rerun == 0:
+        raise _rerun_error("deskew needs rerun >= 1")
+    return {
+        "passes": int(rerun),
+        "deskew": deskew,
+        "margin": RERUN_MARGIN if rerun else None,
+        "max_angle_deg": DESKEW_MAX_DEG if deskew else None,
+        "min_agreement": DESKEW_MIN_AGREEMENT if deskew else None,
+    }
+
+
+def recorded_rerun(record: dict[str, Any] | None) -> dict[str, Any]:
+    """A recorded rerun setting; a record without one predates the option (no passes)."""
+    return record if isinstance(record, dict) else rerun_record()
+
+
+def parse_rerun(text: str) -> int:
+    """``--rerun``: the number of crop passes, an integer >= 0."""
+    try:
+        value = int(text)
+    except ValueError:
+        value = -1
+    if value < 0:
+        raise argparse.ArgumentTypeError(f"expected an integer >= 0, got {text!r}")
+    return value
+
+
+def _source_points(values: NDArray, source_size: tuple[int, int]) -> NDArray[np.float64]:
+    """Flattener values -> source pixel-edge coordinates (0 and W are the outer edges)."""
+    height, width = source_size
+    scale = np.array([width, height], dtype=np.float64)
+    return (np.asarray(values, dtype=np.float64) + 1.0) / 2.0 * scale
+
+
+def _flattener_values(raw: NDArray, convention: str, size: tuple[float, float]) -> NDArray:
+    """Raw model values -> float64 flattener values of the (height, width) ``size`` image
+    the model saw (``uvdoc``: align_corners=True values of that image)."""
+    values = np.asarray(raw, dtype=np.float64)
+    if convention == "uvdoc":
+        n = np.array([size[1], size[0]], dtype=np.float64)
+        values = values * (n - 1.0) / n
+    return values
+
+
+def outline_points(grid: NDArray, source_size: tuple[int, int]) -> NDArray[np.float64]:
+    """Boundary nodes of a grid of flattener values, as source pixel-edge points (N, 2)."""
+    points = _source_points(grid, source_size)
+    return np.concatenate([points[0], points[-1], points[1:-1, 0], points[1:-1, -1]])
+
+
+def crop_box(
+    outline: NDArray, source_size: tuple[int, int], margin: float = RERUN_MARGIN
+) -> tuple[int, int, int, int]:
+    """Whole-pixel box ``(left, top, right, bottom)`` around the ``outline`` points: their
+    axis-aligned bounds plus ``margin`` of their extent per side, clipped to the image."""
+    height, width = source_size
+    low, high = outline.min(axis=0), outline.max(axis=0)
+    extent = high - low
+    limit = np.array([width, height], dtype=np.float64)
+    low = np.floor(low - margin * extent).clip(0, limit)
+    high = np.ceil(high + margin * extent).clip(0, limit)
+    return int(low[0]), int(low[1]), int(high[0]), int(high[1])
+
+
+def estimate_page_angle(
+    grid: NDArray, source_size: tuple[int, int]
+) -> tuple[float | None, str | None]:
+    """Page angle in degrees from the top and bottom rows of a grid of flattener values,
+    or ``None`` and why the estimate is unusable.
+
+    The angle is the direction of the two edges in source pixels (x right, y down, so a
+    positive angle turns the page clockwise on screen); both edges run along increasing
+    grid columns. It is a robust mean of the directions of the edge segments: their
+    circular mean, corrected by the mean deviation of the middle half of the segments
+    (``n // 4`` dropped at each end). Unusable: ``degenerate_outline`` when an edge is not
+    finite or its end nodes lie less than ``MIN_CROP_PIXELS`` apart, and
+    ``inconsistent_edges`` when the mean resultant length of the unit directions is below
+    ``DESKEW_MIN_AGREEMENT``."""
+    points = _source_points(grid, source_size)
+    units = []
+    for edge in (points[0], points[-1]):
+        if not np.isfinite(edge).all() or np.hypot(*(edge[-1] - edge[0])) < MIN_CROP_PIXELS:
+            return None, "degenerate_outline"
+        steps = np.diff(edge, axis=0)
+        lengths = np.hypot(steps[:, 0], steps[:, 1])
+        units.append(steps[lengths > 0] / lengths[lengths > 0, None])
+    directions = np.concatenate(units)
+    mean = directions.mean(axis=0)
+    if np.hypot(*mean) < DESKEW_MIN_AGREEMENT:
+        return None, "inconsistent_edges"
+    center = np.arctan2(mean[1], mean[0])
+    deviation = np.sort(np.angle(np.exp(1j * (np.arctan2(*directions.T[::-1]) - center))))
+    drop = deviation.size // 4
+    angle = np.angle(np.exp(1j * (center + deviation[drop : deviation.size - drop].mean())))
+    return float(np.degrees(angle)), None
+
+
+def canvas_size(box: tuple[int, int, int, int], angle_deg: float) -> tuple[float, float]:
+    """(height, width) in source pixels of the canvas that holds the whole crop ``box``
+    turned by ``-angle_deg``; the crop's own size for no angle."""
+    left, top, right, bottom = box
+    width, height = right - left, bottom - top
+    if angle_deg == 0.0:
+        return float(height), float(width)
+    c, s = abs(np.cos(np.radians(angle_deg))), abs(np.sin(np.radians(angle_deg)))
+    return float(height * c + width * s), float(width * c + height * s)
+
+
+def canvas_to_source(
+    box: tuple[int, int, int, int],
+    angle_deg: float,
+    canvas: tuple[float, float],
+    source_size: tuple[int, int],
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """Affine map ``q = M q' + t`` from flattener values q' of the canvas to flattener
+    values q of the source.
+
+    The canvas (``canvas_size``, centered on the crop ``box``) shows the crop turned by
+    ``-angle_deg``: canvas point q' lies at ``R(angle) (q' * canvas / 2)`` source pixels
+    from the box center, with R turning x toward y. For no angle the canvas is the box."""
+    left, top, right, bottom = box
+    height, width = source_size
+    theta = np.radians(angle_deg)
+    rotation = np.array([[np.cos(theta), -np.sin(theta)], [np.sin(theta), np.cos(theta)]])
+    matrix = np.diag([2.0 / width, 2.0 / height]) @ rotation @ np.diag(np.divide(canvas[::-1], 2))
+    offset = np.array([(left + right) / width - 1.0, (top + bottom) / height - 1.0])
+    return matrix, offset
+
+
+def canvas_input(
+    dewarper: Dewarper, crop: NDArray[np.uint8], angle_deg: float, canvas: tuple[float, float]
+) -> torch.Tensor:
+    """Model input of ``crop`` turned by ``-angle_deg`` on its ``canvas``, sampled once at
+    the input's pixel centers (bilinear, align_corners=False); canvas pixels outside the
+    crop repeat its border pixels."""
+    _check_image(crop)
+    height, width = crop.shape[:2]
+    matrix, offset = canvas_to_source((0, 0, width, height), angle_deg, canvas, (height, width))
+    in_height, in_width = dewarper.config.input_size
+    positions = np.stack(np.meshgrid(center_positions(in_width), center_positions(in_height)), -1)
+    grid = torch.from_numpy((positions @ matrix.T + offset).astype(np.float32))[None]
+    source = torch.tensor(crop).to(dewarper.device)
+    source = source.permute(2, 0, 1).unsqueeze(0).float().div_(255)
+    return F.grid_sample(
+        source,
+        grid.to(dewarper.device),
+        mode="bilinear",
+        padding_mode="border",
+        align_corners=False,
+    )
+
+
+def crop_pass(
+    dewarper: Dewarper, image: NDArray[np.uint8], grid: NDArray, deskew: bool = False
+) -> tuple[NDArray[np.float64], dict[str, Any]]:
+    """One rerun pass on ``image`` from ``grid`` (flattener values of ``image``): the new
+    grid in flattener values of ``image`` and the pass record.
+
+    The crop is ``crop_box`` of the grid's outline (``outline_points``). Without a turn,
+    the model sees the crop resized like a whole image (``predict_grid``). With
+    ``deskew`` and a usable angle of at most ``DESKEW_MAX_DEG`` (``estimate_page_angle``),
+    it sees the crop turned upright on a canvas that keeps all of it (``canvas_input``).
+    The prediction is composed with ``canvas_to_source``. A pass whose outline is not
+    finite (``non_finite_outline``) or whose box is under ``MIN_CROP_PIXELS`` on an axis
+    (``empty_crop``) keeps ``grid``.
+
+    The record holds ``outline_box`` (the outline's bounds, source pixels), ``box``
+    (left, top, right, bottom), ``angle_deg`` (the estimate; ``None`` without deskew or
+    when unusable), ``deskew_skipped`` (why the crop was not turned: the estimate's
+    reason or ``angle_above_limit``), ``rotated``, ``canvas_size`` (height, width in
+    source pixels) and ``skipped`` (why the pass kept ``grid``)."""
+    source_size = image.shape[:2]
+    record: dict[str, Any] = {
+        "outline_box": None,
+        "box": None,
+        "angle_deg": None,
+        "deskew_skipped": None,
+        "rotated": False,
+        "canvas_size": None,
+        "skipped": None,
+    }
+    outline = outline_points(grid, source_size)
+    if not np.isfinite(outline).all():
+        record["skipped"] = "non_finite_outline"
+        return np.asarray(grid, dtype=np.float64), record
+    record["outline_box"] = [*outline.min(axis=0).tolist(), *outline.max(axis=0).tolist()]
+    box = crop_box(outline, source_size)
+    left, top, right, bottom = box
+    record["box"] = list(box)
+    if min(right - left, bottom - top) < MIN_CROP_PIXELS:
+        record["skipped"] = "empty_crop"
+        return np.asarray(grid, dtype=np.float64), record
+    angle = 0.0
+    if deskew:
+        estimate, reason = estimate_page_angle(grid, source_size)
+        if reason is None and abs(estimate) > DESKEW_MAX_DEG:
+            reason = "angle_above_limit"
+        record.update(angle_deg=estimate, deskew_skipped=reason)
+        angle = estimate if reason is None else 0.0
+    crop = image[top:bottom, left:right]
+    canvas = canvas_size(box, angle)
+    if angle == 0.0:
+        raw = predict_grid(dewarper, crop)
+    else:
+        raw = predict_input(dewarper, canvas_input(dewarper, crop, angle, canvas))
+        record["rotated"] = True
+    record["canvas_size"] = list(canvas)
+    local = _flattener_values(raw, dewarper.config.grid_convention, canvas)
+    matrix, offset = canvas_to_source(box, angle, canvas, source_size)
+    return local @ matrix.T + offset, record
+
+
+def rerun_grid(
+    dewarper: Dewarper, image: NDArray[np.uint8], rerun: int, deskew: bool = False
+) -> tuple[NDArray[np.float64], list[dict[str, Any]]]:
+    """Grid of flattener values of ``image`` after the whole-image prediction and
+    ``rerun`` crop passes (``crop_pass``), with one record per pass (``pass`` from 1)."""
+    rerun_record(rerun, deskew)
+    grid = _flattener_values(
+        predict_grid(dewarper, image), dewarper.config.grid_convention, image.shape[:2]
+    )
+    passes = []
+    for number in range(1, rerun + 1):
+        grid, record = crop_pass(dewarper, image, grid, deskew)
+        passes.append({"pass": number, **record})
+    return grid, passes
+
+
 def quantize_rgb(values: NDArray[np.float32], quantize: str) -> NDArray[np.uint8]:
     """Sampled float RGB as uint8, computed in float32 like the renderer.
 
@@ -409,6 +686,8 @@ def rectify(
     allow_unchecked: bool = False,
     quantize: str = "round",
     inset: Inset = None,
+    rerun: int = 0,
+    deskew: bool = False,
 ) -> RenderResult:
     """Predict and render through ``flattener.render`` and its checks.
 
@@ -427,6 +706,12 @@ def rectify(
     ``inset`` (``resolve_inset``) moves the outline inward on the backward map before it
     is rendered (``dense_backward_map``), so every check runs on the inset map;
     ``metadata["dewarp"]["inset"]`` records it (``inset_record``).
+
+    ``rerun`` crop passes (``rerun_grid``, with ``deskew``) refine the grid before it is
+    densified; the checks run on the final composed map, which samples ``image`` once.
+    ``metadata["dewarp"]["rerun"]`` records the settings (``rerun_record``) and
+    ``metadata["dewarp"]["crops"]`` the passes (empty for no passes). ``rerun=0`` is the
+    whole-image prediction alone, unchanged.
     """
     started = time.perf_counter()
     config = RenderConfig() if render_config is None else render_config
@@ -436,10 +721,17 @@ def rectify(
         )
     check_quantize(quantize)
     inset_info = inset_record(inset)
+    rerun_info = rerun_record(rerun, deskew)
     size = tuple(image.shape[:2]) if output_size is None else tuple(output_size)
-    grid = predict_grid(dewarper, image)
     convention = dewarper.config.grid_convention
-    backward_map = dense_backward_map(grid, convention, size, image.shape[:2], inset)
+    if rerun == 0:
+        grid, crops = predict_grid(dewarper, image), []
+        backward_map = dense_backward_map(grid, convention, size, image.shape[:2], inset)
+    else:
+        grid, crops = rerun_grid(dewarper, image, rerun, deskew)
+        backward_map = dense_backward_map(
+            grid, convention, size, image.shape[:2], inset, flattener_values=True
+        )
     result = render(image, backward_map, config=replace(config, on_error="return"))
     if result.status != Status.SUCCESS:
         if allow_unchecked and result.status == Status.INVALID_TRANSFORM:
@@ -461,6 +753,8 @@ def rectify(
         "output_size": list(size),
         "quantize": quantize,
         "inset": inset_info,
+        "rerun": rerun_info,
+        "crops": crops,
         "seconds": time.perf_counter() - started,
     }
     return result
@@ -540,11 +834,13 @@ def _batch_item(
     force_render: bool,
     quantize: str,
     inset: Inset = None,
+    rerun: int = 0,
+    deskew: bool = False,
 ) -> dict[str, Any]:
     """Keep, render or refuse one input; the file at ``target`` always matches the item.
 
-    ``previous`` comes only from a record of the same render settings, quantization and
-    inset."""
+    ``previous`` comes only from a record of the same render settings, quantization,
+    inset and rerun settings."""
     item: dict[str, Any] = {"input": task.source, "output": task.output}
     try:
         image = task.load()
@@ -560,6 +856,8 @@ def _batch_item(
             allow_unchecked=force_render,
             quantize=quantize,
             inset=inset,
+            rerun=rerun,
+            deskew=deskew,
         )
     except (FlattenerError, OSError) as error:
         target.unlink(missing_ok=True)  # an older image no longer matches this input
@@ -583,17 +881,22 @@ def _batch_item(
         input_sha256=digest,
         output_size=result.metadata["dewarp"]["output_size"],
         validation=_validation_summary(result),
+        crops=result.metadata["dewarp"]["crops"],
         seconds=result.metadata["dewarp"]["seconds"],
     )
     return item
 
 
-def prediction_evidence(dewarper: Dewarper, quantize: str, inset: Inset = None) -> dict[str, Any]:
-    """The evidence block of a prediction record, with its output quantization and inset."""
+def prediction_evidence(
+    dewarper: Dewarper, quantize: str, inset: Inset = None, rerun: int = 0, deskew: bool = False
+) -> dict[str, Any]:
+    """The evidence block of a prediction record, with its output quantization, inset and
+    rerun settings."""
     return {
         **evidence("predictions", dewarper.info),
         "quantize": quantize,
         "inset": inset_record(inset),
+        "rerun": rerun_record(rerun, deskew),
     }
 
 
@@ -608,6 +911,8 @@ def rectify_batch(
     fields: dict[str, Any] | None = None,
     quantize: str = "round",
     inset: Inset = None,
+    rerun: int = 0,
+    deskew: bool = False,
 ) -> dict[str, Any]:
     """Rectify ``inputs`` into ``output_dir`` and record every item in ``predictions.json``.
 
@@ -615,16 +920,19 @@ def rectify_batch(
     input. An image that fails a check is written only with ``force_render``
     (``forced: true``). Without ``overwrite``, an output that ``predictions.json`` lists
     as written is kept with its recorded status when the weights, render settings,
-    quantization, inset, input label, input pixels and sizes are unchanged (a forced image
-    only by a forced run); every other input is rendered again. A record without
-    ``quantize`` predates the option and holds rounded images; one without ``inset`` holds
-    images without inset. A directory holding predictions of other weights or of an older
-    format, or outputs without a ``predictions.json``, is refused. The report names the
-    current weights, quantization and inset before any image is written, and says
-    ``complete: false`` until the last input is done; images are written atomically.
+    quantization, inset, rerun settings, input label, input pixels and sizes are unchanged
+    (a forced image only by a forced run); every other input is rendered again. A record
+    without ``quantize`` predates the option and holds rounded images; one without
+    ``inset`` holds images without inset; one without ``rerun`` holds whole-image
+    predictions. A directory holding predictions of other weights or of an older format,
+    or outputs without a ``predictions.json``, is refused. The report names the current
+    weights, quantization, inset and rerun settings before any image is written, and says
+    ``complete: false`` until the last input is done; images are written atomically. Each
+    item records its crop passes (``crops``, see ``crop_pass``).
     """
     check_quantize(quantize)
     inset_info = inset_record(inset)
+    rerun_info = rerun_record(rerun, deskew)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     report_path = output_dir / "predictions.json"
@@ -645,7 +953,9 @@ def rectify_batch(
             )
         same_quantize = previous.get("quantize", "round") == quantize
         same_inset = recorded_inset(previous.get("inset")) == resolve_inset(inset)
-        if previous.get("render_config") == _plain(asdict(config)) and same_quantize and same_inset:
+        same_rerun = recorded_rerun(previous.get("rerun")) == rerun_info
+        same_render = previous.get("render_config") == _plain(asdict(config))
+        if same_render and same_quantize and same_inset and same_rerun:
             previous_items = {item["output"]: item for item in previous.get("items", [])}
     elif not overwrite and any((output_dir / item.output).is_file() for item in inputs):
         raise FlattenerError(
@@ -657,11 +967,12 @@ def rectify_batch(
         "schema": PREDICTIONS_SCHEMA,
         "created_utc": utc_now(),
         "model": dewarper.info,
-        "evidence": prediction_evidence(dewarper, quantize, inset),
+        "evidence": prediction_evidence(dewarper, quantize, inset, rerun, deskew),
         **(fields or {}),
         "force_render": force_render,
         "quantize": quantize,
         "inset": inset_info,
+        "rerun": rerun_info,
         "render_config": asdict(config),
         "complete": False,
         "counts": _count([]),
@@ -671,7 +982,9 @@ def rectify_batch(
     for task in inputs:
         target = output_dir / task.output
         previous = previous_items.get(task.output)
-        item = _batch_item(dewarper, task, target, previous, config, force_render, quantize, inset)
+        item = _batch_item(
+            dewarper, task, target, previous, config, force_render, quantize, inset, rerun, deskew
+        )
         report["items"].append(item)
         report["counts"] = _count(report["items"])
         write_json(report_path, report)
@@ -707,6 +1020,8 @@ def rectify_docunet(
     force_render: bool = False,
     quantize: str = "round",
     inset: Inset = None,
+    rerun: int = 0,
+    deskew: bool = False,
 ) -> dict[str, Any]:
     """Rectify every ``{k}_{m} copy.png`` into ``{k}_{m}.png`` at the crop's own size.
 
@@ -721,6 +1036,8 @@ def rectify_docunet(
         fields={"input_dir": str(Path(input_dir)), "inputs": "docunet_crop"},
         quantize=quantize,
         inset=inset,
+        rerun=rerun,
+        deskew=deskew,
     )
 
 
@@ -745,6 +1062,15 @@ def main(argv: list[str] | None = None) -> int:
         + "), E for both axes or EX,EY, in normalized units (each side moves in by E/2 of "
         "the page extent); checks and exit status are the same; default 0"
     )
+    rerun_help = (
+        "crop passes after the whole-image prediction: crop the predicted outline's box "
+        f"plus {RERUN_MARGIN:.0%} of the page extent per side, predict again and compose; "
+        "checks and exit status are the same; default 0"
+    )
+    deskew_help = (
+        "with --rerun: turn each crop upright when the page angle estimated from the "
+        f"outline's top and bottom edges is usable and at most {DESKEW_MAX_DEG:g} degrees"
+    )
     single = commands.add_parser("image")
     single.add_argument("--input", required=True)
     single.add_argument("--output", required=True)
@@ -752,6 +1078,8 @@ def main(argv: list[str] | None = None) -> int:
     single.add_argument("--force-render", action="store_true", help=force_help)
     single.add_argument("--quantize", choices=QUANTIZE_MODES, default="round", help=quantize_help)
     single.add_argument("--inset", type=parse_inset, default=None, help=inset_help)
+    single.add_argument("--rerun", type=parse_rerun, default=0, help=rerun_help)
+    single.add_argument("--deskew", action="store_true", help=deskew_help)
     batch = commands.add_parser("docunet")
     batch.add_argument("--input-dir", required=True)
     batch.add_argument("--output-dir", required=True)
@@ -759,7 +1087,11 @@ def main(argv: list[str] | None = None) -> int:
     batch.add_argument("--force-render", action="store_true", help=force_help)
     batch.add_argument("--quantize", choices=QUANTIZE_MODES, default="round", help=quantize_help)
     batch.add_argument("--inset", type=parse_inset, default=None, help=inset_help)
+    batch.add_argument("--rerun", type=parse_rerun, default=0, help=rerun_help)
+    batch.add_argument("--deskew", action="store_true", help=deskew_help)
     args = parser.parse_args(argv)
+    if args.deskew and args.rerun == 0:
+        parser.error("--deskew needs --rerun 1 or more")
     dewarper = load_dewarper(args.weights, device=args.device)
     if args.command == "image":
         size = None if args.output_size is None else tuple(args.output_size)
@@ -771,6 +1103,8 @@ def main(argv: list[str] | None = None) -> int:
             allow_unchecked=args.force_render,
             quantize=args.quantize,
             inset=args.inset,
+            rerun=args.rerun,
+            deskew=args.deskew,
         )
         output = Path(args.output)
         removed = False
@@ -787,7 +1121,11 @@ def main(argv: list[str] | None = None) -> int:
             "forced": bool(result.metadata.get("forced_render")),
             "quantize": args.quantize,
             "inset": inset_record(args.inset),
-            "evidence": prediction_evidence(dewarper, args.quantize, args.inset),
+            "rerun": rerun_record(args.rerun, args.deskew),
+            "crops": result.metadata["dewarp"]["crops"],
+            "evidence": prediction_evidence(
+                dewarper, args.quantize, args.inset, args.rerun, args.deskew
+            ),
         }
         print(json.dumps(summary))
         return 0 if result.status == Status.SUCCESS else EXIT_FAILED
@@ -799,6 +1137,8 @@ def main(argv: list[str] | None = None) -> int:
         force_render=args.force_render,
         quantize=args.quantize,
         inset=args.inset,
+        rerun=args.rerun,
+        deskew=args.deskew,
     )
     print(json.dumps(report["counts"]))
     return 0 if report["counts"]["failed"] == 0 else EXIT_FAILED

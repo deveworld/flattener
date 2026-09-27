@@ -6,38 +6,43 @@ Usage (from any directory; put --stress after CHECKPOINT and RUN):
       --quantize truncate --ref-resize uvdoc_view2_double    # the published protocol
   .venv/bin/python tools/score_docunet_local.py CHECKPOINT RUN \
       --quantize truncate --ref-resize uvdoc_view2_double --inset syntheticdoc_half_cell
+  .venv/bin/python tools/score_docunet_local.py CHECKPOINT RUN \
+      --quantize truncate --ref-resize uvdoc_view2_double --rerun 1 --deskew
   .venv/bin/python tools/score_docunet_local.py CHECKPOINT RUN --ocr \
       --tesseract TREE/tesseract.exe --tesseract-launcher wine   # UB-Mannheim 5.0.1 via Wine
 
 Steps:
   1. ``flattener.dewarp.predict docunet`` rectifies the 130 crops with ``--force-render``
-     (published methods are scored that way), ``--quantize Q`` and ``--inset I`` into
-     CACHE/pred/RUN (Q=round and no inset, the defaults), CACHE/pred-Q/RUN, or
-     CACHE/pred[-Q]-inset-L/RUN with an inset (L: the preset name or the values, see
-     ``flattener.dewarp.predict.inset_label``). Images that predictions.json lists for
-     the same weights, quantization, inset and inputs are kept.
+     (published methods are scored that way), ``--quantize Q``, ``--inset I`` and
+     ``--rerun R [--deskew]`` into CACHE/pred/RUN (Q=round, no inset and no rerun, the
+     defaults), CACHE/pred-Q/RUN, or CACHE/pred[-Q]-inset-L/RUN with an inset (L: the
+     preset name or the values, see ``flattener.dewarp.predict.inset_label``), with
+     ``-rerunR`` and then ``-deskew`` appended for crop passes. Images that
+     predictions.json lists for the same weights, quantization, inset, rerun settings
+     and inputs are kept.
   2. ``flattener.benchmark docunet`` scores them with all three conventions and
      ``--ref-resize R`` into outputs/dewarp-runs/RUN/docunet-R.json, or
      docunet-R-truncate.json for Q=truncate (default: docunet-once.json), with
-     ``-inset-L`` before .json for an inset. An existing report is kept when its
-     prediction hashes, ref-resize, quantization and inset match; a report of other
-     images or settings stops the script, and --overwrite replaces it.
-  3. With ``--stress`` (default --quantize, --ref-resize and no inset only):
+     ``-inset-L``, ``-rerunR`` and ``-deskew`` before .json as set. An existing report
+     is kept when its prediction hashes, ref-resize, quantization, inset and rerun
+     settings match; a report of other images or settings stops the script, and
+     --overwrite replaces it.
+  3. With ``--stress`` (default --quantize, --ref-resize, no inset and no rerun only):
      ``flattener.benchmark docunet-stress`` predicts and scores the
      stress variants (default: full_frame, rot90, rot270, small_page) into
      CACHE/stress/RUN and copies stress.json and each variant's docunet.json and
      predictions.json to outputs/dewarp-runs/RUN/stress/.
   4. With ``--ocr``: ``flattener.benchmark ocr`` (DocTr protocol, Setting 1 and 2) into
      outputs/dewarp-runs/RUN/ocr-doctr.json, or ocr-doctr-Q.json for Q=truncate
-     (``-inset-L`` before .json for an inset). An existing report is kept when its
-     prediction hashes, Tesseract executable and eng.traineddata match. Its numbers are
-     comparable only when the report says so (a Tesseract build that passed gate G4, see
-     flattener.benchmark.ocr).
+     (``-inset-L``, ``-rerunR`` and ``-deskew`` before .json as set). An existing
+     report is kept when its prediction hashes, Tesseract executable and eng.traineddata
+     match. Its numbers are comparable only when the report says so (a Tesseract build
+     that passed gate G4, see flattener.benchmark.ocr).
 
 outputs/dewarp-runs/RUN/ also gets predictions.json, or predictions-truncate.json for
-Q=truncate (the prediction record, no images; ``-inset-L`` before .json for an inset).
-Each quantization, ref-resize and inset has its own file names, so one setting never
-overwrites another's images or reports.
+Q=truncate (the prediction record, no images; ``-inset-L``, ``-rerunR`` and ``-deskew``
+before .json as set). Each quantization, ref-resize, inset and rerun setting has its own
+file names, so one setting never overwrites another's images or reports.
 Images stay under CACHE: $FLATTENER_CACHE_DIR, default ~/.cache/flattener.
 
 Published DocUNet numbers (UVDoc, SyntheticDoc) come from outputs saved with truncation
@@ -72,7 +77,10 @@ from flattener.dewarp.predict import (
     INSET_PRESETS,
     inset_label,
     parse_inset,
+    parse_rerun,
     recorded_inset,
+    recorded_rerun,
+    rerun_record,
     resolve_inset,
 )
 
@@ -140,6 +148,18 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="move the page outline inward before rendering (flattener.dewarp.predict "
         "--inset): " + ", ".join(INSET_PRESETS) + ", E or EX,EY; default 0",
+    )
+    parser.add_argument(
+        "--rerun",
+        type=parse_rerun,
+        default=0,
+        help="crop passes after the whole-image prediction (flattener.dewarp.predict "
+        "--rerun); default 0",
+    )
+    parser.add_argument(
+        "--deskew",
+        action="store_true",
+        help="with --rerun: turn each crop upright (flattener.dewarp.predict --deskew)",
     )
     parser.add_argument(
         "--stress",
@@ -232,33 +252,44 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _suffix(quantize: str, inset=None) -> str:
-    """-Q unless Q is round, then -inset-L for an inset (``inset_label``)."""
+def _suffix(quantize: str, inset=None, rerun: int = 0, deskew: bool = False) -> str:
+    """-Q unless Q is round, then -inset-L for an inset (``inset_label``), -rerunR for
+    crop passes and -deskew with deskew."""
+    rerun_record(rerun, deskew)  # refuses deskew without passes
     suffix = "" if quantize == DEFAULT_QUANTIZE else f"-{quantize}"
     label = inset_label(inset)
-    return suffix + (f"-inset-{label}" if label else "")
+    suffix += f"-inset-{label}" if label else ""
+    suffix += f"-rerun{rerun}" if rerun else ""
+    return suffix + ("-deskew" if deskew else "")
 
 
-def prediction_dir(cache: Path, run_name: str, quantize: str, inset=None) -> Path:
-    """Prediction images of RUN: CACHE/pred/RUN for round without inset, otherwise
-    CACHE/pred-Q/RUN, CACHE/pred-inset-L/RUN or CACHE/pred-Q-inset-L/RUN."""
-    return cache / f"pred{_suffix(quantize, inset)}" / run_name
+def prediction_dir(
+    cache: Path, run_name: str, quantize: str, inset=None, rerun: int = 0, deskew: bool = False
+) -> Path:
+    """Prediction images of RUN: CACHE/pred/RUN for round without inset or rerun,
+    otherwise CACHE/pred-Q/RUN, CACHE/pred-inset-L/RUN, CACHE/pred-Q-inset-L/RUN, and so on
+    with -rerunR[-deskew] appended."""
+    return cache / f"pred{_suffix(quantize, inset, rerun, deskew)}" / run_name
 
 
-def report_name(ref_resize: str, quantize: str, inset=None) -> str:
-    """docunet-R.json, with -Q before .json unless Q is round and -inset-L for an inset
-    (default docunet-once.json)."""
-    return f"docunet-{ref_resize}{_suffix(quantize, inset)}.json"
+def report_name(
+    ref_resize: str, quantize: str, inset=None, rerun: int = 0, deskew: bool = False
+) -> str:
+    """docunet-R.json, with -Q before .json unless Q is round, -inset-L for an inset and
+    -rerunR[-deskew] for crop passes (default docunet-once.json)."""
+    return f"docunet-{ref_resize}{_suffix(quantize, inset, rerun, deskew)}.json"
 
 
-def record_name(quantize: str, inset=None) -> str:
-    """predictions.json for round without inset, predictions-Q[-inset-L].json otherwise."""
-    return f"predictions{_suffix(quantize, inset)}.json"
+def record_name(quantize: str, inset=None, rerun: int = 0, deskew: bool = False) -> str:
+    """predictions.json for round without inset or rerun,
+    predictions-Q[-inset-L][-rerunR[-deskew]].json otherwise."""
+    return f"predictions{_suffix(quantize, inset, rerun, deskew)}.json"
 
 
-def ocr_report_name(quantize: str, inset=None) -> str:
-    """ocr-doctr.json for round without inset, ocr-doctr-Q[-inset-L].json otherwise."""
-    return f"ocr-doctr{_suffix(quantize, inset)}.json"
+def ocr_report_name(quantize: str, inset=None, rerun: int = 0, deskew: bool = False) -> str:
+    """ocr-doctr.json for round without inset or rerun,
+    ocr-doctr-Q[-inset-L][-rerunR[-deskew]].json otherwise."""
+    return f"ocr-doctr{_suffix(quantize, inset, rerun, deskew)}.json"
 
 
 def record_inset(record: dict | None) -> tuple[float, float]:
@@ -267,22 +298,32 @@ def record_inset(record: dict | None) -> tuple[float, float]:
     return recorded_inset((record or {}).get("inset"))
 
 
+def record_rerun(record: dict | None) -> dict:
+    """Rerun settings of a predictions record or a report's ``predictions_record``; one
+    without the field predates the option and holds whole-image predictions."""
+    return recorded_rerun((record or {}).get("rerun"))
+
+
 def ocr_report_matches(
     report_path: Path,
     pred_dir: Path,
     engine: dict,
     quantize: str = DEFAULT_QUANTIZE,
     inset=None,
+    rerun: int = 0,
+    deskew: bool = False,
 ) -> bool:
     """Whether the OCR report read exactly the current images (DocTr protocol, images
-    quantized by ``quantize`` with ``inset``) with the Tesseract executable and
-    eng.traineddata that ``engine`` (``Tesseract.metadata()``) describes."""
+    quantized by ``quantize`` with ``inset``, ``rerun`` and ``deskew``) with the Tesseract
+    executable and eng.traineddata that ``engine`` (``Tesseract.metadata()``) describes."""
     report = json.loads(report_path.read_text(encoding="utf-8"))
     if report.get("config", {}).get("protocols") != ["doctr"]:
         return False
     if (report.get("predictions_record") or {}).get("quantize", DEFAULT_QUANTIZE) != quantize:
         return False
     if record_inset(report.get("predictions_record")) != resolve_inset(inset):
+        return False
+    if record_rerun(report.get("predictions_record")) != rerun_record(rerun, deskew):
         return False
     used = report.get("tesseract") or {}
 
@@ -309,10 +350,12 @@ def report_matches(
     ref_resize: str = DEFAULT_REF_RESIZE,
     quantize: str = DEFAULT_QUANTIZE,
     inset=None,
+    rerun: int = 0,
+    deskew: bool = False,
 ) -> bool:
     """Whether the report scored exactly the current images with these settings (all
-    conventions, ``ref_resize``, images quantized by ``quantize`` with ``inset``) and the
-    same SIFT-flow sources."""
+    conventions, ``ref_resize``, images quantized by ``quantize`` with ``inset``,
+    ``rerun`` and ``deskew``) and the same SIFT-flow sources."""
     report = json.loads(report_path.read_text(encoding="utf-8"))
     config = report.get("config", {})
     if config.get("ref_resize") != ref_resize:
@@ -323,6 +366,8 @@ def report_matches(
     if (report.get("predictions_record") or {}).get("quantize", DEFAULT_QUANTIZE) != quantize:
         return False
     if record_inset(report.get("predictions_record")) != resolve_inset(inset):
+        return False
+    if record_rerun(report.get("predictions_record")) != rerun_record(rerun, deskew):
         return False
     if not report.get("comparable"):
         return False
@@ -345,13 +390,25 @@ def inset_argument(inset) -> list[str]:
     return ["--inset", f"{ex!r},{ey!r}"]
 
 
+def rerun_argument(rerun: int = 0, deskew: bool = False) -> list[str]:
+    """``--rerun R [--deskew]`` for the child commands; none without passes."""
+    rerun_record(rerun, deskew)
+    return (["--rerun", str(rerun)] if rerun else []) + (["--deskew"] if deskew else [])
+
+
+def _settings(args) -> tuple:
+    """(quantize, inset, rerun, deskew) of the command line, as the name helpers take them."""
+    return args.quantize, args.inset, args.rerun, args.deskew
+
+
 def predict(args, cache: Path, env: dict[str, str]) -> tuple[dict, float]:
-    images = prediction_dir(cache, args.run, args.quantize, args.inset)
+    images = prediction_dir(cache, args.run, *_settings(args))
     command = [
         sys.executable, "-m", "flattener.dewarp.predict",
         "--weights", str(args.checkpoint), "--device", args.device,
         "docunet", "--input-dir", str(CROP_DIR), "--output-dir", str(images),
         "--force-render", "--quantize", args.quantize, *inset_argument(args.inset),
+        *rerun_argument(args.rerun, args.deskew),
     ]  # fmt: skip
     if args.overwrite:
         command.append("--overwrite")
@@ -365,17 +422,18 @@ def predict(args, cache: Path, env: dict[str, str]) -> tuple[dict, float]:
         raise SystemExit(f"error: {images}/predictions.json holds other quantization")
     if record_inset(record) != resolve_inset(args.inset):
         raise SystemExit(f"error: {images}/predictions.json holds another inset")
+    if record_rerun(record) != rerun_record(args.rerun, args.deskew):
+        raise SystemExit(f"error: {images}/predictions.json holds other rerun settings")
     return record, wall
 
 
 def score(args, cache: Path, env: dict[str, str], out_dir: Path) -> tuple[dict, str]:
-    images = prediction_dir(cache, args.run, args.quantize, args.inset)
-    report_path = out_dir / report_name(args.ref_resize, args.quantize, args.inset)
+    images = prediction_dir(cache, args.run, *_settings(args))
+    report_path = out_dir / report_name(args.ref_resize, *_settings(args))
     if report_path.is_file() and not args.overwrite:
         source = siftflow.resolve_source_dir(env["FLATTENER_SIFTFLOW_SOURCE"])
         digest = siftflow.source_tree_sha256(source)
-        settings = (args.ref_resize, args.quantize, args.inset)
-        if report_matches(report_path, images, digest, *settings):
+        if report_matches(report_path, images, digest, args.ref_resize, *_settings(args)):
             return json.loads(report_path.read_text(encoding="utf-8")), "kept"
         raise SystemExit(f"error: {report_path} scores other images or settings; pass --overwrite")
     command = [
@@ -417,15 +475,15 @@ def stress(args, cache: Path, env: dict[str, str], out_dir: Path) -> dict:
 
 
 def run_ocr(args, cache: Path, env: dict[str, str], out_dir: Path) -> tuple[dict, str]:
-    images = prediction_dir(cache, args.run, args.quantize, args.inset)
-    report_path = out_dir / ocr_report_name(args.quantize, args.inset)
+    images = prediction_dir(cache, args.run, *_settings(args))
+    report_path = out_dir / ocr_report_name(*_settings(args))
     tessdata = None if args.tessdata_dir is None else str(args.tessdata_dir)
     launcher = args.tesseract_launcher or ""
     if report_path.is_file() and not args.overwrite:
         engine = ocr.Tesseract(
             args.tesseract, tessdata_dir=tessdata, launcher=tuple(shlex.split(launcher))
         ).metadata()
-        if ocr_report_matches(report_path, images, engine, args.quantize, args.inset):
+        if ocr_report_matches(report_path, images, engine, *_settings(args)):
             return json.loads(report_path.read_text(encoding="utf-8")), "kept"
         raise SystemExit(f"error: {report_path} read other images or Tesseract; pass --overwrite")
     command = [
@@ -466,9 +524,12 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("error: pass --siftflow-source DIR or set FLATTENER_SIFTFLOW_SOURCE")
     default_protocol = (args.quantize, args.ref_resize) == (DEFAULT_QUANTIZE, DEFAULT_REF_RESIZE)
     label = inset_label(args.inset)
-    if args.stress is not None and (not default_protocol or label):
+    if args.deskew and not args.rerun:
+        raise SystemExit("error: --deskew needs --rerun 1 or more")
+    if args.stress is not None and (not default_protocol or label or args.rerun):
         raise SystemExit(
-            "error: --stress runs with the default --quantize and --ref-resize and no --inset only"
+            "error: --stress runs with the default --quantize and --ref-resize and no "
+            "--inset or --rerun only"
         )
     lower_priority()
     cache_value = args.cache_dir or os.environ.get("FLATTENER_CACHE_DIR") or "~/.cache/flattener"
@@ -485,13 +546,15 @@ def main(argv: list[str] | None = None) -> int:
     per_image = sum(item["seconds"] for item in written) / len(written) if written else None
     report, score_state = score(args, cache, env, out_dir)
     shutil.copyfile(
-        prediction_dir(cache, args.run, args.quantize, args.inset) / "predictions.json",
-        out_dir / record_name(args.quantize, args.inset),
+        prediction_dir(cache, args.run, *_settings(args)) / "predictions.json",
+        out_dir / record_name(*_settings(args)),
     )
 
     counts = record["counts"]
     settings = "" if default_protocol else f" quantize={args.quantize} ref_resize={args.ref_resize}"
     settings += f" inset={label}" if label else ""
+    settings += f" rerun={args.rerun}" if args.rerun else ""
+    settings += " deskew" if args.deskew else ""
     parts = [
         f"{args.run} step={record['model'].get('step')}{settings}",
         f"128_excl64 {metric_text(report['summary']['128_excl64'])}",

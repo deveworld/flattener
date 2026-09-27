@@ -192,6 +192,8 @@ def predict_dir300(
     overwrite: bool = False,
     force_render: bool = False,
     quantize: str = "round",
+    rerun: int = 0,
+    deskew: bool = False,
 ) -> dict[str, Any]:
     """Rectify ``dist/{k}.png`` into ``output_dir/{k}.png`` at the photo's own size.
 
@@ -199,6 +201,7 @@ def predict_dir300(
     refused and recorded is ``rectify_batch``'s, with the default ``RenderConfig``
     except for input and output limits of ``MAX_PHOTO_PIXELS``. The record also names
     the input folder, the photo hashes and whether they matched the official photos.
+    ``rerun`` and ``deskew`` add crop passes (``flattener.dewarp.predict.rerun_grid``).
     """
     from ..contracts import RenderConfig
     from ..dewarp.predict import BatchInput, load_rgb, rectify_batch
@@ -227,6 +230,8 @@ def predict_dir300(
             "inputs_verified": verify_inputs,
         },
         quantize=quantize,
+        rerun=rerun,
+        deskew=deskew,
     )
 
 

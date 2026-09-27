@@ -202,6 +202,45 @@ def test_predict_passes_the_inset_through(tiny_root, tmp_path, monkeypatch):
     assert not (tmp_path / "bad").exists()
 
 
+def test_predict_passes_rerun_settings_through(tiny_root, tmp_path, monkeypatch):
+    monkeypatch.setattr(predict, "predict_grid", _identity_grid)
+    dewarper = predict.load_dewarper(_tiny_weights(tmp_path))
+    output = tmp_path / "out"
+    record = uvdoc.predict_uvdoc(dewarper, output, root=tiny_root, rerun=1, deskew=True)
+    assert record["rerun"] == record["evidence"]["rerun"] == predict.rerun_record(1, True)
+    grid = _identity_grid(dewarper, None)
+    for pred_type, folder in (("uwp_texture", "warped_textures"), ("uwp_img", "img")):
+        written = np.asarray(Image.open(output / pred_type / "00007.png"))
+        source = np.asarray(Image.open(tiny_root / folder / "00007.png"))
+        # The identity crops the whole photo; its composed grid is the identity again.
+        assert np.array_equal(written, uvdoc.unwarp(source, grid, "flattener"))
+    item = record["items"][0]
+    assert [crop["box"] for crop in item["crops"]] == [[0, 0, 20, 26]]  # the photo, 26x20
+    assert item["crops"][0]["angle_deg"] == 0.0 and not item["crops"][0]["rotated"]
+    stored = prediction_record(output)
+    assert stored["rerun"] == report_evidence(stored)["rerun"] == predict.rerun_record(1, True)
+    plain = uvdoc.predict_uvdoc(dewarper, tmp_path / "plain", root=tiny_root)
+    assert plain["rerun"] == predict.rerun_record() and plain["items"][0]["crops"] == []
+    with pytest.raises(predict.FlattenerError, match="deskew"):
+        uvdoc.predict_uvdoc(dewarper, tmp_path / "bad", root=tiny_root, deskew=True)
+    assert not (tmp_path / "bad").exists()
+
+
+def test_unwarp_samples_flattener_values_in_both_conventions():
+    image = np.random.default_rng(5).integers(0, 256, (23, 17, 3), np.uint8)
+    values = np.stack(np.meshgrid(np.linspace(-0.9, 0.8, 4), np.linspace(-0.7, 0.95, 5)), -1)
+    size = image.shape[:2]
+    for convention in ("uvdoc", "flattener"):
+        dense = predict.dense_backward_map(values, convention, size, size, flattener_values=True)
+        tensor = torch.from_numpy(image.transpose(2, 0, 1) / 255.0).float()[None]
+        sampled = F.grid_sample(
+            tensor, torch.from_numpy(dense)[None], padding_mode="zeros", align_corners=False
+        )
+        expected = (sampled[0].numpy().transpose(1, 2, 0) * 255).astype(np.uint8)
+        found = uvdoc.unwarp(image, values, convention, flattener_values=True)
+        assert np.array_equal(found, expected)
+
+
 def _predictions(root, output):
     """Predictions: the textures themselves, a few flipped."""
     (output / "uwp_texture").mkdir(parents=True)
