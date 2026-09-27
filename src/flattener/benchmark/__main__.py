@@ -412,6 +412,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     strain.add_argument("--ms-ssim-only", action="store_true", help="skip SIFT flow (no LD/AD)")
     strain.add_argument("--seed", type=int, default=0, help="small-page canvas seed")
+    _add_rerun(strain)
     strain.add_argument(
         "--no-verify-references",
         action="store_true",
@@ -612,6 +613,8 @@ def main(argv: list[str] | None = None) -> int:
             verify_references=not args.no_verify_references,
             workers=args.workers,
             seed=args.seed,
+            rerun=args.rerun,
+            deskew=args.deskew,
             progress=None if args.quiet else docunet.print_progress,
             log=lambda message: print(message, file=sys.stderr, flush=True),
         )

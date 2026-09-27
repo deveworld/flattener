@@ -22,11 +22,16 @@ Photos and crops are read with their EXIF orientation applied, as a phone shows 
 
 Each variant lives in ``OUT/<variant>/``: ``predictions.json`` and ``{k}_{m}.png`` from
 ``flattener.dewarp.predict.rectify_batch`` and ``docunet.json`` from
-``evaluate_docunet``. A rerun keeps a prediction only when the weights and its input
-pixels are unchanged (see ``rectify_batch``). It reuses the per-image scores of a report
-when every prediction hash, the conventions, the SIFT-flow build and the scan hashes
-still match, and rebuilds the report's prediction statuses, means and evidence from the
-current ``predictions.json``.
+``evaluate_docunet``. A rerun keeps a prediction only when the weights, the crop-and-rerun
+settings and its input pixels are unchanged (see ``rectify_batch``). It reuses the
+per-image scores of a report when every prediction hash, the conventions, the SIFT-flow
+build and the scan hashes still match, and rebuilds the report's prediction statuses,
+means and evidence from the current ``predictions.json``.
+
+``--rerun R [--deskew]`` adds crop passes to every prediction
+(``flattener.dewarp.predict.rerun_grid``); ``stress.json`` records the setting under
+``config`` and ``evidence``. Give each setting its own output directory, since a directory
+holds the predictions of one setting.
 """
 
 from __future__ import annotations
@@ -210,19 +215,23 @@ def run_stress(
     verify_references: bool = True,
     workers: int = docunet.DEFAULT_WORKERS,
     seed: int = 0,
+    rerun: int = 0,
+    deskew: bool = False,
     progress: Callable[[dict[str, Any], int, int], None] | None = None,
     log: Callable[[str], None] = print,
 ) -> dict[str, Any]:
     """Predict and score every variant; write and return ``stress.json``.
 
     A variant with a missing prediction (a failed check without ``force_render``) is
-    reported as ``not_scored`` with the error.
+    reported as ``not_scored`` with the error. ``rerun`` and ``deskew`` add crop passes
+    to every prediction (``flattener.dewarp.predict.rerun_grid``).
     """
-    from ..dewarp.predict import load_dewarper, rectify_batch
+    from ..dewarp.predict import load_dewarper, rectify_batch, rerun_record
 
     unknown = [name for name in variants if name not in VARIANTS]
     if unknown or not variants:
         raise ValueError(f"variants must be among {tuple(VARIANTS)}, got {list(variants)}")
+    rerun_info = rerun_record(rerun, deskew)  # and invalid rerun settings
     conventions = docunet.validate_conventions(conventions)
     output, crops, photos = Path(output_dir), Path(crop_dir), Path(photo_dir)
     documents = sorted({k for k, _, _ in docunet.required_views(conventions)})
@@ -250,7 +259,7 @@ def run_stress(
     summary: dict[str, Any] = {
         "schema": SCHEMA,
         "created_utc": utc_now(),
-        "evidence": evidence("docunet_stress", dewarper.info),
+        "evidence": {**evidence("docunet_stress", dewarper.info), "rerun": rerun_info},
         "model": dewarper.info,
         "config": {
             "variants": list(variants),
@@ -259,6 +268,7 @@ def run_stress(
             "force_render": force_render,
             "device": device,
             "seed": seed,
+            "rerun": rerun_info,
             "page_fraction": list(PAGE_FRACTION),
             "canvas_max_pixels": CANVAS_MAX_PIXELS,
             "crop_dir": str(crops.resolve()),
@@ -278,6 +288,8 @@ def run_stress(
             overwrite=overwrite,
             force_render=force_render,
             fields={"inputs": f"docunet_stress:{variant}", "variant": variant},
+            rerun=rerun,
+            deskew=deskew,
         )
         entry: dict[str, Any] = {
             "description": VARIANTS[variant],

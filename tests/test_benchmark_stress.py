@@ -155,3 +155,25 @@ def test_failed_predictions_leave_a_variant_unscored_unless_forced(stress_inputs
     assert entry["status"] == "scored" and entry["predictions"]["forced"] == 130
     assert entry["summary"]["128_excl64"]["prediction_failures"] == 128
     assert len(entry["failed_ids"]) == 130
+
+
+def test_stress_run_passes_rerun_settings_through(stress_inputs, tmp_path, monkeypatch):
+    monkeypatch.setattr(predict, "predict_grid", _identity_grid)
+    output = tmp_path / "stress"
+    argv = _argv(stress_inputs, output, "--variant", "small_page", "--rerun", "1", "--deskew")
+    assert cli.main(argv) == 0
+    summary = json.loads((output / "stress.json").read_text())
+    expected = predict.rerun_record(1, True)
+    assert summary["config"]["rerun"] == summary["evidence"]["rerun"] == expected
+    entry = summary["variants"]["small_page"]
+    assert entry["status"] == "scored" and entry["evidence"]["rerun"] == expected
+    record = json.loads((output / "small_page" / "predictions.json").read_text())
+    assert record["rerun"] == expected
+    assert all([crop["pass"] for crop in item["crops"]] == [1] for item in record["items"])
+    # Whole-image predictions in the same folder are made again, then scored again.
+    assert cli.main(_argv(stress_inputs, output, "--variant", "small_page")) == 0
+    again = json.loads((output / "stress.json").read_text())
+    assert again["config"]["rerun"] == predict.rerun_record()
+    assert again["variants"]["small_page"]["predictions"]["kept"] == 0
+    with pytest.raises(SystemExit):
+        cli.main(_argv(stress_inputs, output, "--variant", "small_page", "--deskew"))
