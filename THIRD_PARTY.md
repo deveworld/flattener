@@ -45,6 +45,7 @@ UVDoc 가중치로 초기화한 release 가중치의 배포 여부는 위 학습
 | [UVDoc 데이터셋](https://github.com/tanguymagne/UVDoc-Dataset) | 비상업 텍스처(DeepFloyd IF), DTD 배경 연구용 | research 학습 전용 | data spec의 `license` |
 | [UVDoc 벤치마크](https://igl.ethz.ch/projects/uvdoc/UVDoc_benchmark.zip) 50샘플 (SHA-256 `8bf91a3e0d9bfa3655a8bcb38b74c1a8c02a9f1ba5ce34cfc51e5ae0660067ac`) | 저장소 MIT, 압축 파일에는 라이선스 파일 없음 | 평가 전용 | `outputs/benchmarks/uvdoc-bench/manifest.json` |
 | [DIR300](https://github.com/fh2019ustc/DocGeoNet) | © Hao Feng, 비상업·동일조건변경허락 | 평가 전용 | – |
+| [Poly Haven](https://polyhaven.com) 표면 텍스처 | CC0 | release 학습의 배경 합성 | `tools/backgrounds/fetch_polyhaven.py`가 쓰는 `manifest.json` (자산 주소, 저자, 해시) |
 
 인용
 
