@@ -129,6 +129,28 @@ def test_predict_writes_textures_and_photos_and_records_checks(tiny_root, tmp_pa
         uvdoc.predict_uvdoc(dewarper, output, root=tiny_root, overwrite=True)
 
 
+def test_predict_passes_the_inset_through(tiny_root, tmp_path, monkeypatch):
+    monkeypatch.setattr(predict, "predict_grid", _identity_grid)
+    dewarper = predict.load_dewarper(_tiny_weights(tmp_path))
+    output = tmp_path / "out"
+    preset = "syntheticdoc_half_cell"
+    record = uvdoc.predict_uvdoc(dewarper, output, root=tiny_root, inset=preset)
+    assert record["inset"] == record["evidence"]["inset"] == predict.inset_record(preset)
+    grid = _identity_grid(dewarper, None)
+    for pred_type, folder in (("uwp_texture", "warped_textures"), ("uwp_img", "img")):
+        written = np.asarray(Image.open(output / pred_type / "00007.png"))
+        source = np.asarray(Image.open(tiny_root / folder / "00007.png"))
+        assert np.array_equal(written, uvdoc.unwarp(source, grid, "flattener", preset))
+        assert not np.array_equal(written, uvdoc.unwarp(source, grid, "flattener"))
+    stored = prediction_record(output)
+    assert stored["inset"] == report_evidence(stored)["inset"] == predict.inset_record(preset)
+    plain = uvdoc.predict_uvdoc(dewarper, tmp_path / "plain", root=tiny_root)
+    assert plain["inset"] == {"x": 0.0, "y": 0.0, "preset": None}
+    with pytest.raises(predict.FlattenerError, match="inset"):
+        uvdoc.predict_uvdoc(dewarper, tmp_path / "bad", root=tiny_root, inset="other")
+    assert not (tmp_path / "bad").exists()
+
+
 def _predictions(root, output):
     """Predictions: the textures themselves, a few flipped."""
     (output / "uwp_texture").mkdir(parents=True)

@@ -34,11 +34,11 @@
 | 6. 라벨 | `labeler.html` | `labels/<이름>.json` |
 | 7. 검사 | `check [--drafts]` | 오류 목록, 종료 코드 |
 | 8. 전사 | `transcripts [--ocr …]`, 텍스트 편집기 | `transcripts/<이름>.txt` |
-| 9. 마감 | `manifest --strict` | `M1 complete: yes` |
+| 9. 마감 | `manifest --strict` | `pilot complete: yes` |
 
 종료 코드: 0은 완료, 1은 문제가 있음(표준 오류에 목록), 2는 사용법 오류입니다.
 
-**M1 완료 기준**(`manifest`의 `summary.m1_missing`이 비면 완료)
+**파일럿 완료 기준**(`manifest`의 `summary.m1_missing`이 비면 완료)
 
 - 층마다 계획한 장수 이상, 모두 60장 이상
 - EXIF 기종이 다른 휴대폰 2대

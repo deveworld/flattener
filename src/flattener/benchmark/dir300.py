@@ -445,8 +445,7 @@ def evaluate_dir300_ocr(
     """OCR the DIR300 OCR subset of ``predictions_dir`` and return the report.
 
     The report is ``comparable`` only with a Tesseract build that passed the OCR score
-    check
-    (``ocr.calibrated_build``), verified references and all 90 documents.
+    check (``ocr.calibrated_build``), verified references and all 90 documents.
     """
     _check_workers(workers)
     documents = validate_documents(documents, OCR_DOCUMENTS)

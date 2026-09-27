@@ -236,7 +236,7 @@ def cmd_manifest(args: argparse.Namespace) -> int:
         print(f"  {code:<8} {count['have']:>3}/{count['planned']}")
     print(f"split {summary['by_split']}")
     print(f"labels {summary['labels']}, transcripts {summary['transcripts']}")
-    print(f"M1 complete: {'yes' if summary['m1_complete'] else 'no'}")
+    print(f"pilot complete: {'yes' if summary['m1_complete'] else 'no'}")
     for item in summary["m1_missing"]:
         print(f"  - {item}")
     for warning in manifest["warnings"]:

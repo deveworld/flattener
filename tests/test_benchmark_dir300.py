@@ -8,6 +8,7 @@ import pytest
 import torch
 from PIL import Image
 
+from flattener.benchmark import __main__ as cli
 from flattener.benchmark import dir300, matlab, metrics
 from flattener.benchmark.reporting import PREDICTIONS_SCHEMA
 from flattener.dewarp.checkpoint import CHECKPOINT_SCHEMA, save_checkpoint
@@ -207,3 +208,34 @@ def test_predict_writes_each_photo_at_its_own_size(tmp_path, tiny_weights):
         for k in range(3, 301):
             Image.fromarray(_page(k, (4, 3))).save(photos / f"{k}.png")
         dir300.predict_dir300(load_dewarper(tiny_weights), output, inputs_dir=photos)
+
+
+def test_predict_passes_rerun_settings_through(tmp_path, tiny_weights):
+    from flattener.dewarp.predict import rerun_record
+
+    photos = tmp_path / "dist"
+    photos.mkdir()
+    Image.fromarray(_page(1, (36, 27))).save(photos / "1.png")
+    record = dir300.predict_dir300(
+        load_dewarper(tiny_weights),
+        tmp_path / "out",
+        inputs_dir=photos,
+        documents=(1,),
+        verify_inputs=False,
+        force_render=True,
+        rerun=1,
+        deskew=True,
+    )
+    assert record["rerun"] == record["evidence"]["rerun"] == rerun_record(1, True)
+    [item] = record["items"]
+    assert [crop["pass"] for crop in item["crops"]] == [1]
+    parse = cli.build_parser().parse_args
+    base = ["dir300-predict", "--weights", "w.pt", "--output-dir", "out"]
+    assert (parse(base).rerun, parse(base).deskew) == (0, False)
+    args = parse([*base, "--rerun", "2", "--deskew"])
+    assert (args.rerun, args.deskew) == (2, True)
+    uvdoc_args = parse(["uvdoc-predict", "--weights", "w.pt", "--output-dir", "o", "--rerun", "1"])
+    assert (uvdoc_args.rerun, uvdoc_args.deskew) == (1, False)
+    for argv in ([*base, "--deskew"], [*base, "--rerun", "-1"]):
+        with pytest.raises(SystemExit):
+            cli.main(argv)

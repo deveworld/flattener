@@ -2,6 +2,7 @@
 
 import json
 
+import numpy as np
 import pytest
 from PIL import Image
 from scan_fakes import FakeGate, Page, oracle_dewarper, ramp_scene, twist
@@ -145,6 +146,27 @@ def test_usage_errors_exit_2(tmp_path, photo, monkeypatch, capsys):
     extra = ["--weights", "w", "--output-size", "9000,9000"]  # above the renderer limits
     assert cli.main([str(photo), "--out", str(tmp_path / "out"), *extra]) == 2
     assert not (tmp_path / "out").exists()
+
+
+def test_same_stems_get_numbered_and_unreadable_photos_fail(tmp_path, photo, capsys, monkeypatch):
+    _install(monkeypatch)
+    other = tmp_path / "again"
+    other.mkdir()
+    Image.fromarray(ramp_scene(SIZE, PAGE)).save(other / "photo.png")
+    broken = tmp_path / "broken.jpg"
+    broken.write_bytes(b"not an image")
+    out = tmp_path / "out"
+    args = [str(photo), str(other / "photo.png"), str(broken), "--out", str(out), "--weights", "w"]
+    assert cli.main(args) == 1
+    lines = _lines(capsys)
+    assert [line["outcome"] for line in lines] == [
+        "rectified_with_warnings",
+        "rectified_with_warnings",
+        "failed",
+    ]
+    assert lines[2]["status"] == "input_error"
+    assert (out / "photo.jpg").is_file() and (out / "photo-2.jpg").is_file()
+    assert np.asarray(Image.open(out / "photo-2.jpg")).shape == (190, 150, 3)
 
 
 def test_timing_rows_cover_decoding_and_flag_cached_repeats(tmp_path, photo, capsys, monkeypatch):

@@ -1,6 +1,9 @@
 """The four evaluator calibration checks (G1-G4 in calibration.json) on synthetic reports,
 with no images and no SIFT flow."""
 
+import json
+
+import numpy as np
 import pytest
 
 from flattener.benchmark import calibration, docunet, ocr
@@ -121,3 +124,63 @@ def test_g4_requires_tesseract_501_and_the_plain_doctr_configuration():
         report["config"][key] = value
         with pytest.raises(ValueError, match=key):
             calibration.gate_g4(report)
+
+
+def _adres(path, rows):
+    lines = [f"{k} {m} {v['ad']} {v['ms_ssim']} {v['ld']}" for (k, m), v in rows.items()]
+    means = [np.mean([v[key] for v in rows.values()]) for key in ("ad", "ms_ssim", "ld")]
+    lines.append(f"33 1.5 {means[0]} {means[1]} {means[2]}")
+    path.write_text("\n".join(lines) + "\n")
+
+
+def test_parse_adres_reads_rows_and_mean_row(tmp_path):
+    rng = np.random.default_rng(0)
+    rows = {
+        key: {"ad": rng.random(), "ms_ssim": rng.random(), "ld": 10 * rng.random()} for key in ALL
+    }
+    _adres(tmp_path / "adres.txt", rows)
+    parsed = calibration.parse_adres(tmp_path / "adres.txt")
+    assert len(parsed["rows"]) == 130
+    assert parsed["rows"]["7_2"]["ld"] == pytest.approx(rows[(7, 2)]["ld"])
+    assert parsed["file_mean_row"]["ms_ssim"] == pytest.approx(
+        np.mean([v["ms_ssim"] for v in rows.values()])
+    )
+    (tmp_path / "bad.txt").write_text("1 2 3\n4 5 6\n")
+    with pytest.raises(ValueError):
+        calibration.parse_adres(tmp_path / "bad.txt")
+    reports = tmp_path / "reports"
+    calibration.run_calibration(reports, paperedge_dir=tmp_path, runs=(), log=print)
+    written = json.loads((reports / "paperedge-adres.json").read_text())
+    assert written["evidence"] == calibration.CALIBRATION_EVIDENCE
+
+
+def test_run_and_summarize_reuse_reports_and_write_relative_paths(tmp_path):
+    reports = tmp_path / "reports"
+    reports.mkdir()
+    values = _values(0.47, 8.5, 0.39, ALL)
+    write_json_atomic(reports / "paperedge-once.json", _docunet_report("paperedge-once", values))
+    adres = {
+        "rows": {f"{k}_{m}": v for (k, m), v in values.items()},
+        "file_mean_row": {"ad": 0.39, "ld": 8.5, "ms_ssim": 0.47},
+        "schema": calibration.ADRES_SCHEMA,
+    }
+    write_json_atomic(reports / "paperedge-adres.json", adres)
+    status = calibration.run_calibration(reports, log=lambda message: None)
+    assert status["paperedge-once"] == "reused"
+    assert status["uvdoc-uvdoc"].startswith("skipped")
+    summary = calibration.summarize_calibration(reports, tmp_path / "calibration.json")
+    written = json.loads((tmp_path / "calibration.json").read_text())
+    assert written["schema"] == calibration.SCHEMA
+    assert written["reports"]["paperedge-once"]["path"] == "reports/paperedge-once.json"
+    adres_entry = written["reports"]["paperedge-adres"]  # written before reports had a label
+    assert adres_entry["evidence"] == calibration.CALIBRATION_EVIDENCE
+    assert adres_entry["evidence_in_file"] is False
+    assert written["evidence"] == calibration.CALIBRATION_EVIDENCE
+    assert [gate["status"] for gate in summary["gates"]] == [
+        "pass",
+        "not_run",
+        "not_run",
+        "not_run",
+    ]
+    assert summary["all_pass"] is False
+    assert "G1: PASS" in calibration.format_gates(summary["gates"])
