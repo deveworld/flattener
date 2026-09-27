@@ -30,8 +30,7 @@ quarter turns clockwise is set upright after the prediction by ``quarter_turn_gr
 the rendered image becomes ``np.rot90`` of the old one. A 180-degree result is set upright
 by ``flip_grid(G)`` (``G[::-1, ::-1]``). Both only re-index nodes.
 
-The conventions stay apart. A legacy ``LoadedPredictor`` map is expanded in view values
-first (``coordinates.resize_backward_map``) and composed after; ``Placement.from_box`` is
+The conventions stay apart. ``Placement.from_box`` is
 ``regions.geometry.region_map_to_source`` bit for bit. A UVDoc-convention grid is converted
 to flattener values with the view size (``view_values``), as ``crop_pass`` does, and is
 densified with its nodes on the outer pixel centers (``dense_map(..., nodes="uvdoc")``), as

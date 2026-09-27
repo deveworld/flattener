@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "flattener"
-version = "0.5.0"
-description = "CPU document unwarping, reproducible synthetic data and experimental learning"
+version = "0.6.0"
+description = "Document photo scanner: page detection, orientation, dewarping and one render"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 license = "Apache-2.0 AND MIT AND OFL-1.1"

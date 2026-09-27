@@ -1,11 +1,10 @@
 """Opt-in page localization, region-only cropping, and guarded rectification.
 
-``unwarp_page`` takes a legacy ``LoadedPredictor`` (virtual box at 0.68 occupancy, preview
-padding, residual expansion, ``ensure_page_coverage`` may widen the footprint) or a
-``flattener.dewarp`` ``Dewarper``. With a ``Dewarper`` the view is the region plus
-``RERUN_MARGIN`` of its extent per side (whole pixels, clipped to the image), predicted
-once and placed in the source (``flattener.scan.placement``); the estimated page coverage
-of a segmenter's mask is a check only (``page_coverage_insufficient`` below
+``crop_page`` crops the region (``ensure_page_coverage`` may widen a segmenter's
+footprint). ``unwarp_page`` takes a ``flattener.dewarp`` ``Dewarper``: the view is the
+region plus ``RERUN_MARGIN`` of its extent per side (whole pixels, clipped to the image),
+predicted once and placed in the source (``flattener.scan.placement``); the estimated page
+coverage of a segmenter's mask is a check only (``page_coverage_insufficient`` below
 ``required_coverage``; a manual rectangle's coverage is recorded), and the map is the
 densification of the placed grid at ``output_size`` with the weights' own node placement
 (``dense_map(..., nodes=grid_convention)``: edge-aligned, or align_corners=True for UVDoc
@@ -15,16 +14,12 @@ once through ``flattener.render``.
 """
 
 from dataclasses import asdict
-from math import ceil
 from time import perf_counter
 
 import numpy as np
-import torch
-from torch.nn import functional as F
 
 from ..contracts import FlattenerError, RenderConfig, Status
 from ..coordinates import identity_map
-from ..learning.inference import LoadedPredictor
 from ..renderer import _handle_failure, _json_value, _new_metadata, render
 from ..validation import validate_config, validate_image, validate_size
 from .geometry import (
@@ -35,63 +30,7 @@ from .geometry import (
     page_coverage,
     region_map_to_source,
     validate_region,
-    virtual_page_box,
 )
-
-REGION_PREPROCESS_VERSION = "virtual-box-antialias-original-map-1.0"
-
-
-def prepare_page_view(image, region, input_size, *, config=None):
-    """Return an RGB preview of ``region`` and its exact virtual source-edge box.
-
-    The whole original is antialiased to a working resolution, and the view is
-    sampled from that. Normalized coordinates always refer to the original
-    extent; the final output samples the original once, after composition.
-    """
-    config = _config(config)
-    validate_image(image, RenderConfig())
-    region = validate_region(region, image.shape[:2])
-    input_size = validate_size(input_size, max_pixels=1024 * 1024, max_side=1024, name="input_size")
-    if min(input_size) < 2:
-        raise FlattenerError(
-            Status.INPUT_ERROR, "invalid_region_input", "preview sides must be >=2"
-        )
-    virtual = virtual_page_box(region, config.canonical_occupancy)
-    height, width = image.shape[:2]
-    work_size = (
-        min(height, max(1, ceil(height * input_size[0] / virtual.height))),
-        min(width, max(1, ceil(width * input_size[1] / virtual.width))),
-    )
-    grid = region_map_to_source(identity_map(input_size), virtual, (height, width))
-    source_support = np.all((grid >= -1) & (grid <= 1), axis=-1)
-    with torch.inference_mode():
-        source = torch.from_numpy(image.copy(order="C")).permute(2, 0, 1)[None].float().div_(255)
-        if work_size != (height, width):
-            source = F.interpolate(
-                source, size=work_size, mode="bilinear", align_corners=False, antialias=True
-            )
-        sampled = F.grid_sample(
-            source,
-            torch.from_numpy(grid)[None],
-            mode="bilinear",
-            padding_mode="border",
-            align_corners=False,
-        )
-        sampled.clamp_(0, 1)
-        values = sampled[0].permute(1, 2, 0).numpy()
-        preview = np.floor(values * 255 + 0.5).astype(np.uint8)
-    preview[~source_support] = (64, 64, 64)
-    metadata = {
-        "preprocessing_version": REGION_PREPROCESS_VERSION,
-        "virtual_source_box": asdict(virtual),
-        "working_size": list(work_size),
-        "preview_size": list(input_size),
-        "outside_source_fill_rgb": [64, 64, 64],
-        "preview_source_support_fraction": float(source_support.mean()),
-        "canonical_occupancy": config.canonical_occupancy,
-        "final_sampling_source": "original oriented RGB, never the resized preview",
-    }
-    return preview, virtual, metadata
 
 
 def estimate_page_region(image, segmenter, *, config=None):
@@ -279,23 +218,11 @@ def _pipeline(
                 "provide exactly one manual region or loaded segmenter",
             )
         dewarper = predictor is not None and _is_dewarper(predictor)
-        if (require_predictor or predictor is not None) and not (
-            dewarper or isinstance(predictor, LoadedPredictor)
-        ):
-            raise FlattenerError(
-                Status.INPUT_ERROR, "invalid_predictor", "load a coordinate predictor first"
-            )
+        if (require_predictor or predictor is not None) and not dewarper:
+            raise FlattenerError(Status.INPUT_ERROR, "invalid_predictor", "load a Dewarper first")
         if dewarper:
             metadata["page_method"] = "region_dewarp"
             metadata.update(_dewarper_identity(predictor))
-        elif predictor is not None:
-            predictor._metadata(metadata)
-            metadata["model_preview_resize"] = metadata["input_resize"]
-            metadata["input_resize"] = (
-                "region-conditioned virtual source box; antialiased original; "
-                "outside-source preview padding RGB(64,64,64)"
-            )
-            metadata["region_preprocessing_version"] = REGION_PREPROCESS_VERSION
         metadata["timings"][stage] = perf_counter() - stage_started
         metadata["region_timings"][stage] = metadata["timings"][stage]
 
@@ -312,23 +239,8 @@ def _pipeline(
             grid = region_map_to_source(
                 identity_map(output_size, config=candidate), estimate.region, image.shape[:2]
             )
-        elif dewarper:
-            grid = _dewarp_region_grid(image, predictor, estimate.region, metadata)
         else:
-            if any(
-                a < b for a, b in zip(output_size, predictor.model_config.grid_size, strict=True)
-            ):
-                raise FlattenerError(
-                    Status.INPUT_ERROR,
-                    "output_smaller_than_grid",
-                    "output must not shrink the predicted grid",
-                )
-            preview, virtual, view_metadata = prepare_page_view(
-                image, estimate.region, predictor.model_config.input_size, config=region_config
-            )
-            metadata["canonical_view"] = view_metadata
-            virtual_grid = predictor._predict(preview, output_size, metadata)
-            grid = region_map_to_source(virtual_grid, virtual, image.shape[:2])
+            grid = _dewarp_region_grid(image, predictor, estimate.region, metadata)
         metadata["region_timings"][stage] = perf_counter() - stage_started
 
         stage, stage_started = "page_coverage", perf_counter()
@@ -386,9 +298,8 @@ def unwarp_page(
     """Correct one page inside a region, guarded by estimated page coverage.
 
     Pass exactly one of ``region`` (a manual rectangle) or ``segmenter``, and an
-    explicit ``output_size``. ``predictor`` is a legacy ``LoadedPredictor`` or a
-    ``flattener.dewarp`` ``Dewarper`` (see the module docstring). Metadata reports
-    ``quality_status="not_evaluated"``.
+    explicit ``output_size``. ``predictor`` is a ``flattener.dewarp`` ``Dewarper`` (see the
+    module docstring). Metadata reports ``quality_status="not_evaluated"``.
     """
     return _pipeline(
         image,

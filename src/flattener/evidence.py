@@ -17,7 +17,7 @@ and whether they count as a real-photo result of a new model.
 * ``evaluator_calibration``: the evaluator checked against published outputs.
 
 ``model_provenance`` is ``own_checkpoint`` (a ``flattener.dewarp`` checkpoint),
-``own_previous_model`` (the earlier ``flattener.learning`` coordinate model),
+``own_previous_model`` (a model from the first study, such as page gate v0),
 ``external_pretrained`` (for example the UVDoc MIT weights or published outputs) or
 ``unknown``. ``training`` is ``smoke_training`` for an own checkpoint trained fewer than
 ``SMOKE_STEPS`` optimizer steps and ``training`` above that. ``initialization`` says

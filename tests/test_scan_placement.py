@@ -9,7 +9,6 @@ from torch.nn import functional as F
 
 from flattener import RenderConfig
 from flattener.contracts import Status
-from flattener.coordinates import identity_map, resize_backward_map
 from flattener.dewarp.coords import center_positions, edge_positions
 from flattener.dewarp.model import DewarpModelConfig
 from flattener.dewarp.predict import (
@@ -86,12 +85,6 @@ def test_a_box_placement_is_region_map_to_source_bit_for_bit():
             linear = grid.astype(np.float64) @ placement.matrix.T + placement.offset
             np.testing.assert_allclose(compose(grid, placement), linear, rtol=0, atol=1e-12)
         assert placement.view_size == (box.height, box.width)
-    # Legacy maps are expanded in view values first and composed after, like the region path.
-    coarse = identity_map((12, 9)) + rng.normal(0, 0.02, (12, 9, 2)).astype(np.float32)
-    dense = resize_backward_map(coarse, (60, 45))
-    box = PageRegion(40.5, 12.25, 610.0, 880.75)
-    placed = compose(dense, Placement.from_box(box, (900, 640))).astype(np.float32)
-    assert placed.tobytes() == region_map_to_source(dense, box, (900, 640)).tobytes()
 
 
 # ------------------------------------------------------ 2. node turns = image turns
