@@ -516,10 +516,13 @@ def validate(model: UVDocNet, loader, config: TrainConfig, device: torch.device)
     ``None``, which ``improves`` never selects. ``loss_grid2d`` is the masked L1 pooled
     the same way.
 
-    The forward runs in fp32 without TF32, like ``predict``. The CUDA cache is emptied
-    before and after, so validation batches reuse the training memory; the memory figures
-    include the validation peak.
+    The forward runs NCHW in fp32 without TF32, like ``predict``: fp32 channels_last
+    convolutions ran ~27x slower on an RTX 5090, so a ``channels_last`` model is
+    converted for the validation and back. The CUDA cache is emptied before and after,
+    so validation batches reuse the training memory; the memory figures include the
+    validation peak.
     """
+    model.to(memory_format=torch.contiguous_format)
     if device.type == "cuda":
         torch.cuda.empty_cache()
     height, width = config.epe_reference_size
@@ -534,7 +537,7 @@ def validate(model: UVDocNet, loader, config: TrainConfig, device: torch.device)
         for batch in loader:
             batch = _to_device(batch, device)
             for index, name in enumerate(names):
-                grid2d, _ = model(_layout(batch["image"][:, index].float().div_(255), config))
+                grid2d, _ = model(batch["image"][:, index].float().div_(255))
                 target, valid = batch["grid2d"][:, index], batch["valid"][:, index]
                 weight = valid.expand_as(target)
                 losses[name][0] += float(((grid2d - target).abs() * weight).sum())
@@ -554,6 +557,8 @@ def validate(model: UVDocNet, loader, config: TrainConfig, device: torch.device)
             if config.val_max_batches is not None and batches >= config.val_max_batches:
                 break
     model.train()
+    if config.channels_last:
+        model.to(memory_format=torch.channels_last)
     memory = memory_stats(device)
     if device.type == "cuda":
         torch.cuda.empty_cache()

@@ -477,10 +477,21 @@ def test_two_step_cpu_training_smoke_and_exact_resume(tmp_path):
 
 
 @pytest.mark.training
-def test_channels_last_training_saves_contiguous_weights(tmp_path):
+def test_channels_last_training_saves_contiguous_weights(tmp_path, monkeypatch):
     _spec(tmp_path)
+    calls = []
+    forward = UVDocNet.forward
+
+    def record(model, x):  # (training, input NCHW, weights NCHW)
+        weight = model.resnet_head[0].weight
+        calls.append((model.training, x.is_contiguous(), weight.is_contiguous()))
+        return forward(model, x)
+
+    monkeypatch.setattr(UVDocNet, "forward", record)
     result = train(_config(tmp_path, max_steps=2, channels_last=True))
     assert result["state"] == "stopped" and result["step"] == 2
+    # training runs channels_last; validation runs NCHW (fp32 channels_last is slow)
+    assert set(calls) == {(True, False, False), (False, True, True)}
     checkpoint = load_checkpoint(result["checkpoint"])
     assert all(v.is_contiguous() for v in checkpoint["model_state"].values())
     assert np.isfinite(checkpoint["metrics"]["epe_px"])
