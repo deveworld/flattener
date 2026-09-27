@@ -1,4 +1,4 @@
-"""The single-page scanner (design sections 1.1 to 1.5).
+"""The single-page scanner.
 
 ``Scanner.load(bundle)`` loads the dewarp weights through the ship gate
 (``scan.shippable``), the page gate (``regions.context``) and OrientNet (``scan.orient``)
@@ -148,7 +148,7 @@ def _option_error(message: str) -> FlattenerError:
 
 @dataclass(frozen=True)
 class ScanOptions:
-    """How a scan runs (design section 1.2).
+    """How a scan runs.
 
     ``passes``: crop passes after pass A (``"auto"`` is 1). ``output``: ``"auto"``, a long
     side or (height, width). ``aspect``: ``"auto"``, ``"estimate"``, ``"snap"``, a paper
@@ -264,7 +264,7 @@ def _check_aspect(aspect: Any) -> None:
 
 @dataclass(frozen=True)
 class ScanOverrides:
-    """User corrections (design section 1.5), each recorded as ``manual`` provenance.
+    """User corrections, each recorded as ``manual`` provenance.
 
     ``region``: a ``PageRegion`` or (left, top, right, bottom) in source pixels; ``quad``:
     four (x, y) page corners in reading order (top-left, top-right, bottom-right,

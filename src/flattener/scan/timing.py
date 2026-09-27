@@ -1,4 +1,4 @@
-"""Stage timing of scans (design section 3, T4).
+"""Stage timing of scans.
 
 ``StageClock`` times stages with ``time.perf_counter_ns``. With ``cuda_sync`` it calls
 ``torch.cuda.synchronize()`` at the start and the end of each stage (only when torch is

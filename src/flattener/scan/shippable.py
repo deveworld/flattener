@@ -26,10 +26,10 @@ spec content, so pass the spec through ``specs``), a run-info file (``init`` dic
 content it never passes).
 
 The verdict's ``category`` is ``release`` (shippable), ``research`` (own weights that
-fail a rule; R3, R3long and R5 start from UVDoc weights) or ``external`` (UVDoc MIT, the
-SyntheticDoc checkpoints and any other weights without a lineage record). ``reasons``
-holds reason codes from ``REASONS``; ``initialization`` names the chain's start as
-``evidence.initialization`` does. A file is gated before it is deserialized.
+fail a rule, such as models trained further from the UVDoc weights) or ``external``
+(UVDoc MIT, the SyntheticDoc checkpoints and any other weights without a lineage record).
+``reasons`` holds reason codes from ``REASONS``; ``initialization`` names the chain's
+start as ``evidence.initialization`` does. A file is gated before it is deserialized.
 
 ``gate_verdict`` applies the same rules to the provenance record of a page gate
 (``regions.context``, ``region-context-1``), whose data is a list of sources with SPDX
@@ -70,8 +70,8 @@ EXTERNAL_KINDS = frozenset({"uvdoc", "syntheticdoc", "external", "external_pretr
 OWN_PROVENANCES = frozenset({"own_checkpoint", "own_previous_model"})
 MAX_DEPTH = 64  # parent checkpoints followed before the gate gives up
 # License terms a page gate's data may carry besides RELEASE_LICENSE_KEYS: the OFL-1.1
-# fonts that Flattener's own scene generators draw (design section 0: own generated data
-# under Apache or OFL).
+# fonts that Flattener's own scene generators draw. Data Flattener generates itself is
+# under Apache or OFL.
 GATE_EXTRA_LICENSE_KEYS = frozenset({"ofl"})
 # Known outside weights files by sha256: UVDoc best_model.pkl (MIT) and the SyntheticDoc
 # checkpoints original_31x45.ckpt and highres_121x177.ckpt.

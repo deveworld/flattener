@@ -1,4 +1,4 @@
-"""View placement and quarter turns (``flattener.scan.placement``, design section 1.3)."""
+"""View placement and quarter turns (``flattener.scan.placement``)."""
 
 import json
 
@@ -190,7 +190,7 @@ def test_a_page_turned_by_quarters_and_an_angle_comes_back_upright(quarter, thet
     np.testing.assert_allclose(grid, truth, rtol=0, atol=1e-9)
     _assert_upright(render(photo, dense_map(grid, PAGE)).image, page)
     # A result from the view without the quarter turns is set upright by re-indexing its
-    # nodes k quarter turns (the E-O1 alternative to predicting again).
+    # nodes k quarter turns (the alternative to predicting again).
     unturned = placement.turned(-quarter)
     assert unturned.quarter == 0 and unturned.view_size == turned_size(placement.view_size, quarter)
     sideways = compose(_identity(*turned_size(GRID, quarter)), unturned)

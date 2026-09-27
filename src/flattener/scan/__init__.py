@@ -1,4 +1,4 @@
-"""Single-page document scanner built on ``flattener.dewarp`` (milestone 1).
+"""Single-page document scanner built on ``flattener.dewarp``.
 
 It covers page location, orientation, dewarp and output files.
 

@@ -43,8 +43,10 @@ def make_plan(**changes):
         orientation_probs=(0.01, 0.97, 0.015, 0.005),
         views=({"pass": "A", "box": (100, 50, 3900, 2950), "angle_deg": 86.75},),
         inset=(0.0, 0.0),
-        models=({"id": "r4", "sha256": "ef" * 32, "track": "release", "shippable": True},),
-        thresholds={"version": "m1-0", "coverage": 0.95, "drift": 0.04},
+        models=(
+            {"id": "scratch-409k", "sha256": "ef" * 32, "track": "release", "shippable": True},
+        ),
+        thresholds={"version": "v0", "coverage": 0.95, "drift": 0.04},
         provenance={"region": "auto", "orientation": "manual"},
     )
     fields.update(changes)
@@ -96,7 +98,7 @@ def test_plan_sha256_tracks_every_value():
     assert make_plan(quantize="truncate").plan_sha256 != plan.plan_sha256
     assert make_plan(nodes="uvdoc").plan_sha256 != plan.plan_sha256
     assert make_plan(fill_rgb=(0, 0, 0)).plan_sha256 != plan.plan_sha256
-    reordered = {"drift": 0.04, "coverage": 0.95, "version": "m1-0"}
+    reordered = {"drift": 0.04, "coverage": 0.95, "version": "v0"}
     assert make_plan(thresholds=reordered).plan_sha256 == plan.plan_sha256
     assert hash(make_plan()) == hash(plan)
 
@@ -163,7 +165,7 @@ def make_result(plan):
         qa={"coverage": np.float64(0.991), "drift": 0.012, "orientation_margin": math.nan},
         timings={"read": 0.05, "infer": np.float32(0.19)},
         metadata={"validation": {"checked_cells": np.int64(1320), "fold_check": "passed"}},
-        models=[{"id": "r4", "sha256": "ef" * 32, "shippable": True}],
+        models=[{"id": "scratch-409k", "sha256": "ef" * 32, "shippable": True}],
         shippable=True,
         evidence={"evidence_kind": "predictions"},
         input="photo.jpg",

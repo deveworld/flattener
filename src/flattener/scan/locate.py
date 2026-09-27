@@ -1,4 +1,4 @@
-"""Where the page is: the detect stage of the scanner (design sections 1.1 and 1.5).
+"""Where the page is: the detect stage of the scanner.
 
 Inputs are the page gate's probability grid P (``regions.context``, whole image extent)
 and, when needed, the pass-0 grid G0: one dewarp pass on the whole photo, in flattener

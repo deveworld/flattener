@@ -1,4 +1,4 @@
-"""Opt-in fast check of a grid's dense map (design section 1.1, render).
+"""Opt-in fast check of a grid's dense map, for the render stage.
 
 ``flattener.render`` checks a dense map cell by cell: the out-of-bounds fraction of the
 output, then the four corner determinants of every cell between neighbouring pixel

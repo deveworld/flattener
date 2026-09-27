@@ -1,8 +1,8 @@
 """Scan records: reason codes with guidance, outcomes, ``ScanPlan`` and ``ScanResult``.
 
 ``contracts.Status`` is fixed, so scan conditions are ``reason_code`` strings on the
-existing statuses. ``REASONS`` registers the codes of the design (section 1.5), each with
-the status it carries, its severity, how the scanner handles it and, where the user can
+existing statuses. ``REASONS`` registers the scanner's reason codes, each with the
+status it carries, its severity, how the scanner handles it and, where the user can
 act, guidance in Korean and English:
 
 * ``info``: recorded; the scan goes on unchanged.
@@ -237,7 +237,7 @@ REASONS: dict[str, ReasonSpec] = {
             "rerun_discarded",
             Status.SUCCESS,
             Severity.INFO,
-            "The crop passes failed their checks; the first pass of the candidate is used (L1).",
+            "The crop passes failed their checks; the first pass of the candidate is used.",
         ),
         ReasonSpec(
             "curvature_not_corrected",

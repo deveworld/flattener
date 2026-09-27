@@ -66,7 +66,7 @@ python -m flattener.dewarp.predict --weights CKPT docunet --input-dir crop --out
 
 - `release` 트랙은 이용 조건이 확인된 데이터만 받습니다. 배포 대상은 이 트랙의 가중치입니다.
 - `research` 트랙은 Doc3D·UVDoc 데이터셋처럼 비상업 조건이 붙은 자료로 학습하며, 가중치는 로컬 비교에만 씁니다.
-- 배포 여부는 `flattener.scan.shippable`이 체크포인트 계보 전체를 따라가며 정합니다. 기록된 트랙이 모두 `release`이고, 계보가 `scratch`에서 시작하고, 모든 학습 단계의 데이터 spec이 `require_track(spec, "release")`를 통과해야 배포할 수 있습니다. UVDoc 가중치에서 시작한 R3·R3long·R5는 release 트랙이어도 `research`로, UVDoc·SyntheticDoc 공개 가중치는 `external`로 분류합니다. `load_weights(path)`는 배포할 수 없는 가중치를 `not_shippable`로 거부하고, `research=True`일 때만 불러와 `info["ship_gate"]`에 `research: true`를 남깁니다. `python -m flattener.scan.shippable CKPT_OR_JSON...`은 판정을 한 줄에 하나씩 JSON으로 출력합니다. 모두 배포 가능하면 0, 하나라도 아니면 1, 사용 오류는 2로 끝납니다.
+- 배포 여부는 `flattener.scan.shippable`이 체크포인트 계보 전체를 따라가며 정합니다. 기록된 트랙이 모두 `release`이고, 계보가 `scratch`에서 시작하고, 모든 학습 단계의 데이터 spec이 `require_track(spec, "release")`를 통과해야 배포할 수 있습니다. UVDoc 가중치에서 시작해 이어 학습한 모델은 release 트랙이어도 `research`로, UVDoc·SyntheticDoc 공개 가중치는 `external`로 분류합니다. `load_weights(path)`는 배포할 수 없는 가중치를 `not_shippable`로 거부하고, `research=True`일 때만 불러와 `info["ship_gate"]`에 `research: true`를 남깁니다. `python -m flattener.scan.shippable CKPT_OR_JSON...`은 판정을 한 줄에 하나씩 JSON으로 출력합니다. 모두 배포 가능하면 0, 하나라도 아니면 1, 사용 오류는 2로 끝납니다.
 
 ## 표준 벤치마크 평가
 
@@ -184,7 +184,7 @@ python tools/locator_v0.py exposure    # SmartDoc 노출 목록
 
 ```bash
 python -m flattener.scan IMG... --out DIR --bundle bundle.json
-python -m flattener.scan IMG... --out DIR --weights R4.pt --gate page-gate-v0.pt
+python -m flattener.scan IMG... --out DIR --weights DEWARP.pt --gate page-gate-v0.pt
 ```
 
 ```python
@@ -199,9 +199,9 @@ result = scanner.render(source, planned)
 ```
 
 - 번들(`flattener-scan-bundle-1`)에는 `dewarp`와, 있으면 `gate`, `orient` 가중치 경로를 적습니다. 가중치는 `scan.shippable` 판정을 통과해야 불러옵니다. 통과하지 못한 가중치는 `--research`(`research=True`)일 때만 불러오고, 결과 기록에 `research: true`가 남습니다. backend는 지금 `torch`만 있습니다.
-- 단계는 read(EXIF 1회, 16MP 초과 JPEG는 draft decode) → detect(페이지 게이트, 필요할 때만 사진 전체 pass 0과 합의 규칙) → orient(OrientNet) → infer(pass A와 크롭 pass 1회, deskew) → verify(평면 미리보기 방향 확인, coverage ≥ 0.95, 패스 사이 노드 이동 ≤ 페이지 대각선의 4%) → plan(출력 크기 auto) → render(`flattener.render` 1회) → save입니다.
+- 단계는 read(EXIF 1회, 16MP 초과 JPEG는 draft decode) → detect(페이지 게이트, 필요할 때만 사진 전체를 한 번 추론한 결과와의 합의 규칙) → orient(OrientNet) → infer(첫 추론과 크롭 재추론 1회, deskew) → verify(평면 미리보기 방향 확인, coverage ≥ 0.95, 패스 사이 노드 이동 ≤ 페이지 대각선의 4%) → plan(출력 크기 auto) → render(`flattener.render` 1회) → save입니다.
 - OrientNet 가중치가 없으면 사진 방향(EXIF 적용)을 그대로 쓰고 `orientation_uncertain` 경고를 남깁니다. `--quarter`로 방향을 지정할 수 있습니다.
-- 후보는 C1 기본, C2 deskew 없음, C3 다른 위치 추정기, C4 지금의 `rectify`(사진 전체 1패스) 순서로 시도하고 먼저 통과한 것을 씁니다. C4도 방향 k만큼 격자 노드를 재색인해 페이지를 바로 세웁니다. C1이 실패하고 뒤 후보가 통과하면 `candidate_fallback` 경고가 남습니다. 크롭 pass만 실패하면 pass A를 씁니다(`rerun_discarded`). 모두 실패하면 원본과 사유, 안내(한/영)를 돌려줍니다. `--fallback perspective`이고 페이지 꼭짓점이 확실하면 원근만 보정합니다(`curvature_not_corrected`). 실패 상태와 사유 코드는 기록에 그대로 남습니다.
+- 후보는 기본 경로, deskew 없이, 다른 위치 추정기가 찾은 영역, 지금의 `rectify`(사진 전체 1패스) 순서로 시도하고 먼저 통과한 것을 씁니다. 기록에는 이 순서대로 C1–C4로 남습니다. 마지막 `rectify` 후보도 방향 k만큼 격자 노드를 재색인해 페이지를 바로 세웁니다. 기본 경로가 실패하고 뒤 후보가 통과하면 `candidate_fallback` 경고가 남습니다. 크롭 재추론만 실패하면 첫 추론 결과를 씁니다(`rerun_discarded`). 모두 실패하면 원본과 사유, 안내(한/영)를 돌려줍니다. `--fallback perspective`이고 페이지 꼭짓점이 확실하면 원근만 보정합니다(`curvature_not_corrected`). 실패 상태와 사유 코드는 기록에 그대로 남습니다.
 - 수동 수정은 `--region L,T,R,B`, `--quad x1,y1,…,x4,y4`(읽기 순서), `--quarter 0..3`, `--no-dewarp`, `--long-side N`, `--output-size H,W`, `--aspect`입니다. 자동 경로와 같은 단계를 거치고 기록에 `manual`로 남습니다. `--no-dewarp`도 방향을 지정하지 않으면 OrientNet에 묻습니다. 모델 출력은 입력 sha256별로 캐시하므로 바뀐 단계 뒤만 다시 계산합니다.
 - 출력은 JPEG q95 4:4:4(`--format png`도 됨)와 `<stem>.scan.json`입니다. `--timing F.jsonl`은 사진마다 단계별 시간(디코드 포함, 패스별 `infer_pass_*`, `render_map`/`render_check`/`render_sample`, `preview`), 저장까지의 `end_to_end`, 캐시 적중을 한 줄씩 쓰고, 첫 줄에 모델 로드 시간을 남깁니다. 같은 사진을 반복해 잴 때는 `--no-cache`를 씁니다. `--debug`는 페이지 윤곽을 그린 사진을 씁니다.
 - 종료 코드는 모두 스캔되면 0, 대체 결과나 실패가 있으면 1, 사용 오류면 2입니다. `--no-dewarp`로 요청한 원근 보정 결과는 스캔된 것으로 셉니다.

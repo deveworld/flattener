@@ -1,4 +1,4 @@
-"""Output size and aspect of a scanned page (design section 1.4, default ``"auto"``).
+"""Output size and aspect of a scanned page (default ``"auto"``).
 
 The input is the page grid G: ``(Gh, Gw, 2)`` flattener values in source coordinates
 (the ``flattener.dewarp`` grid convention: edge-aligned nodes, corner nodes on the page
