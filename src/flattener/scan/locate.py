@@ -9,9 +9,12 @@ components and the reasons found on the way.
 
 Rules (``THRESHOLDS``, the design's starting values; they are recorded with every scan):
 
-* The gate runs ``detect_region`` with an area cap of 1.0. ``page_not_found`` and
-  ``ambiguous_page_region`` (``two_page_candidate`` when the two largest components lie
-  side by side) end the scan with the component boxes as candidates. A page under 1 % of
+* The gate runs ``detect_region`` with an area cap of 1.0. ``page_not_found`` ends the
+  scan. A gate split into pieces (``ambiguous_page_region``, or ``two_page_candidate``
+  when the two largest components lie side by side) asks G0: its outline is the page
+  (box and angle, method ``outline``) and the pieces holding at least half of their
+  cells inside it are the mask; the code stays as a warning with the component boxes.
+  When G0 has no outline or holds no piece, the split ends the scan. A page under 1 % of
   the photo or with a long side under 600 full-resolution pixels is ``page_too_small``.
 * A mask over 90 % of the frame or touching three borders fills the frame
   (``page_fills_frame``, informational): B is the whole image and theta is 0.
@@ -26,8 +29,13 @@ Rules (``THRESHOLDS``, the design's starting values; they are recorded with ever
 * Without a gate the outline's box and angle are used with ``unverified_region``.
 * Warnings: ``page_cut_off`` names each image side along which the mask runs for more than
   15 % of the side (and, when G0 is at hand, G0 reaches past that side);
-  ``possible_occlusion`` when the mask's solidity is below 0.90. Other components that
-  touch the border are left out with ``neighbor_page_partial`` (informational).
+  ``possible_occlusion`` when the mask's solidity (of a split gate, its largest held
+  piece) is below 0.90. Other components that touch the border are left out with
+  ``neighbor_page_partial`` (informational).
+* ``region_excess`` measures, per page side, the mask left outside a grid's outline; the
+  scanner's verify stage uses it to tell a neighbouring page, the book edge or the paper
+  under the page (mask past some sides) from a grid that holds only a piece of the page
+  (mask past every side).
 
 ``manual_region`` and ``manual_quad`` turn user overrides into the same record; a quad in
 reading order (top-left, top-right, bottom-right, bottom-left) also gives the page's
@@ -49,7 +57,7 @@ from ..dewarp.predict import RERUN_MARGIN, crop_box, estimate_page_angle, outlin
 from ..regions.context import GateConfig, gate_page_region
 from ..regions.geometry import PageRegion, page_coverage
 from .placement import split_angle
-from .records import Reason, reason
+from .records import Reason, Severity, reason
 
 THRESHOLDS: dict[str, Any] = {
     "version": "m1-design-start",
@@ -63,7 +71,9 @@ THRESHOLDS: dict[str, Any] = {
     "two_page_min_ratio": 0.5,
     "two_page_min_overlap": 0.5,
     "component_min_area_fraction": 0.01,
+    "split_min_inside": 0.5,
 }
+SPLIT_CODES = ("ambiguous_page_region", "two_page_candidate")
 SIDES = ("top", "right", "bottom", "left")
 Box = tuple[int, int, int, int]
 Bounds = tuple[float, float, float, float]
@@ -317,6 +327,37 @@ def grid_coverage(grid: NDArray, mask: NDArray[np.bool_]) -> float:
     return page_coverage(np.asarray(grid, dtype=np.float32), mask)
 
 
+def region_excess(
+    grid: NDArray, mask: NDArray[np.bool_], source_size: tuple[int, int]
+) -> dict[str, float]:
+    """Mask cells outside the grid's outline per page side (the grid's top row, last
+    column, bottom row and first column), each cell counted at the side of its nearest
+    boundary node in source pixels, as a share of the outline's cells. A neighbouring page
+    or the paper under the page adds to some sides; a grid that holds only a piece of the
+    page leaves mask on every side."""
+    height, width = source_size
+    rows, cols = mask.shape
+    inside = rasterize_polygon(outline_polygon(grid), mask.shape)
+    area = int(inside.sum())
+    if area == 0:
+        return dict.fromkeys(SIDES, 1.0)
+    yy, xx = np.nonzero(mask & ~inside)
+    if len(yy) == 0:
+        return dict.fromkeys(SIDES, 0.0)
+    array = np.asarray(grid, dtype=np.float64)
+    edges = (array[0], array[:, -1], array[-1], array[:, 0])  # top, right, bottom, left
+    scale = np.array([width / 2.0, height / 2.0])
+    nodes = np.concatenate(edges) * scale
+    side = np.concatenate([np.full(len(edge), index) for index, edge in enumerate(edges)])
+    cells = np.stack([2.0 * (xx + 0.5) / cols - 1.0, 2.0 * (yy + 0.5) / rows - 1.0], -1) * scale
+    counts = np.zeros(len(SIDES))
+    for start in range(0, len(cells), 4096):
+        chunk = cells[start : start + 4096]
+        distance = ((chunk[:, None, :] - nodes[None]) ** 2).sum(-1)
+        counts += np.bincount(side[distance.argmin(axis=1)], minlength=len(SIDES))
+    return {name: float(count / area) for name, count in zip(SIDES, counts, strict=True)}
+
+
 def grid_angle(grid: NDArray, source_size: tuple[int, int]) -> tuple[float, int, str | None]:
     """(theta, k, reason): the page angle of a grid split as theta + 90 k; (0, 0, reason)
     when ``estimate_page_angle`` finds it unusable."""
@@ -428,6 +469,28 @@ def _failure(code: str, candidates: list[Component], **detail: Any) -> Reason:
     return reason(code, boxes=boxes, **detail)
 
 
+def _held_pieces(
+    grid: NDArray,
+    labels: NDArray[np.int32],
+    items: list[Component],
+    source_size: tuple[int, int],
+) -> list[int]:
+    """Labels of the gate pieces (at least ``component_min_area_fraction`` of the photo)
+    with at least ``split_min_inside`` of their cells inside the outline of ``grid``;
+    none when the outline is not usable."""
+    if outline_box(grid, source_size) is None:
+        return []
+    inside = rasterize_polygon(outline_polygon(grid), labels.shape)
+    held = []
+    for index, item in enumerate(items, start=1):
+        if item.area_fraction < THRESHOLDS["component_min_area_fraction"]:
+            continue
+        share = float((inside & (labels == index)).sum()) / item.cells
+        if share >= THRESHOLDS["split_min_inside"]:
+            held.append(index)
+    return held
+
+
 def _gate_failure(
     error: FlattenerError,
     probability: NDArray,
@@ -487,31 +550,45 @@ def locate_page(
         return Localization(
             box, theta, "outline_unverified", None, reasons, None, [], metrics, grid
         )
+    binary = probability >= config.region.threshold
+    labels, items = components(binary, source_size)
+    split: Reason | None = None  # the gate split the page into pieces; G0 decides
+    grid = None
+    held: list[int] = []
     try:
         gate = gate_page_region(probability, source_size, config=config)
     except FlattenerError as error:
         if error.status != Status.MODEL_ERROR:
             raise
         rejected = _gate_failure(error, probability, source_size, config)
-        if rejected is not None:
-            return rejected
         gate = None
-    binary = probability >= config.region.threshold
-    labels, items = components(binary, source_size)
+        if rejected is not None:
+            if rejected.failure.code not in SPLIT_CODES or pass0 is None:
+                return rejected
+            grid = pass0()
+            held = _held_pieces(grid, labels, items, source_size)
+            if not held:
+                rejected.pass0 = grid
+                return rejected
+            split = rejected.failure
     if gate is not None:
         mask = gate.estimate.mask
         detection = dict(gate.metadata)
+    elif split is not None:
+        mask = np.isin(labels, held)
+        detection = {"gate_error": split.code, "held_pieces": held}
     else:
         mask = labels == 1
         detection = {"gate_error": "uncertain_page_region"}
     area = float(mask.mean())
     bounds = mask_bounds(mask, source_size)
     long_side = max(bounds[2] - bounds[0], bounds[3] - bounds[1]) * scale
-    selected = next(
-        (item for item in items if item.cells == int(mask.sum()) and item.bounds == bounds),
-        None,
-    )
-    others = [item for item in items if item is not selected]
+    if split is not None:
+        selected = [items[index - 1] for index in held]
+    else:
+        count = int(mask.sum())
+        selected = [item for item in items if item.cells == count and item.bounds == bounds]
+    others = [item for item in items if not any(item is chosen for chosen in selected)]
     metrics: dict[str, Any] = {
         "area_fraction": area,
         "page_long_side_px": long_side,
@@ -528,8 +605,13 @@ def locate_page(
         and not (gate is not None and gate.fills_frame)
     ):
         failure = _failure("page_too_small", shown, area_fraction=area, long_side_px=long_side)
-        return Localization(None, 0.0, "gate", mask, [], failure, items, metrics)
+        return Localization(None, 0.0, "gate", mask, [], failure, items, metrics, grid)
     reasons: list[Reason] = []
+    if split is not None:
+        # The scan goes on with G0's outline; the split stays as a warning.
+        reasons.append(
+            reason(split.code, status=Status.SUCCESS, severity=Severity.WARNING, **split.detail)
+        )
     neighbors = [item for item in others if item.touches]
     if neighbors:
         reasons.append(
@@ -541,8 +623,11 @@ def locate_page(
             (0, 0, width, height), 0.0, "fills_frame", mask, reasons, None, items, metrics
         )
     mask_box = expand_box(bounds, source_size)
-    grid = None
-    if gate is not None and gate.confident:
+    if split is not None:
+        theta, k, why = grid_angle(grid, source_size)
+        metrics.update(outline_quarter=k, outline_angle_unusable=why)
+        box, method = outline_box(grid, source_size), "outline"
+    elif gate is not None and gate.confident:
         box, theta, method = mask_box, min_area_rect_angle(cell_centers(mask, source_size)), "gate"
     else:
         if pass0 is None:
@@ -574,7 +659,8 @@ def locate_page(
                 "page_cut_off", sides=sides, evidence="mask" if grid is None else "mask_and_outline"
             )
         )
-    page_solidity = solidity(mask, source_size)
+    # The gap between the pieces of a split gate is no occlusion: its largest piece counts.
+    page_solidity = solidity(mask if split is None else labels == held[0], source_size)
     metrics["solidity"] = page_solidity
     if page_solidity < THRESHOLDS["occlusion_solidity"]:
         reasons.append(reason("possible_occlusion", solidity=page_solidity))

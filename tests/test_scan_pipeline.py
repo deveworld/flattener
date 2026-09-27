@@ -220,12 +220,36 @@ def test_gate_rejections_return_the_original_with_guidance():
     assert result.outcome == Outcome.ORIGINAL_RETURNED and result.status == Status.MODEL_ERROR
     assert result.reason_code == "page_not_found" and model.calls == 0
     assert result.guidance[0].message_en == "Take the photo with the whole page in the frame"
+    # A gate split in two: the whole-photo outline holds the left piece and the scan goes on.
     left, right = Page((85, 120), (120, 170)), Page((235, 120), (120, 170))
+    scanner, _ = _scanner(left)
     scanner.gate.pages = [left, right]
     result = scanner.scan(ramp_scene(SIZE, left))
-    assert result.reason_code == "two_page_candidate"
-    assert len(result.candidates["regions"]) == 2
+    assert result.status == Status.SUCCESS
+    assert _codes(result) == ["two_page_candidate", "orientation_uncertain"]
+    assert result.reasons[0].severity == "warning" and len(result.candidates["regions"]) == 2
+    assert result.plan.region["localization"] == "outline"
+    assert _error_px(result.plan.grid, left) < 1.0
     assert result.guidance[0].message_ko == "페이지를 골라 주세요"
+    # Pieces the outline does not hold end the scan with the candidate boxes.
+    scanner, _ = _scanner()
+    scanner.gate.pages = [Page((280, 60), (60, 90)), Page((280, 180), (60, 90))]
+    result = scanner.scan(ramp_scene(SIZE, TRUE))
+    assert result.outcome == Outcome.ORIGINAL_RETURNED
+    assert result.reason_code == "ambiguous_page_region" and result.status == Status.MODEL_ERROR
+
+
+def test_a_gate_region_past_the_page_keeps_the_dewarp_result():
+    # The gate takes the page and 70 pixels beside its left edge (a neighbouring page).
+    wider = Page(TRUE.pixels([-70 / 150, 0]), (220, 190), 7.0)
+    scanner, _ = _scanner()
+    scanner.gate.pages = [wider]
+    result = scanner.scan(ramp_scene(SIZE, TRUE))
+    assert result.status == Status.SUCCESS
+    assert _codes(result) == ["orientation_uncertain", "page_region_larger"]
+    assert _error_px(result.plan.grid) < 0.5 and result.qa["coverage"] < 0.8
+    excess = result.qa["region_excess"]
+    assert excess["left"] > 0.3 and max(excess["top"], excess["right"], excess["bottom"]) < 0.05
 
 
 def test_without_a_gate_the_outline_is_used_unverified():

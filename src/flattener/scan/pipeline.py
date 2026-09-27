@@ -15,13 +15,21 @@ plan and checks the plan's map; ``render(source, planned)`` makes the image of a
 * ``infer``: pass A on the view (box B, angle theta + 90 k), then ``passes`` crop passes
   whose box is the previous grid's outline plus 4 % and whose angle is that outline's
   angle (``dewarp.predict.rerun_box`` without the 45 degree limit, since k is already in
-  the grid). Every pass is placed in the source (``scan.placement``) and timed on its own
+  the grid). With ``passes="auto"`` a crop pass that moved the median node by more than
+  4 % of the page diagonal gets one more (``settle``), so a pass A that saw more than the
+  page (the neighbouring page in a wide gate box) does not decide the drift check alone.
+  Every pass is placed in the source (``scan.placement``) and timed on its own
   (``infer_pass_A``, ``infer_pass_1``, ...).
 * ``orient_post`` and ``verify``: OrientNet on a flat 768-pixel preview of the grid: 180
   degrees flips the grid nodes; 90 or 270 degrees re-runs the passes once with the
   corrected k. A quarter turn settled this way carries over to the later candidates. Then
-  the checks: ``page_coverage(G, M) >= 0.95`` against the gate mask and a median node
-  drift between the last two passes of at most 4 % of the page diagonal.
+  the checks. The grid's outline is the page; the gate mask M is a hint. When
+  ``page_coverage(G, M) < 0.95`` the mask reaches past the page: a neighbouring page, the
+  book edge or the paper under the page leave mask past some sides and the result goes on
+  with ``page_region_larger``; mask past every side by more than 5 % of the page area
+  (``locate.region_excess``) means the grid holds only a piece of the page and fails.
+  Against a manual quad, coverage below 0.95 fails. The median node drift between the
+  last two passes must stay within 4 % of the page diagonal.
 * ``plan``: ``scan.output_policy.plan_output`` (auto size, standard-ratio snap) and a
   ``ScanPlan`` with its ``plan_sha256``.
 * ``render``: the dense map of the plan (``render_map``; the grid nodes placed as the
@@ -121,7 +129,7 @@ from .views import VIEW_SOURCES, crop_placement, run_view
 
 BUNDLE_SCHEMA = "flattener-scan-bundle-1"
 PIPELINE_NAME = "flattener.scan"
-PIPELINE_VERSION = 1
+PIPELINE_VERSION = 2  # 2: the gate is a hint (page_region_larger), settle pass
 AUTO_PASSES = 1
 PASS_CHOICES = ("auto", 0, 1, 2)
 ORIENT_MODES = ("model", "none", "oracle")
@@ -131,7 +139,8 @@ ON_ERROR = ("original", "return", "raise")
 BACKENDS = ("torch",)
 QUANTIZE_MODES = ("round", "truncate")
 VERIFY: dict[str, Any] = {
-    "min_coverage": 0.95,
+    "min_coverage": 0.95,  # below this the gate mask reaches past the page: a warning
+    "fragment_side_excess": 0.05,  # mask past every side above this: a piece of the page
     "max_drift": 0.04,  # median node drift between passes, fraction of the page diagonal
     "low_resolution_density": 0.5,  # source pixels per output pixel below this warn
     "post_preview_long_side": 768,
@@ -150,10 +159,11 @@ def _option_error(message: str) -> FlattenerError:
 class ScanOptions:
     """How a scan runs.
 
-    ``passes``: crop passes after pass A (``"auto"`` is 1). ``output``: ``"auto"``, a long
-    side or (height, width). ``aspect``: ``"auto"``, ``"estimate"``, ``"snap"``, a paper
-    name or width / height. ``inset``: as ``dewarp.predict --inset``; ``border`` moves each
-    side out by border / 2 of the page extent. ``fast_check``: check dewarp plans with
+    ``passes``: crop passes after pass A (``"auto"`` is 1, plus a settle pass when it
+    drifts). ``output``: ``"auto"``, a long side or (height, width). ``aspect``:
+    ``"auto"``, ``"estimate"``, ``"snap"``, a paper name or width / height. ``inset``: as
+    ``dewarp.predict --inset``; ``border`` moves each side out by border / 2 of the page
+    extent. ``fast_check``: check dewarp plans with
     ``scan.fast_check`` (the renderer's decisions from the grid, a small proxy render) and
     sample the full size in ``render``. ``preview``: long side of a preview image
     sampled from the same map (``None``: no preview). ``chain``: try C2-C4 after C1 fails.
@@ -501,6 +511,16 @@ def view_geometry(placement: Placement) -> ViewGeometry:
     matrix = scale @ placement.matrix @ np.diag([2.0 / view_width, 2.0 / view_height])
     offset = scale @ (placement.offset + 1.0 - placement.matrix @ np.ones(2))
     return ViewGeometry((float(view_height), float(view_width)), np.column_stack([matrix, offset]))
+
+
+def _drifted(passes: list[tuple[NDArray, dict[str, Any]]], source_size: tuple[int, int]) -> bool:
+    """Whether the last crop pass moved the page by more than ``VERIFY["max_drift"]``."""
+    if len(passes) < 2:
+        return False
+    first, second = passes[-2][0], passes[-1][0]
+    if not (np.isfinite(first).all() and np.isfinite(second).all()):
+        return False
+    return median_drift(first, second, source_size) > VERIFY["max_drift"]
 
 
 def median_drift(first: NDArray, second: NDArray, source_size: tuple[int, int]) -> float:
@@ -862,6 +882,7 @@ class Scanner:
                 "margin": RERUN_MARGIN if passes else None,
                 "max_angle_deg": None,  # the quarter turn is in the view, so no limit
                 "min_agreement": DESKEW_MIN_AGREEMENT if options.deskew and passes else None,
+                "settle": options.passes == "auto" and passes > 0,
             },
         }
         return {
@@ -1150,9 +1171,12 @@ class Scanner:
         options: ScanOptions,
         clock: StageClock,
     ) -> list[tuple[NDArray[np.float64], dict[str, Any]]]:
-        """Pass A and the crop passes of one candidate, each placed in the source. A
-        ``nodes`` candidate runs on the unturned view and re-indexes every grid by the
-        quarter turn (``quarter_turn_grid``)."""
+        """Pass A and the crop passes of one candidate, each placed in the source. With
+        ``passes="auto"`` a crop pass that moved the page by more than ``max_drift`` gets
+        one more crop pass (``settle``): when that one stays within the limit, the page has
+        settled on the crop passes (pass A saw more than the page, such as the
+        neighbouring page). A ``nodes`` candidate runs on the unturned view and re-indexes
+        every grid by the quarter turn (``quarter_turn_grid``)."""
         size = src.info.size
         theta = candidate.theta if candidate.deskew else 0.0
         in_view = candidate.orient and candidate.turn == "view"
@@ -1161,7 +1185,10 @@ class Scanner:
         with clock.stage("infer_pass_A"):
             grid, record = self._pass(src, memo, placement, box, options)
         passes = [(grid, {"pass": "A", **record})]
-        for number in range(1, candidate.rerun + 1):
+        settle = options.passes == "auto" and candidate.rerun > 0
+        for number in range(1, candidate.rerun + 1 + int(settle)):
+            if number > candidate.rerun and not _drifted(passes, size):
+                break
             previous = passes[-1][0]
             view_angle = passes[-1][1]["placement"]["angle_deg"]
             next_box, estimate, crop = rerun_box(
@@ -1182,6 +1209,8 @@ class Scanner:
                 grid, record = self._pass(src, memo, placement, crop_box, options)
             crop["rotated"] = placement.angle_deg != 0.0
             crop["canvas_size"] = [float(v) for v in placement.view_size]
+            if number > candidate.rerun:
+                crop["settle"] = True
             passes.append((grid, {"pass": number, **crop, **record}))
         turns = quarter % 4 if candidate.orient and candidate.turn == "nodes" else 0
         if turns:
@@ -1547,9 +1576,14 @@ class Scanner:
                 else:
                     if located.mask is not None:
                         checks["coverage"] = locating.grid_coverage(grid, located.mask)
+                        if checks["coverage"] < VERIFY["min_coverage"]:
+                            checks["excess"] = locating.region_excess(grid, located.mask, size)
                     if label == "final" and len(passes) > 1:
                         checks["drift"] = median_drift(passes[-2][0], grid, size)
-                    if checks.get("coverage", 1.0) < VERIFY["min_coverage"]:
+                    excess = checks.get("excess")
+                    # A manual quad is the page; only the gate's mask is a hint.
+                    strict = located.provenance == "manual"
+                    if excess and (strict or min(excess.values()) > VERIFY["fragment_side_excess"]):
                         bad = reason("unstable_geometry", check="coverage", **checks)
                     elif checks.get("drift", 0.0) > VERIFY["max_drift"]:
                         bad = reason("unstable_geometry", check="drift", **checks)
@@ -1615,6 +1649,10 @@ class Scanner:
         record = planned.record
         if outcome["rerun_discarded"]:
             reasons.append(reason("rerun_discarded", failures=outcome["failures"]))
+        coverage = outcome["checks"].get("coverage")
+        if coverage is not None and coverage < VERIFY["min_coverage"]:
+            excess = outcome["checks"].get("excess")
+            reasons.append(reason("page_region_larger", coverage=coverage, excess=excess))
         if orientation.settled_by is not None:
             # OrientNet decided on a flat preview; the pre-dewarp doubt is settled.
             reasons[:] = [item for item in reasons if item.code != "orientation_uncertain"]
@@ -1631,6 +1669,7 @@ class Scanner:
         record.qa = {
             "candidate": plan.region.get("candidate"),
             "coverage": outcome["checks"].get("coverage"),
+            "region_excess": outcome["checks"].get("excess"),
             "drift": outcome["checks"].get("drift"),
             "drift_limit": VERIFY["max_drift"],
             "orientation": orientation_qa,

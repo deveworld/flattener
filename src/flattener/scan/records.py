@@ -158,7 +158,9 @@ REASONS: dict[str, ReasonSpec] = {
             "ambiguous_page_region",
             Status.MODEL_ERROR,
             Severity.FAILURE,
-            "Return the original with the candidate page boxes (dominance below 0.85).",
+            "The gate split the page into pieces (dominance below 0.85): go on with the "
+            "pass-0 outline and warn (success, warning) when it holds a piece; otherwise "
+            "return the original with the candidate page boxes.",
             (Action.CHOOSE_REGION,),
             _CHOOSE_KO,
             _CHOOSE_EN,
@@ -167,10 +169,21 @@ REASONS: dict[str, ReasonSpec] = {
             "two_page_candidate",
             Status.MODEL_ERROR,
             Severity.FAILURE,
-            "Return the original with the boxes of two large components side by side.",
+            "As ambiguous_page_region, for two large components side by side.",
             (Action.CHOOSE_REGION,),
             _CHOOSE_KO,
             _CHOOSE_EN,
+        ),
+        ReasonSpec(
+            "page_region_larger",
+            Status.SUCCESS,
+            Severity.WARNING,
+            "The gate mask reaches past the flattened page (a neighbouring page, the book "
+            "edge or paper under the page); the dewarp result is kept. Detail: coverage and "
+            "the mask past each page side.",
+            (Action.SET_REGION,),
+            "옆 쪽이나 밑에 깔린 종이가 같이 보여요. 원하는 쪽이 펴졌는지 확인해 주세요",
+            "Something next to the page shows too. Check that the right page was flattened",
         ),
         ReasonSpec(
             "neighbor_page_partial",
