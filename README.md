@@ -160,6 +160,21 @@ python -m flattener.learning.evaluation --dataset outputs/dataset \
 - 장치는 `--device cpu|cuda|xpu`로 지정한 것만 씁니다. XPU는 `torch.xpu.is_available()`이 참인 XPU용 PyTorch 환경에서 돌립니다.
 - `--resume OUTPUT/last.pt`는 같은 코드·환경·플래그일 때 이어 갑니다. 데이터·코드·환경이 바뀌었으면 `--rebuild-cache`로 전처리 캐시를 다시 만듭니다.
 
+## 페이지 게이트 v0
+
+`outputs/coordinate-fold/locator.zip`의 `best.pt`(region-context-unet-2.0, 파라미터 140,545개, 입력 192×144)를 페이지 게이트 v0로 씁니다. 처음부터 8 epoch 학습했고, 학습 자료는 자체 합성 장면 3,840장, SmartDoc 템플릿 휨 합성 1,584장, SmartDoc 촬영 528장입니다. 모델 코드는 `flattener.regions.context`에 있습니다.
+
+```bash
+python tools/locator_v0.py install     # ~/.cache/flattener-sota-20260926/scan-weights/
+python tools/locator_v0.py reproduce   # 기록된 검증 IoU 재현
+python tools/locator_v0.py exposure    # SmartDoc 노출 목록
+```
+
+- `install`은 `best.pt`를 `locator-v0-pilot.pt`로 복사하고, 가중치와 출처 기록만 담은 `page-gate-v0.pt`(`region-context-1`)를 씁니다. 두 파일에 `.sha256` 파일이 붙습니다.
+- `reproduce`는 `best-validation.json`에 기록된 검증 샘플을 `outputs/dataset`에서 읽어 연구와 같은 방식(384×288로 확대, 임계값 0.5)으로 잽니다. CPU에서 촬영 48장의 IoU는 기록값 0.9508340768516064와 같고, 이미지별 손실 차이는 2×10⁻⁷ 이하, 보관된 모델 코드와의 확률 차이는 0입니다. `--domains all`은 528장 전체를 잽니다(자체 합성 두 장에서 예측 화소 수가 달라 평균 IoU 차이 약 10⁻⁷).
+- `src/flattener/regions/locator_v0_smartdoc.json`은 v0가 학습에 쓴 SmartDoc 문서 22종(`exclude_from_evaluation`), 체크포인트 선택에 쓴 4종(`selection_exposed`), 쓰지 않은 4종(`unexposed`)을 적은 목록입니다. v0를 SmartDoc으로 평가할 때는 앞의 22종을 배경과 관계없이 모두 뺍니다. `flattener.regions.context.smartdoc_exposure()`로 읽습니다.
+- 페이지가 없는 사진으로는 평가한 적이 없습니다.
+
 ## 라이선스
 
 코드는 [Apache-2.0](LICENSE)입니다. UVDoc에서 가져온 `flattener.dewarp.model`은 MIT, 함께 배포하는 글꼴은 OFL-1.1입니다. 외부 코드와 데이터의 출처·이용 조건은 [THIRD_PARTY.md](THIRD_PARTY.md)에 있습니다. `benchmarks/benchmark_renderer.py`는 렌더러 속도 스모크 테스트입니다.

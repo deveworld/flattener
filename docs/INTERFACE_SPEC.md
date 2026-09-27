@@ -81,3 +81,9 @@ CPU `float32`로 RGB를 [0,1]로 바꾸고 `grid_sample(mode="bilinear", padding
 `region`과 `segmenter` 중 하나만 지정합니다. 분할기는 `load_segmenter(checkpoint)`로 읽고 인쇄 페이지를 검출합니다. `estimate_page_region(image, segmenter, config=...)`는 영역 추정 결과를 돌려줍니다. 자동 분할은 실험 단계이므로 추정 영역을 결과에서 확인합니다.
 
 영역 경로는 미리보기 좌표를 원본 좌표에 합성한 뒤 한 번만 샘플링하고, 추정 마스크가 영역을 충분히 덮지 못하면 영역을 넓혀 다시 검사합니다. 출력 종횡비는 호출자가 정하고, 반환 마스크는 위 렌더러 규약을 따릅니다.
+
+## 페이지 게이트
+
+`flattener.regions.context`의 `load_context_segmenter(checkpoint, *, device="cpu")`는 `region-context-unet-2.0` 체크포인트를 읽습니다. 파일 옆에 SHA-256 16진수 한 줄을 담은 `<파일>.sha256`이 있어야 합니다. 스키마는 `independent-locator-pilot-1.0`(위치 추정 연구의 `best.pt`)과 `region-context-1`(가중치, 설정, 전처리 버전, 출처 기록)입니다. 전처리는 `regions.segmentation.preprocess_image`이고, 읽은 모델은 `predict_probability`, `model_id`, `model_sha256`을 가지므로 `segmenter=` 자리에 넣을 수 있습니다.
+
+`gate_page_region(probability, source_size, *, config=None)`과 `gate_page(image, segmenter, *, config=None)`는 `detect_region`을 면적 상한 1.0으로 돌려 페이지 상자를 정합니다. 마스크가 화면의 90%를 넘거나 테두리 세 면 이상에 닿으면 `fills_frame=True`, `reasons=("page_fills_frame",)`이고 상자는 이미지 전체입니다. 이 경우는 성공입니다. `page_not_found`, `page_area_rejected`, `ambiguous_page_region`, `uncertain_page_region`은 `model_error` 상태의 `FlattenerError`로 알립니다. `confident`는 dominance ≥0.95이고 평균 확률 ≥0.85일 때 참입니다.
