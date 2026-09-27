@@ -37,10 +37,10 @@ UVDoc 가중치로 초기화한 release 가중치의 배포 여부는 위 학습
 
 | 데이터 | 조건 | 용도 | 기록 |
 | --- | --- | --- | --- |
-| [DocUNet](https://www3.cs.stonybrook.edu/~cvl/docunet.html) 사진 130장, 스캔 65장 | 저자 배포, 공개·상업 재배포는 권리자 확인 | 평가 | `outputs/dataset/manifest.json`의 `collection.sources.docunet` |
+| [DocUNet](https://www3.cs.stonybrook.edu/~cvl/docunet.html) 사진 130장, 스캔 65장 | 저자 배포, 공개·상업 재배포는 권리자 확인 | 평가 | `outputs/benchmarks/docunet/manifest.json` |
 | DocUNet [crop.zip](http://vision.cs.stonybrook.edu/~kema/docwarp/crop.zip) (SHA-256 `30e385f4a8c7bb47ec93cb61c73e40d91ed390fbf86b22cf1c5e4e8898df4e81`) | 위와 같음 | 표준 벤치마크 입력 | `outputs/benchmarks/docunet/manifest.json` |
-| [SmartDoc 2015 Challenge 1 v2.0.0](https://github.com/jchazalon/smartdoc15-ch1-dataset/releases/tag/v2.0.0) | CC BY 4.0, 원문 이미지 권리는 각 저자 | 촬영 템플릿 30종, 사진 360장 | `collection.sources.smartdoc` |
-| [SyntheticDoc](https://doi.org/10.3929/ethz-c-000801994) | CC BY 4.0, 하위 출처마다 조건이 다름 | release 학습(조건이 확인된 하위 출처만) | `collection.sources.syntheticdoc` |
+| [SmartDoc 2015 Challenge 1 v2.0.0](https://github.com/jchazalon/smartdoc15-ch1-dataset/releases/tag/v2.0.0) | CC BY 4.0, 원문 이미지 권리는 각 저자 | 촬영 템플릿 30종, 사진 360장 | `outputs/benchmarks/smartdoc/manifest.json` |
+| [SyntheticDoc](https://doi.org/10.3929/ethz-c-000801994) | CC BY 4.0, 하위 출처마다 조건이 다름 | release 학습(조건이 확인된 하위 출처만) | `tools/syntheticdoc/`가 쓰는 샘플별 라이선스 기록, 체크포인트 `.pt.json`의 `data_sources` |
 | [Doc3D](https://github.com/cvlab-stonybrook/doc3D-dataset) | 텍스처 CC BY-NC-ND 3.0, Laval HDR 비상업 | research 학습 전용 | data spec의 `license` |
 | [UVDoc 데이터셋](https://github.com/tanguymagne/UVDoc-Dataset) | 비상업 텍스처(DeepFloyd IF), DTD 배경 연구용 | research 학습 전용 | data spec의 `license` |
 | [UVDoc 벤치마크](https://igl.ethz.ch/projects/uvdoc/UVDoc_benchmark.zip) 50샘플 (SHA-256 `8bf91a3e0d9bfa3655a8bcb38b74c1a8c02a9f1ba5ce34cfc51e5ae0660067ac`) | 저장소 MIT, 압축 파일에는 라이선스 파일 없음 | 평가 전용 | `outputs/benchmarks/uvdoc-bench/manifest.json` |
@@ -49,7 +49,7 @@ UVDoc 가중치로 초기화한 release 가중치의 배포 여부는 위 학습
 인용
 
 - Ke Ma, Zhixin Shu, Xue Bai, Jue Wang, Dimitris Samaras. *DocUNet: Document Image Unwarping via A Stacked U-Net*. CVPR 2018.
-- Jean-Christophe Burie 외. *ICDAR2015 Competition on Smartphone Document Capture and OCR (SmartDoc)*. ICDAR 2015. 전체 저자: `collection.sources.smartdoc`.
+- Jean-Christophe Burie 외. *ICDAR2015 Competition on Smartphone Document Capture and OCR (SmartDoc)*. ICDAR 2015. 전체 저자: `tools/locator_v0.py`의 `SMARTDOC_CITATION`.
 - Daniel Woortmann, Tanguy Magne, Olga Sorkine-Hornung. *SyntheticDoc: A Large Synthetic Dataset for Document Unwarping and Illumination Correction*. ECCV 2026.
 - Sagnik Das, Ke Ma, Zhixin Shu, Dimitris Samaras, Roy Shilkrot. *DewarpNet: Single-Image Document Unwarping With Stacked 3D and 2D Regression Networks*. ICCV 2019. (Doc3D)
 - Floor Verhoeven, Tanguy Magne, Olga Sorkine-Hornung. *UVDoc: Neural Grid-based Document Unwarping*. SIGGRAPH Asia 2023.
