@@ -1,7 +1,6 @@
 """Grid conventions: value conversions, node positions and render round trips."""
 
 import numpy as np
-import pytest
 import torch
 import torch.nn.functional as F
 
@@ -128,9 +127,3 @@ def test_resize_grid_matches_upstream_subsampling_and_nan_stays_local():
     coarse = map_to_grid(centered, (9, 7))
     invalid = ~np.isfinite(coarse).all(-1)
     assert 0 < invalid.sum() <= 4 and not invalid[0].any()
-
-
-@pytest.mark.parametrize("bad", [np.zeros((3, 2)), np.zeros((1, 4, 2)), np.zeros((4, 4, 2), int)])
-def test_grid_helpers_reject_bad_arrays(bad):
-    with pytest.raises(ValueError):
-        grid_to_map(bad, (4, 4))

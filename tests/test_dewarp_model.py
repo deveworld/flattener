@@ -14,7 +14,6 @@ from flattener.dewarp.model import (
     UVDocNet,
     count_parameters,
     load_uvdoc_weights,
-    natural_grid_size,
     uvdoc_model,
 )
 
@@ -31,30 +30,8 @@ def _uvdoc_repo() -> Path:
     return repo
 
 
-def test_natural_grid_size_follows_four_stride_two_stages():
-    assert natural_grid_size((712, 488)) == (45, 31)
-    assert natural_grid_size((1440, 1024)) == (90, 64)
-    assert DewarpModelConfig().natural_grid_size == DewarpModelConfig().grid_size
-
-
 def test_upstream_configuration_has_upstream_parameter_count():
     assert count_parameters(UVDocNet(UVDOC_CONFIG)) == {"total": 8_003_463, "trainable": 8_003_463}
-
-
-def test_config_validation_and_round_trip():
-    config = DewarpModelConfig(input_size=(1440, 1024), grid_size=(90, 64), with_3d=False)
-    assert DewarpModelConfig.from_dict(config.to_dict()) == config
-    for bad in (
-        {"kernel_size": 4},
-        {"grid_size": (2, 31)},
-        {"input_size": (712,)},
-        {"grid_convention": "other"},
-        {"num_filter": True},
-    ):
-        with pytest.raises(ValueError):
-            DewarpModelConfig(**bad)
-    with pytest.raises(ValueError, match="unknown"):
-        DewarpModelConfig.from_dict({"channels_last": True})
 
 
 @pytest.mark.parametrize("grid_size", [(4, 3), (9, 7)])

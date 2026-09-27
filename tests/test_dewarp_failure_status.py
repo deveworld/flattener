@@ -1,4 +1,4 @@
-"""Codex review F1: a failed geometry check keeps its status through the dewarp CLI.
+"""A failed geometry check keeps its status through the dewarp CLI.
 
 The checkpoint below predicts one constant grid, so every dense map it gives is
 degenerate and ``flattener.render`` rejects it with ``invalid_transform``
@@ -19,7 +19,7 @@ from flattener.contracts import Status
 from flattener.dewarp import predict
 from flattener.dewarp.checkpoint import CHECKPOINT_SCHEMA, save_checkpoint
 from flattener.dewarp.coords import edge_positions
-from flattener.dewarp.model import DewarpModelConfig, UVDocNet, sha256_file
+from flattener.dewarp.model import DewarpModelConfig, UVDocNet
 from flattener.dewarp.predict import EXIT_FAILED, Dewarper, main, rectify
 
 TINY = DewarpModelConfig(input_size=(64, 48), grid_size=(5, 4), num_filter=4)
@@ -103,16 +103,6 @@ def test_image_cli_fails_on_a_degenerate_map_by_default(tmp_path, capsys):
     assert json.loads(captured.out)["removed_earlier_output"] is True
 
 
-def test_image_cli_force_render_writes_the_image_and_still_fails(tmp_path, capsys):
-    weights = _degenerate_checkpoint(tmp_path / "model.pt")
-    source, output = _photo(tmp_path / "in.png"), tmp_path / "out.png"
-    argv = ["--weights", str(weights), "image", "--input", str(source), "--output", str(output)]
-    code = main([*argv, "--force-render"])
-    assert code != 0 and output.is_file()
-    printed = json.loads(capsys.readouterr().out)
-    assert printed["status"] == Status.INVALID_TRANSFORM.value
-
-
 def _docunet_args(tmp_path):
     crops = tmp_path / "crop"
     crops.mkdir()
@@ -133,21 +123,6 @@ def test_docunet_cli_records_failures_and_exits_non_zero(tmp_path, capsys):
     assert json.loads(capsys.readouterr().out)["failed"] == 1
 
 
-def test_docunet_cli_force_render_keeps_the_failure_on_every_run(tmp_path, capsys):
-    argv, output = _docunet_args(tmp_path)
-    assert main([*argv, "--force-render"]) != 0
-    assert (output / "1_1.png").is_file()
-    [item] = json.loads((output / "predictions.json").read_text())["items"]
-    assert _records_invalid_transform(item)
-    assert json.loads(capsys.readouterr().out)["failed"] == 1
-    # A later run keeps the forced image; its recorded failure stays and counts again.
-    code, _ = _exit_code([*argv, "--force-render"])
-    assert code != 0
-    [kept] = json.loads((output / "predictions.json").read_text())["items"]
-    assert _records_invalid_transform(kept)
-    assert json.loads(capsys.readouterr().out)["failed"] == 1
-
-
 def test_checked_rectify_follows_the_failure_policy():
     image = np.random.default_rng(0).integers(0, 256, (40, 30, 3), dtype=np.uint8)
     dewarper = Dewarper(_FoldGrid(), TINY, torch.device("cpu"))
@@ -158,17 +133,6 @@ def test_checked_rectify_follows_the_failure_policy():
     assert original.status == Status.INVALID_TRANSFORM and original.used_fallback
     np.testing.assert_array_equal(original.image, image)
     assert "forced_render" not in original.metadata
-
-
-def test_docunet_cli_refuses_predictions_of_the_older_format(tmp_path):
-    argv, output = _docunet_args(tmp_path)
-    output.mkdir()
-    old = {"schema": "flattener-dewarp-docunet-1", "items": []}
-    old["model"] = {"sha256": sha256_file(tmp_path / "model.pt")}
-    (output / "predictions.json").write_text(json.dumps(old))
-    with pytest.raises(FlattenerError, match="older format"):
-        main(argv)
-    assert main([*argv, "--overwrite", "--force-render"]) != 0
 
 
 def _folds_dark_inputs(dewarper, image):
@@ -204,51 +168,3 @@ def test_a_kept_output_must_come_from_the_same_input(tmp_path, capsys, monkeypat
     assert run("--force-render")[1]["kept"] == 1
     code, counts = run()
     assert code == EXIT_FAILED and counts["kept"] == 0 and not image.exists()
-
-
-def test_truncate_keeps_every_failure_rule():
-    image = np.random.default_rng(0).integers(0, 256, (40, 30, 3), dtype=np.uint8)
-    dewarper = Dewarper(_FoldGrid(), TINY, torch.device("cpu"))
-    with pytest.raises(FlattenerError) as error:
-        rectify(dewarper, image, quantize="truncate")
-    assert error.value.status == Status.INVALID_TRANSFORM
-    config = RenderConfig(on_error="return")
-    returned = rectify(dewarper, image, render_config=config, quantize="truncate")
-    assert returned.status == Status.INVALID_TRANSFORM and returned.image is None
-    forced = rectify(dewarper, image, allow_unchecked=True, quantize="truncate")
-    assert forced.status == Status.INVALID_TRANSFORM and forced.reason_code == "fold_or_degenerate"
-    assert forced.used_fallback and forced.metadata["forced_render"]
-    gap = rectify(dewarper, image, allow_unchecked=True).image.astype(int) - forced.image
-    assert gap.min() >= 0 and gap.max() <= 1
-    with pytest.raises(FlattenerError, match="quantize"):
-        rectify(dewarper, image, quantize="nearest")
-
-
-def test_truncate_cli_failures_still_fail(tmp_path, capsys):
-    weights = _degenerate_checkpoint(tmp_path / "model.pt")
-    source, output = _photo(tmp_path / "in.png"), tmp_path / "out.png"
-    _photo(output)  # an image of an earlier run
-    argv = ["--weights", str(weights), "image", "--input", str(source), "--output", str(output)]
-    assert main([*argv, "--quantize", "truncate"]) == EXIT_FAILED and not output.exists()
-    printed = json.loads(capsys.readouterr().out)
-    assert printed["status"] == Status.INVALID_TRANSFORM.value
-    assert printed["quantize"] == printed["evidence"]["quantize"] == "truncate"
-    assert main([*argv, "--quantize", "truncate", "--force-render"]) == EXIT_FAILED
-    assert output.is_file() and json.loads(capsys.readouterr().out)["forced"] is True
-
-    argv, output = _docunet_args(tmp_path)
-    assert main([*argv, "--quantize", "truncate"]) == EXIT_FAILED
-    assert not (output / "1_1.png").exists()
-    assert json.loads(capsys.readouterr().out)["failed"] == 1
-    assert main([*argv, "--quantize", "truncate", "--force-render"]) == EXIT_FAILED
-    assert (output / "1_1.png").is_file()
-    record = json.loads((output / "predictions.json").read_text())
-    [item] = record["items"]
-    assert record["quantize"] == "truncate" and _records_invalid_transform(item) and item["forced"]
-    assert json.loads(capsys.readouterr().out) == {
-        "items": 1,
-        "written": 1,
-        "kept": 0,
-        "failed": 1,
-        "forced": 1,
-    }

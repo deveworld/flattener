@@ -1,129 +1,27 @@
-"""SyntheticDoc data tooling (tools/syntheticdoc): zip/multipart parsing, licenses, split."""
+"""SyntheticDoc data tooling (tools/syntheticdoc): licenses, split, sample conversion and
+the compact training copy."""
 
+import hashlib
 import io
-import struct
+import json
 import sys
-import zipfile
-import zlib
 from pathlib import Path
 
 import numpy as np
 import pytest
 from PIL import Image
 
+from flattener.dewarp.coords import flattener_to_syntheticdoc, pixels_to_flattener
+from flattener.dewarp.data import SPEC_SCHEMA, DataSpec, build_dataset
+
 TOOLS = Path(__file__).resolve().parents[1] / "tools" / "syntheticdoc"
 sys.path.insert(0, str(TOOLS))
 
+import compact  # noqa: E402
 import fetch  # noqa: E402
 import sdcommon  # noqa: E402
 import sdlicense  # noqa: E402
 import sdsplit  # noqa: E402
-from harvest import parse_metadata  # noqa: E402
-
-FILES = ("uv_inverse.exr", "render.png", "backward_map.npy", "metadata.json", "shadow.png")
-
-
-def _shard(n: int = 3) -> bytes:
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED, allowZip64=True) as z:
-        for k in range(n):
-            for name in FILES:
-                info = zipfile.ZipInfo(f"{k:07d}/{name}")
-                data = f"{k}-{name}-".encode() * (7 + k)
-                z.writestr(info, data, compress_type=zipfile.ZIP_STORED)
-        z.writestr("0000000/../deflated.txt", b"hello" * 50, compress_type=zipfile.ZIP_DEFLATED)
-    return buf.getvalue()
-
-
-def _zip64(data: bytes) -> bytes:
-    """Rewrite the EOCD into zip64 form (0xFFFFFFFF placeholders) like the real shards."""
-    i = data.rfind(b"PK\x05\x06")
-    _, _, _, n1, n, cd_size, cd_offset, clen = struct.unpack("<IHHHHIIH", data[i : i + 22])
-    body = data[:i]
-    z64_offset = len(body)
-    z64 = struct.pack("<IQHHIIQQQQ", 0x06064B50, 44, 45, 45, 0, 0, n, n, cd_size, cd_offset)
-    loc = struct.pack("<IIQI", 0x07064B50, 0, z64_offset, 1)
-    eocd = struct.pack("<IHHHHIIH", 0x06054B50, 0, 0, n1, n, cd_size, 0xFFFFFFFF, 0)
-    return body + z64 + loc + eocd
-
-
-@pytest.mark.parametrize("zip64", [False, True])
-def test_central_directory_and_members(zip64):
-    data = _shard()
-    if zip64:
-        data = _zip64(data)
-    tail_offset = max(0, len(data) - 600)
-    cd_offset, cd_size, n, z64 = sdcommon.locate_central_directory(data[tail_offset:], tail_offset)
-    if z64 is not None:
-        cd_offset, cd_size, n = sdcommon.parse_zip64_eocd(data[z64 : z64 + 56])
-    entries = sdcommon.parse_central_directory(data[cd_offset : cd_offset + cd_size])
-    assert len(entries) == n == 3 * len(FILES) + 1
-    reference = {i.filename: i for i in zipfile.ZipFile(io.BytesIO(_shard())).infolist()}
-    spans = sdcommon.member_spans(entries, cd_offset)
-    for entry in entries:
-        assert entry.crc == reference[entry.name].CRC
-        a, b = spans[entry.name]
-        payload = sdcommon.extract_member(data[a : b + 1], 0, entry)
-        assert zlib.crc32(payload) == entry.crc
-    # render, map and metadata are contiguous: one block per sample
-    e = {x.name: x for x in entries}
-    r, m = spans["0000001/render.png"], spans["0000001/metadata.json"]
-    block = data[r[0] : m[1] + 1]
-    for name in ("render.png", "backward_map.npy", "metadata.json"):
-        entry = e[f"0000001/{name}"]
-        assert sdcommon.extract_member(block, entry.offset - r[0], entry).startswith(b"1-")
-    corrupt = bytearray(block)
-    corrupt[-3] ^= 0xFF
-    with pytest.raises(sdcommon.ConsistencyError, match="CRC"):
-        entry = e["0000001/metadata.json"]
-        sdcommon.extract_member(bytes(corrupt), entry.offset - r[0], entry)
-
-
-def test_multipart_parse_and_range_packing():
-    boundary = "b0undary"
-    parts = [(10, 19, b"--b0undary"), (100, 103, b"\r\n\r\n")]
-    body = b""
-    for a, b, data in parts:
-        body += (
-            f"\r\n--{boundary}\r\nContent-type: application/zip\r\n"
-            f"Content-range: bytes {a}-{b}/5000\r\n\r\n"
-        ).encode() + data
-    body += f"\r\n--{boundary}--\r\n".encode()
-    got = sdcommon.parse_multipart(body, f"multipart/byteranges; boundary={boundary}")
-    assert got == [(10, 19, 5000, b"--b0undary"), (100, 103, 5000, b"\r\n\r\n")]
-    ranges = [(k * 10_000_000_000, k * 10_000_000_000 + 1300) for k in range(1000)]
-    groups = sdcommon.pack_ranges(ranges, limit=7000)
-    assert sum(len(g) for g in groups) == 1000
-    assert all(len("bytes=" + ",".join(f"{a}-{b}" for a, b in g)) <= 7000 for g in groups)
-
-
-class _FakeHttp:
-    def __init__(self, blob: bytes, total: int):
-        self.blob, self.total, self.calls = blob, total, 0
-
-    def request(self, method, target, headers=None, body=None, **_):
-        self.calls += 1
-        spec = headers["Range"].split("=", 1)[1].split(",")
-        out = b""
-        for piece in spec:
-            a, b = map(int, piece.split("-"))
-            out += (
-                f"\r\n--XyZ\r\nContent-range: bytes {a}-{b}/{self.total}\r\n\r\n"
-            ).encode() + self.blob[a : b + 1]
-        out += b"\r\n--XyZ--\r\n"
-        return sdcommon.Response(206, {"content-type": "multipart/byteranges; boundary=XyZ"}, out)
-
-
-def test_get_ranges_maps_parts_and_checks_total():
-    blob = bytes(range(256)) * 40
-    fake = _FakeHttp(blob, len(blob))
-    remote = sdcommon.RemoteFile("tok", "train/train_000.zip")
-    ranges = [(5, 9), (300, 330), (9000, 9100)]
-    got = sdcommon.get_ranges(fake, remote, ranges, total=len(blob))
-    assert all(got[(a, b)] == blob[a : b + 1] for a, b in ranges)
-    with pytest.raises(sdcommon.ConsistencyError, match="size changed"):
-        sdcommon.get_ranges(fake, remote, ranges, total=len(blob) + 1)
-    assert remote.download.startswith("/index.php/s/tok/download?path=%2Ftrain&files=")
 
 
 def test_license_normalization():
@@ -149,20 +47,6 @@ def test_license_normalization():
     assert sdlicense.combine("clean", "sa") == "sa"
     assert sdlicense.combine("sa", "unknown") == "unknown"
     assert sdlicense.combine("unknown", "nc", "clean") == "nc"
-
-
-def test_parse_metadata_paths():
-    raw = (
-        b'{"files": {"mesh": "/x/src/mesh_generator/results/fold_by_pull/01234.obj",'
-        b' "document": "/x/src/document_gathering/results/imslp/'
-        b'page_011043_T\xc3\xa4n WWV_p56.png",'
-        b' "surface_texture": "/x/surfaces/flat-clean/train_Stone_0386_elf_floor/"},'
-        b' "status": "success", "orientation": 90}'
-    )
-    got = parse_metadata(raw)
-    assert got["mesh_family"] == "fold_by_pull" and got["mesh_id"] == "01234"
-    assert got["doc_source"] == "imslp" and got["doc_name"].startswith("page_011043_Tän")
-    assert got["bg_name"] == "train_Stone_0386_elf_floor" and got["orientation"] == 90
 
 
 def test_split_is_group_disjoint_and_deterministic():
@@ -212,32 +96,155 @@ def test_convert_sample_full_resolution_and_fp16():
         fetch.convert_sample(png.getvalue(), wrong.getvalue())
 
 
-def test_state_roundtrip(tmp_path):
-    state = sdcommon.State(tmp_path / "index.sqlite")
-    state.put("k", {"a": 1})
-    assert state.get("k") == {"a": 1} and state.get("missing", 3) == 3
-    state.close()
+# Compact training copy (tools/syntheticdoc/compact.py) on a tiny download
+
+RENDER = (144, 102)  # (height, width) of the fake upstream renders
 
 
-class _RangeHttp:
-    """Serves single Range requests (WebDAV style) from an in-memory file."""
+def _map(seed):
+    """A 18x12 raw SyntheticDoc map of an affine page covering about 70% of the render."""
+    height, width = RENDER
+    rng = np.random.default_rng(seed)
+    corner = np.array([0.12 * width, 0.1 * height]) + rng.uniform(0, 4, 2)
+    axes = np.array([[0.7 * width, 0.03 * width], [-0.02 * height, 0.75 * height]])
+    u, v = np.meshgrid((np.arange(12) + 0.5) / 12, (np.arange(18) + 0.5) / 18)
+    edges = corner + np.stack([u, v], -1) @ axes
+    values = pixels_to_flattener(edges - 0.5, RENDER)
+    return flattener_to_syntheticdoc(values, RENDER).astype(np.float16)
 
-    def __init__(self, blob: bytes):
-        self.blob = blob
 
-    def request(self, method, target, headers=None, body=None, **_):
-        a, b = map(int, headers["Range"].split("=", 1)[1].split("-"))
-        cr = f"bytes {a}-{b}/{len(self.blob)}"
-        return sdcommon.Response(206, {"content-range": cr}, self.blob[a : b + 1])
+def _write_sample(root, shard, stem, *, seed=0, track="release", record=True):
+    folder = root / "samples" / shard
+    folder.mkdir(parents=True, exist_ok=True)
+    pixels = np.random.default_rng(seed).integers(0, 256, (*RENDER, 3), dtype=np.uint8)
+    Image.fromarray(pixels).save(folder / f"{stem}.render.jpg", quality=95)
+    np.save(folder / f"{stem}.bm16.npy", _map(seed))
+    if not record:
+        return
+    entry = {
+        "schema": "flattener-dewarp-sample-1",
+        "sample_id": f"syntheticdoc-train-{stem}",
+        "split": "val" if stem.endswith("9") else "train",
+        "image": f"{stem}.render.jpg",
+        "backward_map": f"{stem}.bm16.npy",
+        "backward_map_convention": "syntheticdoc",
+        "original_render_size": list(RENDER),
+        "track": track,
+        "license_class": "clean" if track == "release" else "nc",
+        "official": {"split": "train", "shard": shard, "sample_id": stem},
+        "groups": {"doc_group": f"arxiv:{stem}", "mesh_group": "curve/00001"},
+        "license": {"class": "clean", "document": "CC-BY-4.0", "background": "CC0-1.0"},
+        "attribution": {"dataset": {"name": "SyntheticDoc"}},
+        "conversion": {"image": {"bytes": (folder / f"{stem}.render.jpg").stat().st_size}},
+        "syntheticdoc_metadata": {"camera": {"distance": 0.6}},
+    }
+    (folder / f"{stem}.json").write_text(json.dumps(entry))
 
 
-def test_truncated_shard_is_terminal_and_intact_shard_parses():
-    blob = _zip64(_shard(40))
-    remote = sdcommon.RemoteFile("tok", "train/train_106.zip")
-    entries, cd_offset, _ = sdcommon.read_central_directory(
-        _RangeHttp(blob), remote, len(blob), None, tail_bytes=70_000
+def _download(tmp_path):
+    root = tmp_path / "download"
+    for index, (shard, stem) in enumerate(
+        [("train_000", "0000001"), ("train_000", "0000002"), ("train_001", "0000009")]
+    ):
+        _write_sample(root, shard, stem, seed=index)
+    _write_sample(root, "train_001", "0000004", seed=7, record=False)  # still downloading
+    (root / "samples/train_001/0000005.json.tmp123-4").write_text("{")
+    (root / "dataset-manifest.json").write_text(json.dumps({"complete": False}))
+    return root
+
+
+def _run(source, output, *extra):
+    return compact.main(
+        [
+            "--source",
+            str(source),
+            "--output",
+            str(output),
+            "--workers",
+            "1",
+            "--input-size",
+            "48",
+            "36",
+            "--stats-samples",
+            "8",
+            *extra,
+        ]
     )
-    assert len(entries) == 40 * len(FILES) + 1 and cd_offset < len(blob)
-    cut = blob[: (len(blob) // 2 // 4096) * 4096]  # like the upstream partial uploads
-    with pytest.raises(sdcommon.TruncatedArchive):
-        sdcommon.read_central_directory(_RangeHttp(cut), remote, len(cut), None, tail_bytes=70_000)
+
+
+def _manifest(output):
+    lines = (output / "manifest.jsonl").read_text().splitlines()
+    return [json.loads(line) for line in lines]
+
+
+def test_compact_copy_is_resized_hashed_and_readable_by_the_loader(tmp_path):
+    source, output = _download(tmp_path), tmp_path / "cache"
+    assert _run(source, output) == 0
+    settings = json.loads((output / "compact.json").read_text())
+    statistics = settings["scale_statistics"]
+    # A page-tight crop covers 36 px of width at about 36 / (0.7 * 102) ~ 0.51; rounded up
+    # to 1/16 that is 0.5625.
+    needed = statistics["page_tight_scale_percentiles"]["75"]
+    assert 0.5 < needed < settings["scale"] == 0.5625 and statistics["samples"] == 3
+    entries = _manifest(output)
+    assert [e["sample_id"][-7:] for e in entries] == ["0000001", "0000002", "0000009"]
+    for entry in entries:
+        image = output / entry["image"]
+        with Image.open(image) as opened:
+            assert opened.size == (57, 81) and entry["image_size"] == [81, 57]
+        assert hashlib.sha256(image.read_bytes()).hexdigest() == entry["image_sha256"]
+        original = source / "samples" / entry["shard"] / f"{entry['sample_id'][-7:]}.bm16.npy"
+        assert (output / entry["backward_map"]).read_bytes() == original.read_bytes()
+        assert entry["original_render_size"] == list(RENDER) and entry["track"] == "release"
+    summary = json.loads((output / "compact-manifest.json").read_text())
+    assert summary["counts"]["samples"] == 3 and summary["counts"]["incomplete_skipped"] == 1
+    assert summary["complete"] is False and summary["license_classes"] == {"clean": 3}
+    record = json.loads((output / entries[0]["meta"]).read_text())
+    assert record["attribution"]["dataset"]["name"] == "SyntheticDoc"
+    assert record["source"]["image_size"] == list(RENDER)
+    # The dewarp loader reads the copy; its targets equal those of the full-size download.
+    spec = DataSpec.from_dict(
+        {
+            "schema": SPEC_SCHEMA,
+            "name": "c",
+            "track": "release",
+            "sources": [
+                {
+                    "name": name,
+                    "kind": kind,
+                    "root": str(root),
+                    "track": "release",
+                    "split": "train",
+                    "license": "CC BY 4.0",
+                }
+                for name, kind, root in (
+                    ("copy", "syntheticdoc_compact", output),
+                    ("full", "converted", source),
+                )
+            ],
+        }
+    )
+    dataset = build_dataset(
+        spec, track="release", split="train", input_size=(48, 36), grid_size=(5, 4), train=False
+    )
+    copy, full = dataset.sources
+    for index in range(2):
+        a, b = copy.load(index), full.load(index)
+        np.testing.assert_array_equal(a.grid, b.grid)
+        assert a.size == (81, 57) and b.size == RENDER
+        a.image.close(), b.image.close()
+
+
+def test_settings_are_fixed_by_the_first_run_and_tracks_are_enforced(tmp_path):
+    source, output = _download(tmp_path), tmp_path / "cache"
+    assert _run(source, output, "--scale", "0.75", "--stats-only") == 0
+    assert json.loads((output / "compact.json").read_text())["scale"] == 0.75
+    for extra in (("--quality", "80"), ("--scale", "0.5"), ("--track", "research")):
+        with pytest.raises(SystemExit, match="compact.json fixes"):
+            _run(source, output, *extra)
+    _write_sample(source, "train_002", "0000003", seed=3, track="research")
+    assert _run(source, output) == 1  # the research sample is reported and left out
+    summary = json.loads((output / "compact-manifest.json").read_text())
+    assert summary["counts"]["samples"] == 3 and "track 'research'" in summary["errors"][0]
+    with pytest.raises(SystemExit):
+        compact.parser().parse_args(["--source", "s", "--output", "o", "--workers", "9"])

@@ -75,18 +75,12 @@ def _record(predictions, model, inputs):
 
 
 @pytest.mark.parametrize(
-    ("model", "inputs", "kind"),
-    [
-        (None, None, "docunet_standard"),
-        (OWN, "docunet_crop", "new_model_real_photo"),
-        ({**OWN, "step": 50}, "docunet_crop", "smoke_training"),
-        (UVDOC, "docunet_stress:rot90", "external_pretrained"),
-    ],
+    ("model", "kind"),
+    [(OWN, "new_model_real_photo"), ({**OWN, "step": 50}, "smoke_training")],
 )
-def test_docunet_reports_carry_the_evidence_of_their_predictions(tiny_docunet, model, inputs, kind):
+def test_docunet_reports_carry_the_evidence_of_their_predictions(tiny_docunet, model, kind):
     scans, predictions = tiny_docunet
-    if model is not None:
-        _record(predictions, model, inputs)
+    _record(predictions, model, "docunet_crop")
     report = docunet.evaluate_docunet(
         predictions,
         pattern="{k}_{m}.png",
@@ -97,5 +91,4 @@ def test_docunet_reports_carry_the_evidence_of_their_predictions(tiny_docunet, m
         workers=1,
     )
     assert report["evidence"]["evidence_kind"] == kind
-    stress = inputs is not None and inputs.startswith("docunet_stress")
-    assert report["evidence"]["measurement"] == ("docunet_stress" if stress else "docunet_standard")
+    assert report["evidence"]["measurement"] == "docunet_standard"

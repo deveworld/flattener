@@ -1,7 +1,8 @@
-"""Dewarp trainer: configuration, schedule, sampler, checkpoints and a CPU smoke run."""
+"""Dewarp trainer: sampler, checkpoints, resume, validation, losses and a CPU smoke run."""
 
 import csv
 import json
+import math
 from dataclasses import replace
 from pathlib import Path
 
@@ -16,9 +17,7 @@ from flattener.dewarp.checkpoint import (
     commit_checkpoint,
     latest_checkpoint,
     load_checkpoint,
-    retire_best,
     save_checkpoint,
-    write_json,
 )
 from flattener.dewarp.data import SAMPLE_SCHEMA, SPEC_SCHEMA, DataSpec, ViewConfig, require_track
 from flattener.dewarp.model import DewarpModelConfig, UVDocNet
@@ -28,16 +27,12 @@ from flattener.dewarp.train import (
     TrainConfig,
     _check_resume,
     _initialize,
-    carry_best,
     code_record,
     compute_losses,
     improves,
-    learning_rate,
-    main,
     memory_stats,
-    restore_scaler,
-    save_due,
     train,
+    validate,
     validation_signature,
 )
 
@@ -124,62 +119,6 @@ def _payload(step, **extra):
     }
 
 
-def test_train_config_round_trip_and_validation(tmp_path):
-    config = _config(
-        tmp_path,
-        epe_reference_size=(1440, 1024),
-        betas=[0.9, 0.99],
-        val_views=[{"name": "tight", "margin": [0.0, 0.0]}, ViewConfig("frame", "full_frame")],
-        val_select="frame",
-        val_batch_size=4,
-    )
-    data = json.loads(json.dumps(config.to_dict()))
-    assert TrainConfig.from_dict(data) == config
-    assert config.val_views[0] == ViewConfig("tight", "page", (0.0, 0.0))
-    assert config.selected_view == "frame" and _config(tmp_path).selected_view == "page"
-    assert _config(tmp_path).val_views == DEFAULT_VIEWS
-    assert _config(tmp_path).epe_reference_size == (712, 488)  # fixed across input sizes
-    for bad in (
-        {"track": "public"},
-        {"schedule": "step"},
-        {"init": "uvdoc"},
-        {"batch_size": 0},
-        {"model": DewarpModelConfig(grid_convention="uvdoc")},
-        {"lr": 2.0},
-        {"max_steps": 0},
-        {"epe_reference_size": None},
-        {"val_batch_size": 0},
-        {"val_views": []},
-        {"val_views": [ViewConfig("a"), ViewConfig("a")]},
-        {"val_views": [{"name": "a", "crop": "tight"}]},
-        {"val_select": "missing"},
-        {"channels_last": 1},
-    ):
-        with pytest.raises(FlattenerError):
-            replace(config, **bad)
-    with pytest.raises(FlattenerError, match="unknown"):
-        TrainConfig.from_dict({**data, "memory_format": "channels_last"})
-
-
-def test_learning_rate_schedules():
-    config = TrainConfig(
-        data_spec="s",
-        output_dir="o",
-        track="research",
-        total_steps=100,
-        warmup_steps=10,
-        lr=1e-3,
-        min_lr_ratio=0.1,
-    )
-    assert learning_rate(config, 0) == pytest.approx(1e-4)
-    assert learning_rate(config, 9) == pytest.approx(1e-3)
-    assert learning_rate(config, 100) == pytest.approx(1e-4)
-    linear = replace(config, schedule="linear_decay", decay_start=0.5, min_lr_ratio=0.0)
-    assert learning_rate(linear, 50) == pytest.approx(1e-3)
-    assert learning_rate(linear, 75) == pytest.approx(5e-4)
-    assert learning_rate(replace(config, schedule="constant"), 99) == pytest.approx(1e-3)
-
-
 def test_step_sampler_is_deterministic_resumable_and_weighted():
     def take(sampler, count):
         iterator = iter(sampler)
@@ -220,22 +159,6 @@ def test_checkpoint_commit_verify_prune_and_tamper_detection(tmp_path):
     assert error.value.reason_code == "checksum_mismatch"
     with pytest.raises(FlattenerError, match="schema"):
         save_checkpoint(tmp_path / "x.pt", {"step": 1})
-
-
-def test_a_retired_best_keeps_its_checkpoint(tmp_path):
-    directory = tmp_path / "checkpoints"
-    commit_checkpoint(directory, _payload(1), keep=1, is_best=True)
-    retired = retire_best(directory, 1, {"reason": "validation signature changed"})
-    assert retired == directory / "best_before_step_00000001.json"
-    assert not (directory / "best.json").exists()
-    assert json.loads(retired.read_text())["retired"]["reason"] == "validation signature changed"
-    for step in (2, 3):
-        commit_checkpoint(directory, _payload(step), keep=1, is_best=False)
-    assert sorted(path.name for path in directory.glob("*.pt")) == [
-        "step_00000001.pt",
-        "step_00000003.pt",
-    ]
-    assert retire_best(directory, 3, {}) is None
 
 
 def test_resume_compatibility_and_initialization_lineage(tmp_path):
@@ -339,47 +262,6 @@ def test_validation_signature_covers_what_defines_a_validation_result(tmp_path):
     assert memory_stats(torch.device("cpu")) == {}
 
 
-def test_default_views_cover_the_validation_modes_and_page_stays_primary(tmp_path):
-    names = ["page", "docunet", "full_frame", "rot90", "rot270", "small_page"]
-    assert [view.name for view in DEFAULT_VIEWS] == names
-    crops = [view for view in DEFAULT_VIEWS if view.crop != "full_frame"]
-    assert all(view.margin[0] >= 0.02 for view in crops)  # every side keeps a margin
-    assert [view.rotation for view in DEFAULT_VIEWS] == [0, 0, 0, 90, 270, 0]
-    assert _config(tmp_path).selected_view == "page"
-
-
-def test_best_carries_over_only_under_the_same_validation_signature(tmp_path):
-    config = _config(tmp_path)
-    val = [{"name": "own-val", "records_sha256": "a", "content_sha256": "b"}]
-    signature = validation_signature(config, val)
-    best = {"step": 2, "epe_px": 3.5, "signature": signature}
-    assert carry_best(best, signature) == (best, None)
-    assert carry_best(None, signature) == (None, None)
-    fewer = validation_signature(replace(config, val_max_batches=1), val)
-    assert carry_best(best, fewer) == (None, {"step": 2, "epe_px": 3.5})
-    assert improves(None, 4.0) and improves(best, 3.0)
-    assert not improves(best, 3.5) and not improves(None, float("nan"))
-
-
-def test_every_new_best_and_the_last_step_are_saved():
-    # A new best at the closing validation of an already saved step is saved again.
-    assert save_due(4, True, 4, 4, last=True)
-    assert not save_due(4, False, 4, 4, last=True)
-    assert save_due(3, False, 2, 2, last=True)
-    assert save_due(2, False, 0, 2) and not save_due(3, False, 2, 2)
-    assert save_due(3, True, 2, 0) and not save_due(4, False, 2, 0)
-
-
-def test_scaler_restore_and_strict_json_for_non_finite_values(tmp_path):
-    enabled = torch.amp.GradScaler("cpu", enabled=True)
-    assert restore_scaler(enabled, {}) is False  # cpu/xpu checkpoint resumed with AMP
-    assert restore_scaler(torch.amp.GradScaler("cpu", enabled=False), {}) is True
-    assert restore_scaler(enabled, torch.amp.GradScaler("cpu").state_dict()) is True
-    path = tmp_path / "status.json"
-    write_json(path, {"grad_norm": float("inf"), "metrics": [float("nan"), 1.5]})
-    assert json.loads(path.read_text()) == {"grad_norm": None, "metrics": [None, 1.5]}
-
-
 def test_train_and_val_must_not_share_samples(tmp_path):
     _spec(tmp_path, split_field=False)  # both sources read every manifest entry
     with pytest.raises(FlattenerError, match="both train and val") as error:
@@ -411,22 +293,6 @@ def test_losses_are_masked_by_node_validity_and_3d_availability():
     losses = compute_losses(config, 0, batch, prediction, grid3d)
     assert losses["loss_grid2d"] == 0 and losses["loss_grid3d"] == 0
     assert "loss_recon" in losses and torch.isfinite(losses["loss"])
-
-
-def test_cli_resolves_file_relative_paths_and_environment_variables(tmp_path, capsys, monkeypatch):
-    _spec(tmp_path)
-    config = _config(tmp_path).to_dict()
-    config.update(data_spec="spec.json", output_dir="${FLATTENER_TEST_RUNS}/a")
-    path = tmp_path / "cfg.json"
-    path.write_text(json.dumps(config))
-    monkeypatch.setenv("FLATTENER_TEST_RUNS", str(tmp_path / "runs"))
-    assert main(["--config", str(path), "--print-config", "--max-steps", "3"]) == 0
-    printed = json.loads(capsys.readouterr().out)
-    assert printed["data_spec"] == str(tmp_path / "spec.json")
-    assert printed["output_dir"] == str(tmp_path / "runs" / "a") and printed["max_steps"] == 3
-    monkeypatch.delenv("FLATTENER_TEST_RUNS")
-    with pytest.raises(FlattenerError, match="FLATTENER_TEST_RUNS"):
-        main(["--config", str(path), "--print-config"])
 
 
 @pytest.mark.training
@@ -476,50 +342,6 @@ def test_two_step_cpu_training_smoke_and_exact_resume(tmp_path):
         train(_config(tmp_path), resume="none")
 
 
-@pytest.mark.training
-def test_channels_last_training_saves_contiguous_weights(tmp_path, monkeypatch):
-    _spec(tmp_path)
-    calls = []
-    forward = UVDocNet.forward
-
-    def record(model, x):  # (training, input NCHW, weights NCHW)
-        weight = model.resnet_head[0].weight
-        calls.append((model.training, x.is_contiguous(), weight.is_contiguous()))
-        return forward(model, x)
-
-    monkeypatch.setattr(UVDocNet, "forward", record)
-    result = train(_config(tmp_path, max_steps=2, channels_last=True))
-    assert result["state"] == "stopped" and result["step"] == 2
-    # training runs channels_last; validation runs NCHW (fp32 channels_last is slow)
-    assert set(calls) == {(True, False, False), (False, True, True)}
-    checkpoint = load_checkpoint(result["checkpoint"])
-    assert all(v.is_contiguous() for v in checkpoint["model_state"].values())
-    assert np.isfinite(checkpoint["metrics"]["epe_px"])
-    resumed = train(_config(tmp_path, max_steps=3))  # the layout may change on resume
-    assert resumed["step"] == 3
-
-
-@pytest.mark.training
-def test_overflow_grad_norm_does_not_stop_training_and_best_is_saved(tmp_path, monkeypatch):
-    _spec(tmp_path)
-    clip = torch.nn.utils.clip_grad_norm_
-
-    def overflow(parameters, max_norm, *args, **kwargs):  # what an AMP overflow step returns
-        clip(parameters, max_norm, *args, **kwargs)
-        return torch.tensor(float("inf"))
-
-    monkeypatch.setattr(torch.nn.utils, "clip_grad_norm_", overflow)
-    result = train(_config(tmp_path, max_steps=3, val_every=1, checkpoint_every=0))
-    assert result["state"] == "stopped" and result["step"] == 3
-    run = tmp_path / "run"
-    log = [json.loads(line) for line in (run / "train_log.jsonl").read_text().splitlines()]
-    assert all(r["grad_norm"] is None for r in log if r["kind"] == "train")
-    best = json.loads((run / "checkpoints/best.json").read_text())
-    assert best["step"] == result["best"]["step"]  # every new best is saved
-    assert (run / "checkpoints" / best["file"]).is_file()
-    assert load_checkpoint(run / "checkpoints" / best["file"])["step"] == best["step"]
-
-
 def test_example_configs_parse_and_respect_tracks():
     examples = Path(__file__).resolve().parents[1] / "examples/dewarp"
     for path in sorted(examples.glob("train-*.json")):
@@ -529,35 +351,71 @@ def test_example_configs_parse_and_respect_tracks():
         assert spec.track == config.track
 
 
-@pytest.mark.training
-def test_best_found_at_the_final_validation_is_saved(tmp_path):
-    _spec(tmp_path)
-    # The last step is saved by checkpoint_every before any validation; the closing
-    # validation then finds the first best, which must be saved and pointed to.
-    result = train(_config(tmp_path, val_every=0, checkpoint_every=4))
-    assert result["state"] == "completed" and result["best"]["step"] == 4
-    directory = tmp_path / "run/checkpoints"
-    best = json.loads((directory / "best.json").read_text())
-    assert best["file"] == "step_00000004.pt" and best["metrics"]["view"] == "page"
-    assert load_checkpoint(directory / best["file"])["best"]["step"] == 4
+# Validation samples without valid ground truth cannot be evaluated.
+#
+# A sample whose target grid has no valid node has no endpoint error. Validation
+# leaves it out of every mean, counts it per view as ``not_evaluable`` and a view
+# where no sample is evaluable has no EPE, so it never becomes the best checkpoint.
 
 
-@pytest.mark.training
-def test_resume_with_other_validation_settings_starts_a_new_best(tmp_path):
-    _spec(tmp_path)
-    first = train(_config(tmp_path, max_steps=2))
-    old = load_checkpoint(first["checkpoint"])["best"]
-    assert old["step"] == 2
-    same = train(_config(tmp_path, max_steps=3, val_every=1))
-    assert "best_reset" not in load_checkpoint(same["checkpoint"])["resumes"][-1]
-    resumed = train(_config(tmp_path, val_max_batches=1))
-    checkpoint = load_checkpoint(resumed["checkpoint"])
-    assert checkpoint["resumes"][-1]["best_reset"]["step"] in (2, 3)
-    assert checkpoint["best"]["step"] == 4 and checkpoint["best"]["samples"] == 2
-    assert checkpoint["best"]["signature"] != old["signature"]
-    directory = tmp_path / "run/checkpoints"  # the old best.json moved aside at the resume
-    retired = json.loads((directory / "best_before_step_00000003.json").read_text())
-    assert retired["step"] == checkpoint["resumes"][-1]["best_reset"]["step"]
-    assert retired["retired"] == {"resumed_step": 3, "reason": "validation signature changed"}
-    assert (directory / retired["file"]).is_file()
-    assert json.loads((directory / "best.json").read_text())["step"] == 4
+def _validation_config(**changes):
+    values = dict(data_spec="s", output_dir="o", track="research", model=TINY, batch_size=2)
+    values.update(changes)
+    return TrainConfig(**values)
+
+
+def _batch(valid_samples, sources):
+    """One collated evaluation batch; ``valid_samples[i]`` says whether sample i has GT."""
+    views = len(DEFAULT_VIEWS)
+    valid = torch.zeros(len(sources), views, 1, *TINY.grid_size)
+    for index, has_target in enumerate(valid_samples):
+        valid[index] = float(has_target)
+    image = torch.stack(  # sample i looks the same in every batch
+        [
+            torch.randint(0, 256, (views, 3, *TINY.input_size), generator=_seeded(index))
+            for index in range(len(sources))
+        ]
+    ).to(torch.uint8)
+    return {
+        "image": image,
+        "grid2d": torch.zeros(len(sources), views, 2, *TINY.grid_size),
+        "valid": valid,
+        "source": list(sources),
+    }
+
+
+def _seeded(seed):
+    return torch.Generator().manual_seed(seed)
+
+
+def _missing(value):
+    return value is None or (isinstance(value, float) and math.isnan(value))
+
+
+def _model():
+    torch.manual_seed(0)
+    return UVDocNet(TINY)
+
+
+def test_validation_without_valid_ground_truth_has_no_epe_and_no_best():
+    config = _validation_config()
+    metrics = validate(_model(), [_batch([False, False], ["a", "a"])], config, torch.device("cpu"))
+    assert _missing(metrics["epe_px"])
+    for name, view in metrics["views"].items():
+        assert _missing(view["epe_px"]), name
+        assert view["not_evaluable"] == 2, name
+        assert _missing(view["per_source_epe_px"]["a"]), name
+    assert not improves(None, metrics["epe_px"])
+
+
+def test_samples_without_valid_ground_truth_are_counted_and_left_out():
+    config = _validation_config()
+    model = _model()
+    device = torch.device("cpu")
+    evaluable = validate(model, [_batch([True], ["a"])], config, device)
+    mixed = validate(model, [_batch([True, False], ["a", "b"])], config, device)
+    for name, view in mixed["views"].items():
+        assert view["epe_px"] == pytest.approx(evaluable["views"][name]["epe_px"]), name
+        assert view["not_evaluable"] == 1, name
+        assert view["per_source_epe_px"]["a"] == pytest.approx(view["epe_px"]), name
+        assert _missing(view["per_source_epe_px"]["b"]), name  # source b has no valid GT

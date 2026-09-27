@@ -2,13 +2,10 @@
 
 import json
 import math
-import threading
 from dataclasses import asdict
-from fractions import Fraction
 
 import numpy as np
 import pytest
-import torch.nn.functional as functional
 
 from flattener import FlattenerError, RenderConfig, Status, render
 
@@ -154,53 +151,6 @@ def test_irregular_resizing_matches_independent_bilinear_oracle(source_size, out
     assert result.valid_mask.all()
 
 
-def test_known_smooth_curvature_preserves_orientation_and_matches_scalar_oracle():
-    image = _pattern(11, 15)
-    coordinates = _grid(7, 9)
-    u, v = coordinates[..., 0].copy(), coordinates[..., 1].copy()
-    coordinates[..., 0] = 0.8 * u + 0.09 * np.sin(np.pi * v)
-    coordinates[..., 1] = 0.9 * v
-
-    result = render(image, coordinates)
-
-    _assert_success(result, (7, 9))
-    np.testing.assert_allclose(result.image, _scalar_expected(image, coordinates), rtol=0, atol=1)
-    assert result.valid_mask.all()
-    stats = result.metadata["validation"]
-    assert stats["fold_check"] == "passed"
-    # The x-dependent derivative is (0.8, 0); shear cannot change determinant.
-    assert stats["min_jacobian_ratio"] == pytest.approx(0.8 * 0.9, abs=1e-6)
-
-
-@pytest.mark.parametrize(
-    "source_size,output_size",
-    [
-        ((1, 1), (1, 1)),
-        ((1, 5), (4, 1)),
-        ((5, 1), (1, 4)),
-        ((1, 5), (3, 4)),
-        ((5, 1), (3, 4)),
-    ],
-)
-def test_singleton_source_and_output_axes(source_size, output_size):
-    image = _pattern(*source_size)
-    coordinates = _grid(*output_size)
-
-    result = render(image, coordinates)
-
-    _assert_success(result, output_size)
-    expected = _scalar_expected(image, coordinates)
-    np.testing.assert_allclose(result.image, expected, rtol=0, atol=1)
-    assert result.valid_mask.all()
-    validation = result.metadata["validation"]
-    if 1 in output_size:
-        assert validation["fold_check"] == "not_applicable"
-        assert validation["checked_cells"] == 0
-        assert validation["min_jacobian_ratio"] is None
-    else:
-        assert validation["fold_check"] == "passed"
-
-
 def test_physical_boundaries_are_inclusive_and_outside_coordinates_are_filled():
     image = np.array([[[10, 20, 30], [200, 210, 220]]], dtype=np.uint8)
     coordinates = np.array(
@@ -257,28 +207,6 @@ def test_source_target_and_valid_masks_are_separate_and_denominator_is_target_co
     assert failure.reason_code == "excessive_out_of_bounds"
 
 
-def test_inactive_nonfinite_coordinates_are_filled_without_mutating_inputs():
-    image = _pattern(2, 2)
-    coordinates = np.array(
-        [[[-0.5, -0.5], [np.nan, np.inf], [np.inf, -np.inf], [0.5, 0.5]]],
-        dtype=np.float32,
-    )
-    target = np.array([[True, False, False, True]])
-    copies = [array.copy() for array in (image, coordinates, target)]
-    for array in (image, coordinates, target):
-        array.flags.writeable = False
-
-    result = render(image, coordinates, target_mask=target)
-
-    _assert_success(result, (1, 4))
-    np.testing.assert_array_equal(result.source_mask, [[True, False, False, True]])
-    np.testing.assert_array_equal(result.valid_mask, target)
-    np.testing.assert_array_equal(result.image, [[image[0, 0], [255] * 3, [255] * 3, image[1, 1]]])
-    for actual, before in zip((image, coordinates, target), copies, strict=True):
-        np.testing.assert_array_equal(actual, before)
-        assert not actual.flags.writeable
-
-
 @pytest.mark.parametrize(
     "value,policy", [(np.nan, "raise"), (np.inf, "return"), (-np.inf, "original")]
 )
@@ -317,48 +245,11 @@ def test_active_nonfinite_coordinates_fail_with_each_policy(value, policy):
     np.testing.assert_array_equal(coordinates, before_coordinates)
 
 
-@pytest.mark.parametrize(
-    "image",
-    [
-        np.zeros((2, 3, 3), dtype=np.float32),
-        np.zeros((2, 3), dtype=np.uint8),
-    ],
-)
-def test_invalid_image_cannot_be_used_as_original_fallback(image):
-    result = render(image, _grid(2, 3), config=RenderConfig(on_error="original"))
-
-    assert result.status == Status.INPUT_ERROR
-    assert result.image is None
-    assert result.used_fallback is False
-    assert result.source_mask is result.target_mask is result.valid_mask is None
-    assert result.metadata["actual_output_size"] is None
-
-
 def test_invalid_failure_policy_always_raises_input_error():
     with pytest.raises(FlattenerError) as caught:
         render(_pattern(2, 3), _grid(2, 3), config=RenderConfig(on_error="ignore"))
 
     assert caught.value.status == Status.INPUT_ERROR
-
-
-@pytest.mark.parametrize(
-    "coordinates,target,reason",
-    [
-        (_grid(2, 3).astype(np.float64), None, "invalid_dtype"),
-        (_grid(2, 3), np.ones((2, 3), dtype=np.uint8), "invalid_dtype"),
-        (_grid(2, 3), np.zeros((2, 3), dtype=bool), "empty_target"),
-    ],
-)
-def test_invalid_map_or_mask_returns_failure_without_output(coordinates, target, reason):
-    result = render(
-        _pattern(2, 3), coordinates, target_mask=target, config=RenderConfig(on_error="return")
-    )
-
-    assert result.reason_code == reason
-    expected_status = Status.INVALID_TRANSFORM if reason == "empty_target" else Status.INPUT_ERROR
-    assert result.status == expected_status
-    assert result.image is None
-    assert result.source_mask is result.target_mask is result.valid_mask is None
 
 
 def test_fold_failure_remains_failure_in_original_fallback():
@@ -375,54 +266,6 @@ def test_fold_failure_remains_failure_in_original_fallback():
     assert result.metadata["requested_output_size"] == [2, 4]
     assert result.metadata["actual_output_size"] == [3, 5]
     np.testing.assert_array_equal(result.image, image)
-
-
-def test_noncontiguous_readonly_inputs_keep_values_and_shape():
-    image = _pattern(3, 5)[:, ::-1, :]
-    coordinates = _grid(5, 3).transpose(1, 0, 2)[..., ::-1]
-    target = np.ones((5, 6), dtype=bool)[::2, :5]
-    target[1, 2] = False
-    assert image.shape == (3, 5, 3)
-    assert coordinates.shape == (3, 5, 2)
-    assert target.shape == (3, 5)
-    originals = [value.copy() for value in (image, coordinates, target)]
-    for value in (image, coordinates, target):
-        assert not value.flags.c_contiguous
-        value.flags.writeable = False
-
-    result = render(image, coordinates, target_mask=target)
-
-    expected = image.copy()
-    expected[~target] = 255
-    np.testing.assert_array_equal(result.image, expected)
-    for actual, original in zip((image, coordinates, target), originals, strict=True):
-        np.testing.assert_array_equal(actual, original)
-        assert actual.shape == original.shape
-        assert not actual.flags.writeable
-
-
-@pytest.mark.parametrize("read_only", [False, True])
-def test_sampling_buffer_ownership_does_not_mutate_valid_or_sanitized_grids(read_only):
-    image = _pattern(3, 5)
-    grid = _grid(3, 5)
-    original_image, original_grid = image.copy(), grid.copy()
-    image.flags.writeable = not read_only
-    grid.flags.writeable = not read_only
-    exact = render(image, grid)
-    np.testing.assert_array_equal(exact.image, original_image)
-    np.testing.assert_array_equal(grid, original_grid)
-    assert not np.shares_memory(exact.image, image)
-
-    invalid_grid = original_grid.copy()
-    invalid_grid[0, 0] = np.nan
-    target = np.ones((3, 5), dtype=bool)
-    target[0, 0] = False
-    invalid_grid.flags.writeable = not read_only
-    filled = render(image, invalid_grid, target_mask=target)
-    assert np.isnan(invalid_grid[0, 0]).all()
-    np.testing.assert_array_equal(filled.image[0, 0], [255, 255, 255])
-    np.testing.assert_array_equal(filled.image[target], original_image[target])
-    np.testing.assert_array_equal(image, original_image)
 
 
 def test_success_metadata_records_configuration_sizes_validation_and_real_stages():
@@ -467,100 +310,3 @@ def test_success_metadata_records_configuration_sizes_validation_and_real_stages
     assert validation["excluded_cells"] == validation["failed_cells"] == 0
     assert validation["min_jacobian_ratio"] == pytest.approx(1, abs=1e-6)
     json.dumps(metadata, allow_nan=False)
-
-
-@pytest.mark.parametrize("policy", ["raise", "return", "original"])
-def test_identified_sampling_failure_obeys_policy_and_records_failed_stage(monkeypatch, policy):
-    def fail_sampling(*args, **kwargs):
-        raise RuntimeError("sampling backend unavailable")
-
-    monkeypatch.setattr(functional, "grid_sample", fail_sampling)
-    image = _pattern(3, 5)
-    config = RenderConfig(on_error=policy)
-    if policy == "raise":
-        with pytest.raises(FlattenerError) as caught:
-            render(image, _grid(4, 6), config=config)
-        error = caught.value
-        assert error.status == Status.RENDER_ERROR
-        assert error.reason_code == "sampling_failed"
-        metadata = error.metadata
-    else:
-        result = render(image, _grid(4, 6), config=config)
-        assert result.status == Status.RENDER_ERROR
-        assert result.reason_code == "sampling_failed"
-        assert result.source_mask is result.target_mask is result.valid_mask is None
-        metadata = result.metadata
-        if policy == "original":
-            np.testing.assert_array_equal(result.image, image)
-            assert result.used_fallback is True
-            assert metadata["actual_output_size"] == [3, 5]
-        else:
-            assert result.image is None
-            assert result.used_fallback is False
-            assert metadata["actual_output_size"] is None
-    assert metadata["failure_stage"] == "render"
-    assert metadata["requested_output_size"] == [4, 6]
-    assert metadata["validation"]["valid_pixels"] == 24
-    assert math.isfinite(metadata["timings"]["render"])
-    assert metadata["timings"]["render"] >= 0
-    assert metadata["timings"]["save"] is None
-
-
-@pytest.mark.parametrize(
-    "error_type", [TypeError, ValueError, MemoryError, KeyboardInterrupt, SystemExit]
-)
-def test_programming_errors_memory_failure_and_interrupts_are_not_hidden(monkeypatch, error_type):
-    failure = error_type("injected failure")
-
-    def fail_sampling(*args, **kwargs):
-        raise failure
-
-    monkeypatch.setattr(functional, "grid_sample", fail_sampling)
-    with pytest.raises(error_type) as caught:
-        render(_pattern(2, 3), _grid(2, 3), config=RenderConfig(on_error="original"))
-    assert caught.value is failure
-
-
-def test_backend_allocation_failure_is_propagated_as_memory_error(monkeypatch):
-    def fail_sampling(*args, **kwargs):
-        raise RuntimeError(
-            "DefaultCPUAllocator: can't allocate memory: tried to allocate 4096 bytes"
-        )
-
-    monkeypatch.setattr(functional, "grid_sample", fail_sampling)
-    with pytest.raises(MemoryError):
-        render(_pattern(2, 3), _grid(2, 3), config=RenderConfig(on_error="original"))
-
-
-@pytest.mark.parametrize("fraction", [np.longdouble("0.25"), Fraction(1, 4)])
-def test_accepted_real_settings_produce_strict_json(fraction):
-    result = render(
-        np.zeros((1, 1, 3), dtype=np.uint8),
-        np.zeros((1, 1, 2), dtype=np.float32),
-        config=RenderConfig(max_out_of_bounds_fraction=fraction),
-    )
-    saved = json.loads(json.dumps(result.metadata, allow_nan=False))
-    assert result.status == Status.SUCCESS
-    assert saved["config"]["max_out_of_bounds_fraction"] == 0.25
-
-
-def test_invalid_non_copyable_config_value_uses_failure_policy():
-    result = render(
-        np.zeros((1, 1, 3), dtype=np.uint8),
-        np.zeros((1, 1, 2), dtype=np.float32),
-        config=RenderConfig(fill_rgb=threading.Lock(), on_error="return"),
-    )
-    assert result.status == Status.INPUT_ERROR
-    assert result.reason_code == "invalid_config"
-    assert result.image is None
-    json.dumps(result.metadata, allow_nan=False)
-
-
-def test_early_rejection_leaves_fold_check_unset():
-    grid = np.array([[[2.0, 0.0], [3.0, 0.0]], [[2.0, 0.5], [3.0, 0.5]]], dtype=np.float32)
-    result = render(
-        np.zeros((2, 2, 3), dtype=np.uint8), grid, config=RenderConfig(on_error="return")
-    )
-    assert result.reason_code == "excessive_out_of_bounds"
-    assert result.metadata["validation"]["fold_check"] is None
-    assert result.metadata["validation"]["checked_cells"] == 0

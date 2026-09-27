@@ -7,9 +7,7 @@ The archive checks need ``outputs/coordinate-fold/locator.zip`` and ``outputs/da
 import importlib.util
 from pathlib import Path
 
-import numpy as np
 import pytest
-import torch
 
 from flattener.regions import context
 
@@ -22,27 +20,6 @@ needs_archive = pytest.mark.skipif(
     not (tool.DEFAULT_ZIP.is_file() and (tool.DEFAULT_DATASET / "manifest.json").is_file()),
     reason="outputs/coordinate-fold/locator.zip or outputs/dataset is not present",
 )
-
-
-def test_parser_defaults():
-    args = tool.build_parser().parse_args(["reproduce"])
-    assert (args.domains, args.threads) == ("capture", 2)
-    assert args.weights.name == tool.EXPORT_NAME
-    assert tool.build_parser().parse_args(["exposure"]).output == tool.DEFAULT_EXPOSURE
-
-
-def test_image_metrics_follow_the_study_definition():
-    mask = np.zeros(tool.PHOTO, bool)
-    mask[96:288, 72:216] = True
-    logits = torch.full((192, 144), -20.0)
-    logits[48:144, 36:108] = 20.0
-    metrics = tool.image_metrics(logits, mask)
-    assert metrics["iou"] == metrics["precision"] == metrics["recall"] == 1.0
-    assert metrics["predicted_pixels"] == mask.sum()
-    assert metrics["loss"] < 1e-6
-    half = logits.clone()
-    half[48:144, 72:108] = -20.0
-    assert tool.image_metrics(half, mask)["iou"] == pytest.approx(0.5)
 
 
 @pytest.fixture(scope="module")

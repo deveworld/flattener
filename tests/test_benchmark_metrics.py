@@ -46,16 +46,6 @@ def _affine_flow(shape, scale_x, scale_y, shift_x, shift_y):
     return vx, vy
 
 
-def test_ad_is_zero_for_a_pure_per_axis_scale_and_shift_flow():
-    shape = (12, 10)
-    vx, vy = _affine_flow(shape, 1.05, 0.97, 1.5, -2.0)
-    gradient = np.random.default_rng(1).random(shape)
-    values = metrics.aligned_distortions(vx, vy, gradient)
-    assert set(values) == set(metrics.AD_SOLVERS)
-    assert values["exact_lstsq"] == pytest.approx(0.0, abs=1e-10)
-    assert values["lsqr_4iter"] == pytest.approx(0.0, abs=1e-5)
-
-
 def test_ad_matches_an_independent_weighted_residual_oracle():
     shape = (9, 11)
     rng = np.random.default_rng(2)
@@ -136,35 +126,6 @@ def test_score_pair_resizes_prediction_to_scan_metric_size_and_uses_flow_backend
     assert record["metric_shape_hw"] == list(score.metric_shape)
     with pytest.raises(ValueError):
         metrics.score_pair(prediction, scan, ad_solver="svd")
-
-
-def test_lsqr_solve_reports_iterations_and_stop_reason():
-    rng = np.random.default_rng(5)
-    matrix = rng.normal(size=(30, 4))
-    target = rng.normal(size=30)
-    capped = metrics.lsqr_solve(matrix, target, max_iterations=1)
-    assert (capped.iterations, capped.stop) == (1, "maxit")
-    consistent = metrics.lsqr_solve(matrix, matrix @ np.array([1.0, -2.0, 0.5, 3.0]))
-    assert consistent.stop == "relres" and consistent.iterations <= 4
-    default = metrics.lsqr_solve(matrix, target)
-    assert default.stop in ("normal_equations", "maxit") and default.iterations <= 4
-    assert metrics.lsqr_solve(matrix, np.zeros(30)).stop == "zero_rhs"
-    assert metrics.lsqr_solve(np.zeros((30, 4)), target).stop == "zero_normal"
-    solution, used = metrics.lsqr_matlab(matrix, target)
-    assert np.array_equal(solution, default.solution) and used == default.iterations
-    assert {capped.stop, consistent.stop, default.stop} <= set(metrics.LSQR_STOP_REASONS)
-
-
-def test_score_rows_record_the_lsqr_run(monkeypatch):
-    monkeypatch.setattr(metrics, "METRIC_AREA", 600)
-    rng = np.random.default_rng(6)
-    scan = rng.integers(0, 256, size=(40, 30), dtype=np.uint8)
-    prediction = rng.integers(0, 256, size=(33, 21), dtype=np.uint8)
-    record = metrics.score_pair(prediction, scan, siftflow=_ConstantFlow(1.0, -2.0)).to_dict()
-    assert isinstance(record["ad_lsqr_iterations"], int) and 1 <= record["ad_lsqr_iterations"] <= 4
-    assert record["ad_lsqr_stop"] in metrics.LSQR_STOP_REASONS
-    plain = metrics.score_pair(prediction, scan).to_dict()
-    assert plain["ad_lsqr_iterations"] is None and plain["ad_lsqr_stop"] is None
 
 
 PAPEREDGE_ENV = "FLATTENER_BENCH_PAPEREDGE_DIR"

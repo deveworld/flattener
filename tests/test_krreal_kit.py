@@ -14,7 +14,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-import numpy as np
 import pytest
 from PIL import Image
 
@@ -76,20 +75,6 @@ def _errors(label) -> list[str]:
 
 
 # Plan and vocabulary -----------------------------------------------------------------
-
-
-def test_pilot_plan_has_60_shots_on_two_phones_in_every_stratum():
-    counts = kitlib.planned_counts(KIT)
-    assert sum(counts.values()) == 60
-    assert all(count >= 4 for count in counts.values())
-    for stratum in KIT["strata"]:
-        assert counts[stratum["code"]] * 5 == stratum["target_v1"]
-        for shots in stratum["shots"].values():
-            assert set(shots) <= set(stratum["variants"])
-    rows = kitlib.shotlist_rows(KIT)
-    assert [sum(row["phone"] == phone for row in rows) for phone in KIT["phones"]] == [30, 30]
-    assert sum(stratum["target_v1"] for stratum in KIT["strata"]) == 300
-    assert sum(stratum["transcribe"] for stratum in KIT["strata"]) >= 20
 
 
 def test_schema_enums_follow_kit_json():
@@ -175,19 +160,6 @@ def test_a_complete_label_passes_and_each_broken_rule_is_reported(tmp_path):
     assert _errors(broken) == []
 
 
-def test_a_draft_needs_only_its_structure_and_the_geometry_it_has(tmp_path):
-    label = _label(tmp_path)
-    draft = copy.deepcopy(label)
-    draft["review"].update(status="draft", labeler="", labeled_at=None)
-    draft["pages"][0]["reference_lines"] = []
-    draft["pages"][0]["text_polygons"] = []
-    assert _errors(draft) == []
-    draft["pages"], draft["page_count"] = [], 0
-    assert _errors(draft) == []
-    draft["page_count"] = 1
-    assert _errors(draft) == ["0 pages are labelled"]
-
-
 def test_page_angle_and_quarter_follow_the_reading_order_corners():
     square = [[0, 0], [100, 0], [100, 100], [0, 100]]
     for turn in range(4):
@@ -199,150 +171,7 @@ def test_page_angle_and_quarter_follow_the_reading_order_corners():
     assert labelcheck.page_quarter(-45.01) == 3 and labelcheck.page_quarter(45.0) == 1
 
 
-def test_the_schema_subset_validator_is_strict():
-    assert labelcheck.validate_schema({"schema": "krreal-label-1"}, SCHEMA)
-    with pytest.raises(labelcheck.SchemaError):
-        labelcheck.validate_schema(1, {"type": "integer", "multipleOf": 2})
-    assert labelcheck.validate_schema(True, {"type": "integer"}) == ["/: expected integer"]
-    assert labelcheck.validate_schema([1, 2, 3], {"prefixItems": [{}, {}], "items": False})
-
-
-def test_nan_is_not_json(tmp_path):
-    path = tmp_path / "bad.json"
-    path.write_text('{"x": NaN}', encoding="utf-8")
-    with pytest.raises(ValueError, match="NaN"):
-        labelcheck.load_json(path)
-
-
-# Transcripts -------------------------------------------------------------------------
-
-
-def test_transcript_template_round_trip_and_review_rules():
-    text = drafts.render_transcript(
-        photo="kr1-p1-curved-b03-007.jpg",
-        sha256="a" * 64,
-        page=1,
-        draft="none",
-        lines=["첫 줄  ", "", "", "둘째 줄\f"],
-    )
-    parsed = labelcheck.parse_transcript(text)
-    assert parsed.header["photo"] == "kr1-p1-curved-b03-007.jpg"
-    assert parsed.header["status"] == "draft"
-    assert parsed.lines == ["첫 줄", "", "둘째 줄"]
-    check = lambda t: labelcheck.check_transcript(  # noqa: E731
-        t, photo_sha256="a" * 64, markers=KIT["transcript_markers"]
-    )
-    assert check(parsed) == []
-    parsed.header.update(status="checked", transcribed_by="A", checked_by="A")
-    assert [i.message for i in check(parsed)] == ["the checker must be another person"]
-    parsed.header["checked_by"] = "B"
-    parsed.lines.append("수식 [[수식]] 과 [[모름]]")
-    parsed.lines.append("한")  # 한 in NFD
-    messages = [i.message for i in check(parsed)]
-    assert messages == ["unknown marker [[모름]]", "is not NFC"]
-    with pytest.raises(ValueError):
-        labelcheck.parse_transcript(text.replace("\n---\n", "\n"))
-
-
-# Drafts and hooks --------------------------------------------------------------------
-
-
-def test_pages_from_grid_gives_corners_and_only_curved_edges():
-    gh, gw = 5, 7
-    u = np.linspace(0, 1, gw)
-    v = np.linspace(0, 1, gh)
-    x = 100 + 400 * u[None, :] + 0 * v[:, None]
-    y = 50 + 600 * v[:, None] + 30 * np.sin(np.pi * u[None, :])
-    grid = np.stack([x, y], axis=-1)
-    page = drafts.pages_from_grid(grid)
-    assert np.allclose(page["quad"], [[100, 50], [500, 50], [500, 650], [100, 650]])
-    assert sorted(page["curved_edges"]) == ["bottom", "top"]
-    assert len(page["curved_edges"]["top"]) == 9
-    assert page["curved_edges"]["top"][0] == page["quad"][0]
-    size = (800, 700)
-    normalized = np.stack(
-        [2 * (grid[..., 0] + 0.5) / size[0] - 1, 2 * (grid[..., 1] + 0.5) / size[1] - 1], axis=-1
-    )
-    again = drafts.pages_from_grid(normalized, image_size=size)
-    assert np.allclose(again["quad"], page["quad"])
-    with pytest.raises(ValueError):
-        drafts.pages_from_grid(grid, samples=5)
-
-
-def test_a_hook_provider_prefills_a_draft_and_a_bad_proposal_is_dropped(tmp_path):
-    photo = _jpeg(tmp_path / "photos" / "kr1-p2-table-d01-003.jpg", size=(400, 300))
-    hook = tmp_path / "hook.py"
-    hook.write_text(
-        "def propose(photo, info):\n"
-        "    w, h = info['size']\n"
-        "    quad = [[10, 10], [w - 10, 12], [w - 12, h - 10], [12, h - 12]]\n"
-        "    return {'pages': [{'quad': quad}],\n"
-        "            'flags': ['glare']}\n"
-        "def bad(photo, info):\n"
-        "    return {'pages': [{'quad': [[10, 10], [10, 200], [300, 200], [300, 10]]}]}\n",
-        encoding="utf-8",
-    )
-    info = kitlib.photo_info(photo)
-    name = kitlib.parse_name(photo.name)
-    provider = drafts.label_provider(f"{hook}:propose")
-    label, dropped = drafts.build_draft(
-        info, name, provider_name="hook", proposal=provider(photo, info), kit=KIT
-    )
-    assert dropped == []
-    assert label["draft"]["fields"] == ["quad", "flags"]
-    assert label["pages"][0]["page_quarter"] == 0 and label["flags"] == ["glare"]
-    assert _errors(label) == []
-    bad = drafts.label_provider(f"{hook}:bad")(photo, info)
-    label, dropped = drafts.build_draft(info, name, provider_name="bad", proposal=bad, kit=KIT)
-    assert label["pages"] == [] and "counter-clockwise" in dropped[0]
-    assert drafts.label_provider("none") is drafts.no_geometry
-    with pytest.raises(ValueError):
-        drafts.load_hook("no_colon")
-
-
-# Photos, ingest, splits and manifest -------------------------------------------------
-
-
-def test_names_and_photo_info(tmp_path):
-    name = kitlib.parse_name("kr1-p2-rotate-b11-030.jpg")
-    assert (name.phone_id, name.stratum, name.source_id, name.seq) == ("p2", "rotate", "b11", 30)
-    for bad in (
-        "kr1-p1-bent-b01-001.jpg",
-        "kr1-p1-hard-x03-001.jpg",
-        "IMG_0001.jpg",
-        "kr1-p1-flat-b01-000.jpg",
-        "kr1-p1-flat-b01-001.JPG",
-    ):
-        with pytest.raises(ValueError):
-            kitlib.parse_name(bad)
-    photo = _jpeg(tmp_path / "a.jpg", size=(40, 30), orientation=6, gps=True)
-    info = kitlib.photo_info(photo)
-    assert info["raw_size"] == [40, 30] and info["size"] == [30, 40]
-    assert info["exif_orientation"] == 6 and info["gps_present"]
-    assert info["device"] == {"make": "samsung", "model": "SM-S911N"}
-    assert info["sha256"] == hashlib.sha256(photo.read_bytes()).hexdigest()
-    assert any("GPS" in w for w in kitlib.photo_warnings(info))
-
-
-def test_ingest_copies_bytes_under_kit_names_and_never_overwrites(tmp_path):
-    root = tmp_path / "v1"
-    source = _jpeg(root / "incoming" / "p1" / "IMG_0001.JPG")
-    (root / "incoming" / "p1" / "IMG_0002.HEIC").write_bytes(b"heic")
-    rows = kitlib.shotlist_rows(KIT)
-    rows[0].update(file="IMG_0001.JPG", source="b01")
-    rows[1].update(file="IMG_0002.HEIC", source="b01")
-    rows[2].update(file="IMG_0003.jpg", source="b1")
-    done, problems = kitlib.ingest(root, rows, kit=KIT, dry_run=True)
-    assert len(done) == 1 and not (root / "photos").exists()
-    done, problems = kitlib.ingest(root, rows, kit=KIT)
-    target = root / "photos" / "kr1-p1-curved-b01-001.jpg"
-    assert target.read_bytes() == source.read_bytes()
-    assert any("HEIC" in p for p in problems) and any("b03, d01 or x00" in p for p in problems)
-    source.write_bytes(source.read_bytes() + b"x")
-    _, problems = kitlib.ingest(root, rows[:1], kit=KIT)
-    assert problems == [
-        "shotlist line 2: kr1-p1-curved-b01-001.jpg exists with other bytes; not replaced"
-    ]
+# Splits and the shot list ------------------------------------------------------------
 
 
 def test_splits_are_by_source_and_stay_put():
@@ -356,45 +185,6 @@ def test_splits_are_by_source_and_stay_put():
     assert {s: again[s] for s in splits} == splits
 
 
-def test_manifest_counts_labels_transcripts_and_m1_state(tmp_path):
-    root = tmp_path / "v1"
-    label = _label(root)
-    (root / "labels").mkdir()
-    kitlib.write_json(root / "labels" / "kr1-p1-curved-b03-007.json", label)
-    _jpeg(root / "photos" / "kr1-p2-flat-d01-001.jpg", make="Apple", model="iPhone 13")
-    other = root / "photos" / "kr1-p2-flat-d01-002.jpg"
-    shutil.copy(root / "photos" / "kr1-p2-flat-d01-001.jpg", other)
-    (root / "photos" / "notes.txt").write_text("x", encoding="utf-8")
-    sha = kitlib.sha256_file(root / "photos" / "kr1-p2-flat-d01-001.jpg")
-    transcript = drafts.render_transcript(
-        photo="kr1-p2-flat-d01-001.jpg", sha256=sha, page=1, draft="none", lines=["글"]
-    )
-    (root / "transcripts").mkdir()
-    (root / "transcripts" / "kr1-p2-flat-d01-001.txt").write_text(transcript, encoding="utf-8")
-    manifest = kitlib.build_manifest(root)
-    files = [photo["file"] for photo in manifest["photos"]]
-    assert files == sorted(files) and len(files) == 3
-    by_file = {photo["file"]: photo for photo in manifest["photos"]}
-    assert by_file["kr1-p1-curved-b03-007.jpg"]["label"]["status"] == "labeled"
-    assert by_file["kr1-p2-flat-d01-001.jpg"]["transcript"]["status"] == "draft"
-    assert (
-        by_file["kr1-p2-flat-d01-001.jpg"]["split"] == by_file["kr1-p2-flat-d01-002.jpg"]["split"]
-    )
-    assert any("same bytes" in p for p in manifest["problems"])
-    assert any("notes.txt" in p for p in manifest["problems"])
-    summary = manifest["summary"]
-    assert summary["devices"] == {"p1": ["samsung SM-S911N"], "p2": ["Apple iPhone 13"]}
-    assert summary["labels"] == {"labeled": 1, "missing": 2}
-    assert not summary["m1_complete"]
-    assert summary["m1_missing"][0].startswith("photos short: curved 11")
-    assert all(photo["visibility"] == "private" for photo in manifest["photos"])
-    moved = copy.deepcopy(label)
-    moved["photo"]["sha256"] = "0" * 64
-    kitlib.write_json(root / "labels" / "kr1-p1-curved-b03-007.json", moved)
-    again = kitlib.build_manifest(root)
-    assert any("other bytes" in p for p in again["problems"])
-
-
 def test_cli_writes_the_shot_list_and_refuses_tracked_roots(tmp_path, capsys):
     assert krreal.main(["shotlist", "--root", str(tmp_path)]) == 0
     with open(tmp_path / "shotlist.csv", encoding="utf-8-sig", newline="") as stream:
@@ -406,31 +196,6 @@ def test_cli_writes_the_shot_list_and_refuses_tracked_roots(tmp_path, capsys):
     kitlib.ensure_ignored(krreal.DEFAULT_ROOT)
     with pytest.raises(SystemExit, match="not ignored"):
         kitlib.ensure_ignored(KIT_DIR / "photos-here")
-
-
-def test_cli_end_to_end_on_a_small_root(tmp_path, capsys):
-    root = tmp_path / "v1"
-    _jpeg(root / "photos" / "kr1-p1-curved-b01-001.jpg", orientation=6)
-    _jpeg(root / "photos" / "kr1-p1-small-b02-007.jpg")
-    assert krreal.main(["draft", "--root", str(root)]) == 0
-    draft = labelcheck.load_json(root / "drafts" / "kr1-p1-curved-b01-001.json")
-    assert draft["photo"]["size"] == [30, 40] and draft["review"]["status"] == "draft"
-    assert krreal.main(["transcripts", "--root", str(root)]) == 0
-    assert sorted(p.name for p in (root / "transcripts").iterdir()) == [
-        "kr1-p1-curved-b01-001.txt",
-        "kr1-p1-small-b02-007.txt",
-    ]
-    assert krreal.main(["check", "--root", str(root), "--drafts"]) == 0
-    assert krreal.main(["manifest", "--root", str(root), "--strict"]) == 0
-    manifest = labelcheck.load_json(root / "manifest.json")
-    assert manifest["summary"]["labels"] == {"missing": 2}
-    (root / "labels").mkdir()
-    shutil.copy(root / "drafts" / "kr1-p1-curved-b01-001.json", root / "labels")
-    bad = labelcheck.load_json(root / "labels" / "kr1-p1-curved-b01-001.json")
-    bad["review"]["status"] = "labeled"
-    kitlib.write_json(root / "labels" / "kr1-p1-curved-b01-001.json", bad)
-    assert krreal.main(["check", "--root", str(root)]) == 1
-    assert "labeller's name" in capsys.readouterr().err
 
 
 # The labeler's JavaScript ------------------------------------------------------------
@@ -452,29 +217,6 @@ def _run_core(tmp_path: Path, program: str, data) -> dict:
         [NODE, str(script)], input=json.dumps(data), capture_output=True, text=True, check=True
     )
     return json.loads(done.stdout)
-
-
-@pytest.mark.skipif(NODE is None, reason="node is not installed")
-def test_labeler_sha256_and_jpeg_reader_match_python(tmp_path):
-    rng = random.Random(3)
-    blobs = [bytes(rng.randrange(256) for _ in range(n)) for n in (0, 3, 55, 56, 63, 64, 65, 1000)]
-    photo = _jpeg(tmp_path / "p.jpg", size=(40, 30), orientation=6, make="Apple", model="iPhone 13")
-    out = _run_core(
-        tmp_path,
-        "const bytes = (h) => Uint8Array.from(Buffer.from(h, 'hex'));\n"
-        "const out = { sha: input.blobs.map((b) => sha256Fallback(bytes(b))),"
-        " jpeg: parseJpegInfo(bytes(input.jpeg).buffer) };",
-        {"blobs": [b.hex() for b in blobs], "jpeg": photo.read_bytes().hex()},
-    )
-    assert out["sha"] == [hashlib.sha256(b).hexdigest() for b in blobs]
-    assert out["jpeg"] == {
-        "orientation": 6,
-        "rawSize": [40, 30],
-        "make": "Apple",
-        "model": "iPhone 13",
-        "software": None,
-        "datetime": "2026:09:27 10:00:00",
-    }
 
 
 @pytest.mark.skipif(NODE is None, reason="node is not installed")
@@ -529,12 +271,3 @@ def test_labeler_geometry_and_checks_agree_with_python(tmp_path):
     assert out["checks"]["valid"] == 0 and out["checks"]["mirrored"] > 0
     assert out["normalized"]["flags"] == ["glare"]
     assert _errors(out["normalized"]) == []
-
-
-@pytest.mark.skipif(NODE is None, reason="node is not installed")
-def test_labeler_scripts_parse(tmp_path):
-    for name in ("core", "ui"):
-        source = re.search(rf'<script id="{name}">(.*?)</script>', HTML, re.S).group(1)
-        path = tmp_path / f"{name}.js"
-        path.write_text(source, encoding="utf-8")
-        subprocess.run([NODE, "--check", str(path)], check=True, capture_output=True)

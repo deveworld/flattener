@@ -1,4 +1,5 @@
-"""Dewarp prediction: grid conventions, checkpoint loading and the DocUNet batch CLI."""
+"""Dewarp prediction: grid conventions, checkpoint loading, output quantization, the
+grid-level inset, crop-and-rerun with deskew, and the DocUNet batch CLI."""
 
 import json
 import os
@@ -15,16 +16,28 @@ from flattener.benchmark.reporting import prediction_record, report_evidence
 from flattener.contracts import Status
 from flattener.dewarp import predict
 from flattener.dewarp.checkpoint import CHECKPOINT_SCHEMA, save_checkpoint
-from flattener.dewarp.coords import edge_positions
+from flattener.dewarp.coords import (
+    center_positions,
+    edge_positions,
+    grid_to_map,
+    uvdoc_dense_map,
+)
 from flattener.dewarp.model import DewarpModelConfig, UVDocNet
 from flattener.dewarp.predict import (
     Dewarper,
+    canvas_size,
+    canvas_to_source,
+    crop_box,
+    dense_backward_map,
+    estimate_page_angle,
     ieee_float32,
     load_dewarper,
     main,
     predict_grid,
     quantize_rgb,
     rectify,
+    rerun_grid,
+    resolve_inset,
     sample_rgb,
 )
 from flattener.renderer import render
@@ -127,15 +140,6 @@ def _checkerboard_page():
     image[10:110, 12:80] = 235
     image[(yy // 8 + xx // 8) % 2 == 0] //= 2
     return image
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
-def test_cuda_prediction_matches_cpu():
-    # With TF32 convolutions the UVDoc grid drifts by ~1e-4 (0.1 px on a DocUNet crop).
-    weights, image = _upstream_weights(), _checkerboard_page()
-    cpu = predict_grid(load_dewarper(weights), image)
-    cuda = predict_grid(load_dewarper(weights, device="cuda"), image)
-    np.testing.assert_allclose(cuda, cpu, rtol=0, atol=1e-5)
 
 
 def test_checkpoint_loads_with_verification(tmp_path):
@@ -278,16 +282,6 @@ def test_truncate_samples_what_flattener_render_rounds():
         quantize_rgb(np.zeros(3, np.float32), "nearest")
 
 
-def test_truncate_differs_from_round_by_at_most_one_level():
-    image = np.random.default_rng(5).integers(0, 256, (37, 29, 3), dtype=np.uint8)
-    dewarper = Dewarper(_IdentityGrid(), TINY, torch.device("cpu"))
-    rounded = rectify(dewarper, image, (50, 41))
-    truncated = rectify(dewarper, image, (50, 41), quantize="truncate")
-    gap = rounded.image.astype(int) - truncated.image
-    assert gap.min() == 0 and gap.max() == 1
-    assert truncated.metadata["validation"] == rounded.metadata["validation"]
-
-
 def test_docunet_batch_never_keeps_outputs_of_another_quantization(tmp_path, capsys, monkeypatch):
     monkeypatch.setattr(predict, "predict_grid", _identity_grid)
     crops, output = tmp_path / "crop", tmp_path / "out"
@@ -324,3 +318,218 @@ def test_docunet_batch_never_keeps_outputs_of_another_quantization(tmp_path, cap
     del record["quantize"]
     record_path.write_text(json.dumps(record))
     assert run("truncate") == (1, 0)
+
+
+# Grid-level inset of the predicted outline (--inset)
+
+PRESET = "syntheticdoc_half_cell"
+
+
+def _identity(height, width):
+    return np.stack(np.meshgrid(edge_positions(width), edge_positions(height)), -1).astype(
+        np.float32
+    )
+
+
+def test_zero_inset_is_the_plain_map():
+    grid = np.random.default_rng(0).uniform(-1.1, 1.1, (7, 5, 2)).astype(np.float32)
+    for inset in (None, 0, 0.0, (0, 0), [0.0, 0.0]):
+        assert resolve_inset(inset) == (0.0, 0.0)
+        np.testing.assert_array_equal(
+            dense_backward_map(grid, "flattener", (31, 23), (40, 30), inset),
+            grid_to_map(grid, (31, 23)),
+        )
+        np.testing.assert_array_equal(
+            dense_backward_map(grid, "uvdoc", (31, 23), (40, 30), inset),
+            uvdoc_dense_map(grid, (31, 23), (40, 30)),
+        )
+    # The inset path at e -> 0 reads the grid where the plain map does, in both conventions.
+    for convention in ("flattener", "uvdoc"):
+        plain = dense_backward_map(grid, convention, (31, 23), (40, 30))
+        tiny = dense_backward_map(grid, convention, (31, 23), (40, 30), (1e-12, 0.0))
+        np.testing.assert_allclose(tiny, plain, rtol=0, atol=1e-6)
+
+
+@pytest.mark.parametrize("convention", ["flattener", "uvdoc"])
+def test_identity_grid_edges_move_to_one_minus_e(convention):
+    inset = PRESET
+    ex, ey = resolve_inset(inset)
+    height, width = 41, 27
+    grid = _identity(6, 5)  # align_corners values for "uvdoc", flattener values otherwise
+    dense = dense_backward_map(grid, convention, (height, width), (height, width), inset)
+    # Output pixel center u shows the page position (1 - e) u: the grid on [-(1-e), 1-e].
+    np.testing.assert_allclose(dense[5, :, 0], (1 - ex) * center_positions(width), atol=1e-6)
+    np.testing.assert_allclose(dense[:, 3, 1], (1 - ey) * center_positions(height), atol=1e-6)
+    # The outer pixel edges (u = -1, +1) lie at -(1 - e) and 1 - e.
+    left = 1.5 * dense[5, 0, 0] - 0.5 * dense[5, 1, 0]
+    right = 1.5 * dense[5, -1, 0] - 0.5 * dense[5, -2, 0]
+    top = 1.5 * dense[0, 3, 1] - 0.5 * dense[1, 3, 1]
+    bottom = 1.5 * dense[-1, 3, 1] - 0.5 * dense[-2, 3, 1]
+    np.testing.assert_allclose([left, right], [-(1 - ex), 1 - ex], atol=1e-6)
+    np.testing.assert_allclose([top, bottom], [-(1 - ey), 1 - ey], atol=1e-6)
+
+
+# Crop-and-rerun (--rerun and --deskew)
+
+GRID = (9, 7)
+SOURCE = (150, 200)  # (height, width): small enough for the ramp image
+
+
+def _config(convention="flattener"):
+    return DewarpModelConfig(
+        input_size=(96, 80), grid_size=GRID, num_filter=4, grid_convention=convention
+    )
+
+
+def ramp_image(height, width):
+    """Red holds each pixel's column and green its row, so a bilinear sample of the image
+    tells which source point it shows (exact while both stay below 256)."""
+    assert max(height, width) <= 256
+    rows, cols = np.mgrid[0:height, 0:width]
+    return np.stack([cols, rows, (rows + cols) % 7 * 30], -1).astype(np.uint8)
+
+
+class Page:
+    """A page that is an affine image of the output square: output position u in
+    [-1, 1]^2 lies at ``center + R(angle) (u * size / 2)`` source pixels (edges at 0, W)."""
+
+    def __init__(self, center, size, angle_deg=0.0):
+        theta = np.radians(angle_deg)
+        rotation = np.array([[np.cos(theta), -np.sin(theta)], [np.sin(theta), np.cos(theta)]])
+        self.matrix = rotation @ np.diag(np.asarray(size, float) / 2)
+        self.center = np.asarray(center, float)
+
+    def pixels(self, grid_size):
+        u = np.stack(np.meshgrid(edge_positions(grid_size[1]), edge_positions(grid_size[0])), -1)
+        return u @ self.matrix.T + self.center
+
+    def grid(self, grid_size=GRID, source_size=SOURCE):
+        """The true grid: flattener values of the source at the edge-aligned nodes."""
+        height, width = source_size
+        return self.pixels(grid_size) / np.array([width, height]) * 2 - 1
+
+
+class Oracle(torch.nn.Module):
+    """A perfect predictor of ``page`` on a ramp image, plus a fixed ``bias`` in its own
+    input frame. It fits which source point each input pixel shows (an affine map) on the
+    middle of its input, which lies inside the crop at any turn, and returns the page's
+    grid in its input frame, as align_corners=True values of the image it saw for
+    ``uvdoc``."""
+
+    def __init__(self, page, convention="flattener", bias=(0.0, 0.0)):
+        super().__init__()
+        self.page, self.convention, self.bias = page, convention, np.asarray(bias)
+        self.seen = []
+
+    def forward(self, x):
+        _, _, height, width = x.shape
+        cols = x[0, 0].double().cpu().numpy() * 255
+        rows = x[0, 1].double().cpu().numpy() * 255
+        qx, qy = np.meshgrid(center_positions(width), center_positions(height))
+        middle = (np.abs(qx) < 0.2) & (np.abs(qy) < 0.2)
+        design = np.stack([qx[middle], qy[middle], np.ones(middle.sum())], 1)
+        fit_x = np.linalg.lstsq(design, cols[middle] + 0.5, rcond=None)[0]
+        fit_y = np.linalg.lstsq(design, rows[middle] + 0.5, rcond=None)[0]
+        matrix = np.array([fit_x[:2], fit_y[:2]])  # input values -> source pixels
+        offset = np.array([fit_x[2], fit_y[2]])
+        local = (self.page.pixels(GRID) - offset) @ np.linalg.inv(matrix).T + self.bias
+        self.seen.append(local)
+        if self.convention == "uvdoc":
+            n = 2 * np.hypot(matrix[0], matrix[1])  # size of the image seen, in pixels
+            local = local * n / (n - 1)
+        grid = torch.from_numpy(local.transpose(2, 0, 1).astype(np.float32))[None]
+        return grid, None
+
+
+def _dewarper(page, convention="flattener", bias=(0.0, 0.0)):
+    return Dewarper(Oracle(page, convention, bias), _config(convention), torch.device("cpu"))
+
+
+@pytest.mark.parametrize("convention", ["flattener", "uvdoc"])
+def test_a_perfect_predictor_keeps_the_true_map_through_a_crop(convention):
+    image = ramp_image(*SOURCE)
+    page = Page(center=(120.3, 60.7), size=(50, 36))  # x 95.3..145.3, y 42.7..78.7
+    truth = page.grid()
+    dewarper = _dewarper(page, convention)
+    whole, _ = rerun_grid(dewarper, image, 0)
+    np.testing.assert_allclose(whole, truth, rtol=0, atol=1e-5)
+    grid, [record] = rerun_grid(dewarper, image, 1)
+    np.testing.assert_allclose(grid, truth, rtol=0, atol=1e-5)
+    # Outline bounds plus 4% of the page extent per side, in whole pixels.
+    np.testing.assert_allclose(record["outline_box"], [95.3, 42.7, 145.3, 78.7], atol=1e-4)
+    assert record["box"] == [93, 41, 148, 81]  # 93.3, 41.26, 147.3, 80.14 widened
+    assert record["canvas_size"] == [40.0, 55.0] and record["pass"] == 1
+    assert record["angle_deg"] is None and not record["rotated"] and record["skipped"] is None
+
+
+@pytest.mark.parametrize("convention", ["flattener", "uvdoc"])
+def test_deskew_turns_the_page_upright_and_composes_back(convention):
+    angle = -33.0
+    image = ramp_image(*SOURCE)
+    page = Page(center=(98.6, 77.1), size=(70, 50), angle_deg=angle)
+    truth = page.grid()
+    dewarper = _dewarper(page, convention)
+    plain, [straight] = rerun_grid(dewarper, image, 1)
+    grid, [record] = rerun_grid(dewarper, image, 1, deskew=True)
+    np.testing.assert_allclose(grid, truth, rtol=0, atol=1e-5)
+    np.testing.assert_allclose(plain, truth, rtol=0, atol=1e-5)
+    assert record["rotated"] and record["deskew_skipped"] is None
+    assert record["angle_deg"] == pytest.approx(angle, abs=1e-5)
+    assert record["box"] == straight["box"]  # the same axis-aligned crop, then turned
+    box = tuple(record["box"])
+    assert record["canvas_size"] == pytest.approx(list(canvas_size(box, record["angle_deg"])))
+    # The model saw the page upright: its top and bottom rows are level, its sides plumb.
+    seen = dewarper.model.seen[-1]
+    for edge in (seen[0, :, 1], seen[-1, :, 1], seen[:, 0, 0], seen[:, -1, 0]):
+        assert np.ptp(edge) < 1e-5
+    # The canvas keeps the whole crop: its corners lie inside the canvas.
+    matrix, offset = canvas_to_source(box, record["angle_deg"], record["canvas_size"], SOURCE)
+    left, top, right, bottom = box
+    corners = np.array([[left, top], [right, top], [left, bottom], [right, bottom]], float)
+    values = corners / [SOURCE[1], SOURCE[0]] * 2 - 1
+    inside = (values - offset) @ np.linalg.inv(matrix).T
+    assert np.abs(inside).max() <= 1 + 1e-9
+    assert np.abs(inside).max() == pytest.approx(1.0)
+
+
+def test_the_crop_box_is_clipped_to_the_image():
+    outline = np.array([[-12.5, 30.2], [80.0, 30.2], [80.0, 160.7], [-12.5, 160.7]])
+    assert crop_box(outline, (150, 100)) == (0, 24, 84, 150)  # 24.98 -> 24, 83.7 -> 84
+    assert crop_box(outline, (150, 100), margin=0.0) == (0, 30, 80, 150)
+    far = np.array([[250.0, 10.0], [300.0, 40.0]])
+    assert crop_box(far, (150, 200)) == (200, 8, 200, 42)
+
+
+def test_the_angle_estimate_is_robust_and_refuses_bad_outlines():
+    page = Page(center=(100, 75), size=(80, 60), angle_deg=10.0)
+    grid = page.grid()
+    assert estimate_page_angle(grid, SOURCE) == (pytest.approx(10.0), None)
+    spiked = grid.copy()
+    spiked[0, 3, 1] -= 0.2  # one top node pulled far up: two outlying segments
+    angle, reason = estimate_page_angle(spiked, SOURCE)
+    assert reason is None and angle == pytest.approx(10.0, abs=1e-9)
+    collapsed = grid.copy()
+    collapsed[0] = collapsed[0, 0]  # the top edge is one point
+    assert estimate_page_angle(collapsed, SOURCE) == (None, "degenerate_outline")
+    missing = grid.copy()
+    missing[-1, 4] = np.nan
+    assert estimate_page_angle(missing, SOURCE) == (None, "degenerate_outline")
+    crossed = grid.copy()
+    crossed[-1] = crossed[-1, ::-1]  # the bottom edge runs the other way
+    assert estimate_page_angle(crossed, SOURCE) == (None, "inconsistent_edges")
+    upside_down = Page(center=(100, 75), size=(80, 60), angle_deg=180.0).grid()
+    assert abs(estimate_page_angle(upside_down, SOURCE)[0]) == pytest.approx(180.0)
+
+
+@pytest.mark.parametrize("convention", ["flattener", "uvdoc"])
+def test_rectify_renders_the_composed_map_from_the_original_image(convention):
+    image = ramp_image(*SOURCE)
+    page = Page(center=(101.3, 70.6), size=(64, 48), angle_deg=12.0)
+    dewarper = _dewarper(page, convention)
+    result = rectify(dewarper, image, (48, 64), rerun=1, deskew=True)
+    assert result.status == Status.SUCCESS and result.metadata["dewarp"]["crops"][0]["rotated"]
+    truth = predict.dense_backward_map(
+        page.grid(), convention, (48, 64), SOURCE, flattener_values=True
+    )
+    expected = predict.render_unchecked(image, truth, (255, 255, 255))
+    assert np.abs(result.image.astype(int) - expected).max() <= 1

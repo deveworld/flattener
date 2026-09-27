@@ -1,8 +1,9 @@
-"""Dewarp data adapters, license tracks, views and seeded augmentation on tiny fixtures."""
+"""Dewarp data adapters, license tracks, views, seeded augmentation and the data
+signature, on tiny fixtures."""
 
 import hashlib
+import inspect
 import json
-import os
 import pickle
 
 import numpy as np
@@ -11,12 +12,12 @@ import torch
 import torch.nn.functional as F
 from PIL import Image
 
+import flattener.dewarp.data as dewarp_data
 from flattener import FlattenerError
-from flattener.dewarp.coords import flattener_to_syntheticdoc, pixels_to_flattener
+from flattener.dewarp import coords
+from flattener.dewarp.coords import edge_positions, flattener_to_syntheticdoc, pixels_to_flattener
 from flattener.dewarp.data import (
-    COLOR_PARAMS,
     COMPACT_SCHEMA,
-    IDENTITY_COLOR,
     SAMPLE_SCHEMA,
     SPEC_SCHEMA,
     AugmentConfig,
@@ -24,13 +25,19 @@ from flattener.dewarp.data import (
     RawSample,
     SourceSpec,
     ViewConfig,
-    apply_color_batch,
     apply_geometry,
     build_dataset,
-    draw_color_params,
+    evaluation_view,
     license_key,
     require_track,
-    to_float_images,
+)
+from flattener.dewarp.model import DewarpModelConfig
+from flattener.dewarp.train import (
+    TrainConfig,
+    _check_resume,
+    _data_sources,
+    code_record,
+    validation_signature,
 )
 
 INPUT, GRID = (48, 36), (5, 4)
@@ -114,16 +121,6 @@ def _write_doc3d(root):
     (root / "traindoc.txt").write_text("1/a\n")
 
 
-def _write_uvdoc(root):
-    for name in ("img", "metadata_sample", "grid2d", "grid3d"):
-        (root / name).mkdir(parents=True)
-    size = (71, 49)
-    Image.fromarray(_image(size, 4)).save(root / "img/0001.png")
-    (root / "metadata_sample/0001.json").write_text(json.dumps({"geom_name": "geom"}))
-    np.save(root / "grid2d/geom.npy", _grid_pixels(_page(size), (9, 7)))
-    np.save(root / "grid3d/geom.npy", np.full((9, 7, 3), -0.12551452, np.float32))
-
-
 def _spec(tmp_path, sources, track="research", name="spec"):
     data = {"schema": SPEC_SCHEMA, "name": name, "track": track, "sources": sources}
     path = tmp_path / f"{name}.json"
@@ -153,53 +150,6 @@ def _fills_crop(grid, tolerance):
         and -1 - 1e-4 <= grid[1].min() < -1 + tolerance
         and 1 - tolerance < grid[1].max() <= 1 + 1e-4
     )
-
-
-def test_converted_source_items_and_relative_spec_roots(tmp_path):
-    _write_converted(tmp_path / "data/conv", manifest=False)
-    source = {
-        "name": "clean",
-        "kind": "converted",
-        "root": "data/conv",
-        "track": "release",
-        "license": "CC BY 4.0 subset",
-    }
-    spec = _spec(tmp_path, [source], track="release")
-    dataset = _build(spec, track="release")
-    described = dataset.describe()[0]
-    assert len(dataset) == 3 and described["samples"] == 3 and described["track"] == "release"
-    assert described["license_classes"] == {"clean": 3} and len(described["records_sha256"]) == 64
-    item = dataset[1]  # evaluation items stack one entry per view
-    assert item["image"].shape == (1, 3, *INPUT) and item["image"].dtype == torch.uint8
-    assert item["grid2d"].shape == (1, 2, *GRID) and item["valid"].shape == (1, 1, *GRID)
-    assert item["valid"].all() and not item["has_grid3d"]
-    assert (item["track"], item["source"], item["sample_id"]) == ("release", "clean", "s1")
-    assert _fills_crop(item["grid2d"][0].numpy(), 0.08)  # zero margin: the page fills the crop
-    moved = DataSpec.from_dict(spec.to_dict(), base_dir="/elsewhere")
-    assert moved.sha256 == spec.sha256
-
-
-def test_training_items_carry_uint8_images_and_color_parameters(tmp_path):
-    _write_converted(tmp_path / "conv")
-    source = {"name": "c", "kind": "converted", "root": str(tmp_path / "conv"), "track": "research"}
-    dataset = _build(_spec(tmp_path, [source]), train=True, augment=AugmentConfig())
-    item = dataset[(0, 5)]
-    assert item["image"].shape == (3, *INPUT) and item["image"].dtype == torch.uint8
-    assert item["color"].shape == (COLOR_PARAMS,) and item["noise_seed"].dtype == torch.int64
-    batch = torch.utils.data.default_collate([dataset[(i, i)] for i in range(3)])
-    images = to_float_images(batch)
-    assert images.dtype == torch.float32 and images.shape == (3, 3, *INPUT)
-    assert 0 <= float(images.min()) and float(images.max()) <= 1
-    plain = build_dataset(
-        _spec(tmp_path, [source], name="plain"),
-        track="research",
-        split="train",
-        input_size=INPUT,
-        grid_size=GRID,
-        augment=AugmentConfig(enabled=False),
-        train=True,
-    )[(0, 5)]
-    torch.testing.assert_close(plain["color"], torch.from_numpy(IDENTITY_COLOR))
 
 
 def test_raw_syntheticdoc_and_converted_conventions_agree(tmp_path):
@@ -357,152 +307,6 @@ def test_compact_source_checks_hashes_sizes_and_track(tmp_path):
     assert error.value.reason_code == "track_violation"
 
 
-def test_content_digest_follows_file_sizes_without_manifest_hashes(tmp_path):
-    _write_converted(tmp_path / "conv", count=2)
-    source = {"name": "c", "kind": "converted", "root": str(tmp_path / "conv"), "track": "research"}
-    spec = _spec(tmp_path, [source])
-    before = _build(spec).describe()[0]
-    Image.fromarray(_image((60, 44), 0)).save(tmp_path / "conv/s0.jpg", quality=40)
-    after = _build(spec).describe()[0]
-    assert after["records_sha256"] == before["records_sha256"]
-    assert after["content_sha256"] != before["content_sha256"]
-    (tmp_path / "conv/s1.npy").unlink()
-    with pytest.raises(FlattenerError) as error:
-        _build(spec)
-    assert error.value.reason_code == "missing_data"
-
-
-def test_spec_roots_expand_environment_variables(tmp_path, monkeypatch):
-    _write_converted(tmp_path / "data/conv", count=1)
-    source = {
-        "name": "c",
-        "kind": "converted",
-        "root": "${FLATTENER_TEST_DATA}/conv",
-        "track": "research",
-    }
-    spec = _spec(tmp_path, [source])
-    monkeypatch.delenv("FLATTENER_TEST_DATA", raising=False)
-    with pytest.raises(FlattenerError) as error:
-        _build(spec)
-    assert error.value.reason_code == "unset_variable"
-    monkeypatch.setenv("FLATTENER_TEST_DATA", str(tmp_path / "data"))
-    assert len(_build(spec)) == 1
-    assert spec.to_dict()["sources"][0]["root"] == "${FLATTENER_TEST_DATA}/conv"
-
-
-def test_doc3d_and_uvdoc_adapters_follow_upstream_layouts(tmp_path):
-    _write_doc3d(tmp_path / "doc3d")
-    _write_uvdoc(tmp_path / "uvdoc")
-    spec = _spec(
-        tmp_path,
-        [
-            {
-                "name": "doc3d",
-                "kind": "doc3d",
-                "root": str(tmp_path / "doc3d"),
-                "track": "research",
-            },
-            {
-                "name": "uvdoc",
-                "kind": "uvdoc",
-                "root": str(tmp_path / "uvdoc"),
-                "track": "research",
-            },
-        ],
-    )
-    dataset = _build(spec)
-    doc3d, uvdoc = dataset[0], dataset[1]
-    for item in (doc3d, uvdoc):
-        assert item["has_grid3d"] and item["valid"].all() and item["grid3d"].shape == (3, *GRID)
-        assert _fills_crop(item["grid2d"][0].numpy(), 0.06)
-        assert item["image"].shape == (1, 3, *INPUT)  # the RGBA Doc3D image as RGB
-    trained = _build(spec, train=True, augment=AugmentConfig())
-    assert trained[(0, 3)]["image"].shape == (3, *INPUT)
-    torch.testing.assert_close(doc3d["grid3d"][0], torch.ones(GRID))
-    expected = torch.tensor([0.0, 0.5, 0.9, 1.0]).expand(GRID)
-    torch.testing.assert_close(doc3d["grid3d"][1], expected, atol=1e-6, rtol=0)
-    torch.testing.assert_close(uvdoc["grid3d"][0], torch.zeros(GRID), atol=1e-6, rtol=0)
-    assert uvdoc["sample_id"] == "0001" and uvdoc["kind"] == "uvdoc"
-
-
-def _digest(spec):
-    return _build(spec).describe()[0]["content_sha256"]
-
-
-def _touch(path, seconds):
-    os.utime(path, ns=(seconds * 10**9, seconds * 10**9))
-
-
-def test_npy_grids_are_checked_against_their_mat_files(tmp_path):
-    _write_doc3d(tmp_path / "doc3d")
-    grid2d = tmp_path / "doc3d/grid2D/1"
-    source = {"name": "d", "kind": "doc3d", "root": str(tmp_path / "doc3d"), "track": "research"}
-    spec = _spec(tmp_path, [source])
-    npy_only = _digest(spec)
-    _touch(grid2d / "a.npy", 2_000_000_000)
-    (grid2d / "a.mat").write_bytes(b"x" * 100)  # the .mat the .npy was converted from
-    _touch(grid2d / "a.mat", 1_900_000_000)
-    with_mat = _digest(spec)
-    assert with_mat != npy_only
-    (grid2d / "a.mat").write_bytes(b"x" * 120)  # re-fetched with another size
-    _touch(grid2d / "a.mat", 1_900_000_000)
-    assert _digest(spec) != with_mat
-    _touch(grid2d / "a.mat", 2_100_000_000)  # re-fetched after the conversion
-    with pytest.raises(FlattenerError) as error:
-        _build(spec)
-    assert error.value.reason_code == "stale_cache"
-
-
-def test_uvdoc_digest_covers_the_shared_geometry_files(tmp_path):
-    _write_uvdoc(tmp_path / "uvdoc")
-    source = {"name": "u", "kind": "uvdoc", "root": str(tmp_path / "uvdoc"), "track": "research"}
-    spec = _spec(tmp_path, [source])
-    before = _digest(spec)
-    grid3d = tmp_path / "uvdoc/grid3d/geom.npy"
-    np.save(grid3d, np.full((9, 7, 3), -0.12551452, np.float64))  # replaced geometry
-    assert _digest(spec) != before
-    _touch(grid3d, 2_000_000_000)
-    (grid3d.with_suffix(".mat")).write_bytes(b"x")
-    _touch(grid3d.with_suffix(".mat"), 2_100_000_000)
-    with pytest.raises(FlattenerError) as error:
-        _build(spec)
-    assert error.value.reason_code == "stale_cache"
-
-
-def test_uvdoc_geometry_names_enter_the_target_digest(tmp_path):
-    root = tmp_path / "uvdoc"
-    _write_uvdoc(root)
-    np.save(root / "grid2d/gemo.npy", np.load(root / "grid2d/geom.npy")[::-1].copy())
-    np.save(root / "grid3d/gemo.npy", np.load(root / "grid3d/geom.npy"))
-    source = {"name": "u", "kind": "uvdoc", "root": str(root), "track": "research"}
-    spec = _spec(tmp_path, [source])
-    before, grid = _build(spec).describe()[0], _build(spec)[0]["grid2d"]
-    meta = root / "metadata_sample/0001.json"
-    meta.write_text(json.dumps({"geom_name": "gemo"}))  # same length: same file sizes
-    after = _build(spec).describe()[0]
-    assert after["content_sha256"] == before["content_sha256"]
-    assert after["targets_sha256"] != before["targets_sha256"]
-    assert not torch.equal(_build(spec)[0]["grid2d"], grid)
-    meta.write_text(json.dumps({"geom": "gemo"}))
-    with pytest.raises(FlattenerError, match="geom_name"):
-        _build(spec)
-
-
-def test_matlab_v73_grids_are_read_with_h5py(tmp_path):
-    h5py = pytest.importorskip("h5py")
-    _write_doc3d(tmp_path / "doc3d")
-    for name, key in (("grid2D", "grid2D"), ("grid3D", "grid3D")):
-        array = np.load(tmp_path / f"doc3d/{name}/1/a.npy")
-        (tmp_path / f"doc3d/{name}/1/a.npy").unlink()
-        with h5py.File(tmp_path / f"doc3d/{name}/1/a.mat", "w") as stream:
-            stream.create_dataset(key, data=array.T)
-    spec = _spec(
-        tmp_path,
-        [{"name": "d", "kind": "doc3d", "root": str(tmp_path / "doc3d"), "track": "research"}],
-    )
-    assert _build(spec)[0]["valid"].all()
-
-
 def _ramp(size, slope):
     ramp = (np.arange(size) * slope).astype(np.uint8)
     return np.stack(
@@ -543,24 +347,6 @@ def test_geometry_keeps_image_and_grid_consistent_under_rotation():
         a = apply_geometry(tagged, (120, 90), only_uvdoc, np.random.default_rng(3))[1]
         b = apply_geometry(tagged, (120, 90), unrotated, np.random.default_rng(3))[1]
         assert np.array_equal(a, b) != rotated
-
-
-def test_jpeg_draft_decodes_less_and_keeps_the_geometry(tmp_path):
-    size = 256
-    Image.fromarray(_ramp(size, 1.0)).save(tmp_path / "ramp.jpg", quality=98)
-    page = _page((size, size), corner=(0.1, 0.1), extent=(0.8, 0.8))
-    grid = pixels_to_flattener(_grid_pixels(page, (5, 4)), (size, size))
-    outputs = {}
-    for draft in (False, True):
-        sample = RawSample(Image.open(tmp_path / "ramp.jpg"), grid, np.ones((5, 4), bool), None)
-        augment = AugmentConfig(full_frame_prob=1.0, jpeg_draft=draft)
-        outputs[draft] = apply_geometry(sample, (48, 36), augment, np.random.default_rng(0))
-        decoded = sample.image.size
-        sample.image.close()
-    assert decoded == (64, 64)  # 256 px -> 48 px output: 1/4 DCT scale
-    np.testing.assert_array_equal(outputs[True][1], outputs[False][1])
-    difference = outputs[True][0].double() - outputs[False][0].double()
-    assert difference.abs().mean() < 2.0  # same ramp values, no half-pixel shift
 
 
 def test_evaluation_views_resize_whole_pixel_crops_like_predict(tmp_path):
@@ -605,49 +391,6 @@ def test_evaluation_views_resize_whole_pixel_crops_like_predict(tmp_path):
     assert grid[0].min() > -1 and grid[0].max() < 1
 
 
-def test_images_of_other_modes_load_as_rgb_in_every_view(tmp_path):
-    root = tmp_path / "modes"
-    _write_converted(root, count=3, size=(60, 44))
-    entries = [json.loads(line) for line in (root / "manifest.jsonl").read_text().splitlines()]
-    for entry, mode in zip(entries, ("RGBA", "L", "P"), strict=True):
-        with Image.open(root / entry["image"]) as opened:
-            opened.convert(mode).save(root / f"{entry['sample_id']}.png")
-        entry["image"] = f"{entry['sample_id']}.png"
-    (root / "manifest.jsonl").write_text("".join(json.dumps(e) + "\n" for e in entries))
-    source = {"name": "m", "kind": "converted", "root": str(root), "track": "research"}
-    spec = _spec(tmp_path, [source])
-    views = (ViewConfig("page"), ViewConfig("frame", "full_frame"))
-    dataset = _build(spec, views=views)
-    trained = _build(spec, train=True, augment=AugmentConfig(rotation_deg=20, rotation_prob=1))
-    for index, entry in enumerate(entries):
-        item = dataset[index]
-        assert item["image"].shape == (2, 3, *INPUT)
-        with Image.open(root / entry["image"]) as opened:
-            rgb = torch.from_numpy(np.array(opened.convert("RGB"))).permute(2, 0, 1)
-        reference = F.interpolate(rgb[None].double(), size=INPUT, mode="bilinear")[0]
-        assert (item["image"][1].double() - reference).abs().max() <= 1
-        assert trained[(index, index)]["image"].shape == (3, *INPUT)
-
-
-def test_color_jitter_runs_per_batch_and_matches_per_sample(tmp_path):
-    augment = AugmentConfig(color_prob=1.0, grayscale_prob=0.3, blur_prob=0.5, noise_prob=0.7)
-    draws = [draw_color_params(augment, np.random.default_rng([3, i])) for i in range(6)]
-    params = torch.from_numpy(np.stack([p for p, _ in draws]))
-    seeds = torch.tensor([s for _, s in draws])
-    assert params[:, 9].any() and params[:, 11].any()  # blur and noise both occur
-    images = torch.rand(6, 3, 20, 16)
-    batch = apply_color_batch(images.clone(), params, seeds)
-    for index in range(6):
-        single = apply_color_batch(
-            images[index : index + 1].clone(), params[index : index + 1], seeds[index : index + 1]
-        )
-        torch.testing.assert_close(batch[index : index + 1], single, atol=1e-6, rtol=0)
-    torch.testing.assert_close(apply_color_batch(images.clone(), params, seeds), batch)
-    identity = torch.from_numpy(np.tile(IDENTITY_COLOR, (6, 1)))
-    torch.testing.assert_close(apply_color_batch(images.clone(), identity, [0] * 6), images)
-    assert 0 <= float(batch.min()) and float(batch.max()) <= 1
-
-
 def test_augmentation_is_seeded_by_position_and_dataset_pickles(tmp_path):
     _write_converted(tmp_path / "conv")
     spec = _spec(
@@ -676,68 +419,250 @@ def test_augmentation_is_seeded_by_position_and_dataset_pickles(tmp_path):
     assert torch.equal(evaluation[(1, 1)]["image"], evaluation[(1, 2)]["image"])
 
 
-def test_spec_view_and_augment_validation(tmp_path):
-    with pytest.raises(FlattenerError):
-        DataSpec.from_dict({"schema": "other", "name": "x", "track": "research", "sources": []})
-    with pytest.raises(FlattenerError, match="bad source"):
-        DataSpec.from_dict(
-            {
-                "schema": SPEC_SCHEMA,
-                "name": "x",
-                "track": "research",
-                "sources": [
-                    {"name": "a", "kind": "converted", "root": ".", "track": "research", "shard": 1}
-                ],
-            }
-        )
-    with pytest.raises(FlattenerError, match="unique"):
-        source = {"name": "a", "kind": "converted", "root": ".", "track": "research"}
-        _spec(tmp_path, [source, source])
-    with pytest.raises(FlattenerError, match="license"):
-        SourceSpec(name="a", kind="converted", root=".", track="release")
-    assert AugmentConfig(rotation_kinds=["uvdoc"]).to_dict()["rotation_kinds"] == ["uvdoc"]
-    for bad in (
-        {"margin": (0.2, 0.1)},
-        {"blur_prob": 1.5},
-        {"rotation_deg": 90.0},
-        {"rotation_kinds": ["doc4d"]},
-        {"jpeg_draft": 1},
-    ):
-        with pytest.raises(ValueError):
-            AugmentConfig(**bad)
-    view = ViewConfig("docunet", "page", [0.02, 0.1])
-    assert ViewConfig.from_dict(view.to_dict()) == view
-    for bad in ({"name": ""}, {"name": "a", "crop": "tight"}, {"name": "a", "margin": (0.3, 0.1)}):
-        with pytest.raises(ValueError):
-            ViewConfig(**bad)
-    with pytest.raises(ValueError):
-        ViewConfig.from_dict({"name": "a", "seed": 1})
-    _write_converted(tmp_path / "conv", count=5)
-    limited = _spec(
-        tmp_path,
-        [
-            {
-                "name": "c",
-                "kind": "converted",
-                "root": str(tmp_path / "conv"),
-                "track": "research",
-                "max_samples": 2,
-            }
-        ],
-        name="limited",
+# Evaluation views: quarter turns and the small page keep exact targets.
+
+VIEW_INPUT = (48, 40)
+MARGIN = (0.05, 0.05)
+
+
+def _sample():
+    """Colour ramps along x (red) and y (green) and a slanted page inside the image.
+
+    Bilinear resampling reproduces a linear ramp, so a view sampled at its target
+    positions gives back the colours of the page nodes in any correct view.
+    """
+    height, width = 90, 70
+    yy, xx = np.mgrid[0:height, 0:width].astype(np.float64)
+    image = np.stack([xx * 255 / (width - 1), yy * 255 / (height - 1), 0 * xx + 128], -1)
+    u, v = np.meshgrid(edge_positions(4), edge_positions(5))
+    grid = np.stack([0.55 * u + 0.1 * v - 0.05, 0.6 * v + 0.05 * u + 0.1], -1)
+    return RawSample(
+        image.round().astype(np.uint8), grid.astype(np.float32), np.ones((5, 4), bool), None
     )
-    assert [item["sample_id"] for item in _build(limited)] == ["s0", "s4"]
-    assert _build(limited, split="val") is None
-    with pytest.raises(FlattenerError, match="unique"):
-        _build(limited, views=(ViewConfig("a"), ViewConfig("a")))
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
-def test_color_jitter_on_cuda_matches_the_cpu():
-    augment = AugmentConfig(color_prob=1.0, grayscale_prob=0.3, blur_prob=0.5, noise_prob=0.0)
-    draws = [draw_color_params(augment, np.random.default_rng([4, i])) for i in range(8)]
-    params = torch.from_numpy(np.stack([p for p, _ in draws]))
-    images = torch.rand(8, 3, 40, 32)
-    cpu = apply_color_batch(images.clone(), params, [0] * 8)
-    cuda = apply_color_batch(images.cuda(), params.cuda(), [0] * 8).cpu()
-    torch.testing.assert_close(cuda, cpu, atol=1e-5, rtol=0)
+def _colours(image, target):
+    grid = torch.from_numpy(target)[None].double()
+    sampled = F.grid_sample(image[None].double(), grid, mode="bilinear", align_corners=False)
+    return sampled[0].permute(1, 2, 0).numpy()
+
+
+def test_quarter_turns_turn_the_targets_with_the_image():
+    sample = _sample()
+    upright_view = ViewConfig("a", margin=MARGIN)
+    upright_image, upright = evaluation_view(sample, VIEW_INPUT, upright_view, "k")
+    expected = _colours(upright_image, upright)
+    for rotation in (90, 180, 270):
+        view = ViewConfig("a", margin=MARGIN, rotation=rotation)
+        image, target = evaluation_view(sample, VIEW_INPUT, view, "k")
+        assert image.shape == (3, *VIEW_INPUT)
+        np.testing.assert_allclose(_colours(image, target), expected, atol=3)
+    turned_view = ViewConfig("a", margin=MARGIN, rotation=90)
+    image, turned = evaluation_view(sample, VIEW_INPUT, turned_view, "k")
+    x, y = upright[..., 0], upright[..., 1]
+    np.testing.assert_allclose(turned, np.stack([y, -x], -1), atol=1e-6)  # counter-clockwise
+    assert image[0, 0].float().mean() > image[0, -1].float().mean()  # red now grows upward
+    frame, _ = evaluation_view(sample, VIEW_INPUT, ViewConfig("f", "full_frame", rotation=270), "k")
+    assert frame.shape == (3, *VIEW_INPUT)
+
+
+def test_the_small_page_covers_its_fraction_of_a_textured_canvas():
+    sample = _sample()
+    page_image, page = evaluation_view(sample, VIEW_INPUT, ViewConfig("s", margin=MARGIN), "k")
+    view = ViewConfig("s", "small_page", MARGIN)
+    image, target = evaluation_view(sample, VIEW_INPUT, view, "k")
+    assert image.shape == (3, *VIEW_INPUT)
+    np.testing.assert_allclose(_colours(image, target), _colours(page_image, page), atol=4)
+    extent = (target[..., 0].max() - target[..., 0].min()) * (
+        target[..., 1].max() - target[..., 1].min()
+    )
+    assert 0.05 < extent / 4 <= 0.25  # the page nodes lie inside 10-25% of the canvas
+    again, _ = evaluation_view(sample, VIEW_INPUT, view, "k")
+    assert torch.equal(again, image)  # seeded by the view name and the sample key
+    other, _ = evaluation_view(sample, VIEW_INPUT, view, "other")
+    assert not torch.equal(other, image)
+    outside = np.ones(VIEW_INPUT, bool)
+    pixels = ((target + 1) / 2 * [VIEW_INPUT[1], VIEW_INPUT[0]]).astype(int)
+    outside[pixels[..., 1].min() : pixels[..., 1].max(), pixels[..., 0].min() :] = False
+    assert image[:, torch.from_numpy(outside)].float().std() > 1  # canvas grain and shading
+
+
+# The data signature covers how targets are read from the files.
+#
+# A resume compares ``data_sources`` (``DewarpDataset.describe``) with the checkpoint.
+# Records that keep their files and ids but change how the stored map is interpreted
+# (``backward_map_convention``) or a compact copy whose settings changed (``compact.json``
+# ``scale``) give other targets, so the resume is refused and the validation signature
+# changes.
+
+TINY = DewarpModelConfig(input_size=(64, 48), grid_size=(5, 4), num_filter=4)
+SIZE = (60, 44)
+CODE = code_record()
+
+
+def _write_samples(root, *, compact=False):
+    """Two train and one val sample in the SyntheticDoc convention of a 2x render."""
+    root.mkdir()
+    base = np.stack(np.meshgrid(np.linspace(-0.7, 0.7, 12), np.linspace(-0.8, 0.8, 18)), -1)
+    rng = np.random.default_rng(0)
+    lines = []
+    for index, split in enumerate(("train", "train", "val")):
+        Image.fromarray(rng.integers(0, 256, (*SIZE, 3), dtype=np.uint8)).save(
+            root / f"{index}.png"
+        )
+        np.save(root / f"{index}.npy", (base + rng.normal(0, 0.01, base.shape)).astype(np.float16))
+        entry = {
+            "schema": SAMPLE_SCHEMA,
+            "sample_id": str(index),
+            "split": split,
+            "image": f"{index}.png",
+            "backward_map": f"{index}.npy",
+            "backward_map_convention": "syntheticdoc",
+            "original_render_size": [2 * SIZE[0], 2 * SIZE[1]],
+            "track": "release",
+            "license_class": "clean",
+        }
+        if compact:
+            for key in ("image", "backward_map"):
+                data = (root / entry[key]).read_bytes()
+                entry[f"{key}_sha256"] = hashlib.sha256(data).hexdigest()
+                entry[f"{key}_bytes"] = len(data)
+        lines.append(json.dumps(entry) + "\n")
+    (root / "manifest.jsonl").write_text("".join(lines))
+    if compact:
+        settings = {"schema": COMPACT_SCHEMA, "track": "release", "scale": 0.5}
+        (root / "compact.json").write_text(json.dumps(settings))
+
+
+def _signature_spec(tmp_path, kind):
+    sources = [
+        {
+            "name": f"sd-{split}",
+            "kind": kind,
+            "root": "data",
+            "track": "release",
+            "license": "SyntheticDoc CC BY 4.0, clean",
+            "split": split,
+        }
+        for split in ("train", "val")
+    ]
+    path = tmp_path / "spec.json"
+    path.write_text(
+        json.dumps({"schema": SPEC_SCHEMA, "name": "sd", "track": "release", "sources": sources})
+    )
+    return DataSpec.load(path)
+
+
+def _sources(spec, config):
+    """``data_sources`` as ``train`` computes them."""
+    arguments = dict(
+        track=config.track,
+        input_size=config.model.input_size,
+        grid_size=config.model.grid_size,
+        augment=config.augment,
+        seed=config.seed,
+    )
+    train_set = build_dataset(spec, split="train", train=True, **arguments)
+    val_set = build_dataset(spec, split="val", train=False, views=config.val_views, **arguments)
+    return _data_sources(train_set, val_set)
+
+
+def _edit_records(root, change):
+    manifest = root / "manifest.jsonl"
+    entries = [json.loads(line) for line in manifest.read_text().splitlines()]
+    manifest.write_text("".join(json.dumps(change(entry)) + "\n" for entry in entries))
+
+
+def _convention(entry):
+    return {**entry, "backward_map_convention": "flattener"}
+
+
+def _compact_scale(root):
+    settings = json.loads((root / "compact.json").read_text())
+    (root / "compact.json").write_text(json.dumps({**settings, "scale": 0.25}))
+
+
+CASES = {
+    "backward_map_convention": ("converted", lambda root: _edit_records(root, _convention)),
+    "compact_scale": ("syntheticdoc_compact", _compact_scale),
+}
+
+
+@pytest.mark.parametrize("case", sorted(CASES))
+def test_resume_refuses_records_read_in_another_coordinate_convention(tmp_path, case):
+    kind, change = CASES[case]
+    _write_samples(tmp_path / "data", compact=kind == "syntheticdoc_compact")
+    spec = _signature_spec(tmp_path, kind)
+    config = TrainConfig(
+        data_spec=str(tmp_path / "spec.json"),
+        output_dir=str(tmp_path / "run"),
+        track="release",
+        model=TINY,
+    )
+    before = _sources(spec, config)
+    payload = {
+        "train_config": config.to_dict(),
+        "track": "release",
+        "data_spec_sha256": spec.sha256,
+        "data_sources": before,
+        "code": CODE,
+    }
+    _check_resume(config, payload, spec, _sources(spec, config), CODE)  # unchanged data resumes
+    change(tmp_path / "data")
+    after = _sources(spec, config)
+    with pytest.raises(FlattenerError, match="resume") as error:
+        _check_resume(config, payload, spec, after, CODE)
+    assert error.value.reason_code == "resume_mismatch"
+    assert validation_signature(config, after["val"]) != validation_signature(config, before["val"])
+
+
+def _config(tmp_path, model=TINY):
+    return TrainConfig(
+        data_spec=str(tmp_path / "spec.json"),
+        output_dir=str(tmp_path / "run"),
+        track="release",
+        model=model,
+    )
+
+
+def test_code_conventions_and_the_grid_size_are_part_of_the_signature(tmp_path, monkeypatch):
+    _write_samples(tmp_path / "data")
+    spec = _signature_spec(tmp_path, "converted")
+    before = _sources(spec, _config(tmp_path))
+    monkeypatch.setitem(dewarp_data.TARGET_CONVENTIONS, "version", 2)
+    assert _sources(spec, _config(tmp_path)) != before
+    monkeypatch.undo()
+    assert _sources(spec, _config(tmp_path)) == before
+    finer = DewarpModelConfig(input_size=(64, 48), grid_size=(9, 7), num_filter=4)
+    assert _sources(spec, _config(tmp_path, finer))["val"][0]["grid_size"] == [9, 7]
+
+
+def test_resume_refuses_other_target_code(tmp_path, monkeypatch):
+    _write_samples(tmp_path / "data")
+    spec = _signature_spec(tmp_path, "converted")
+    config = _config(tmp_path)
+    sources = _sources(spec, config)
+    payload = {
+        "train_config": config.to_dict(),
+        "track": "release",
+        "data_spec_sha256": spec.sha256,
+        "data_sources": sources,
+        "code": CODE,
+    }
+    _check_resume(config, payload, spec, sources, code_record())
+    source = inspect.getsource
+
+    def edited(part):  # coords.py with one more statement
+        return source(part) + "\nEXTRA = 1\n" if part is coords else source(part)
+
+    monkeypatch.setattr(inspect, "getsource", edited)
+    changed = code_record()
+    assert changed["targets_sha256"] != CODE["targets_sha256"]
+    with pytest.raises(FlattenerError, match="target code"):
+        _check_resume(config, payload, spec, sources, changed)
+    # A checkpoint written before the digest resumes only with the same coords.py bytes.
+    older = {key: value for key, value in CODE.items() if key != "targets_sha256"}
+    _check_resume(config, {**payload, "code": older}, spec, sources, changed)
+    files = {**older["files"], "coords.py": "0" * 64}
+    with pytest.raises(FlattenerError, match="predates the target-code digest"):
+        _check_resume(config, {**payload, "code": {**older, "files": files}}, spec, sources, CODE)

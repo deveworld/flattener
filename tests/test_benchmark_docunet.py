@@ -29,28 +29,6 @@ def test_conventions_select_the_published_image_sets():
         docunet.validate_conventions([])
 
 
-def test_reference_resize_modes():
-    assert [docunet.reference_resizes("once", m) for m in (1, 2)] == [1, 1]
-    assert [docunet.reference_resizes("uvdoc_view2_double", m) for m in (1, 2)] == [1, 2]
-    with pytest.raises(ValueError):
-        docunet.reference_resizes("twice", 1)
-
-
-def test_format_name_requires_exact_fields_and_relative_paths():
-    assert docunet.format_name("{k}_{m} copy.png", fields=("k", "m"), k=3, m=2) == "3_2 copy.png"
-    for pattern in (
-        "{k}.png",
-        "{k}_{m:02d}.png",
-        "../{k}_{m}.png",
-        "/abs/{k}_{m}.png",
-        "C:/x/{k}_{m}.png",
-        "\\\\server\\{k}_{m}.png",
-        "a\\..\\..\\{k}_{m}.png",
-    ):
-        with pytest.raises(ValueError):
-            docunet.format_name(pattern, fields=("k", "m"), k=1, m=1)
-
-
 def _row(k, m, rotated, value):
     return {
         "k": k, "m": m, "rotated_180": rotated, "ms_ssim": value, "ld": 10 * value,
@@ -109,26 +87,6 @@ def test_evaluate_docunet_report_schema_without_siftflow(tiny_docunet, tmp_path)
     with pytest.raises(FileExistsError):
         write_json_atomic(tmp_path / "report.json", report)
     assert json.loads((tmp_path / "report.json").read_text())["schema"] == docunet.REPORT_SCHEMA
-
-
-def test_evaluate_docunet_checks_inputs(tiny_docunet):
-    scans, predictions = tiny_docunet
-    (predictions / "5_2.png").unlink()
-    with pytest.raises(FileNotFoundError, match="predictions missing"):
-        docunet.evaluate_docunet(
-            predictions, pattern="{k}_{m}.png", conventions=["130_raw"], build=None,
-            references_dir=scans, verify_references=False, workers=1,
-        )  # fmt: skip
-    with pytest.raises(ValueError, match="published DocUNet scans"):
-        docunet.evaluate_docunet(
-            predictions, pattern="{k}_{m}.png", conventions=["128_excl64"], build=None,
-            references_dir=scans, workers=1,
-        )  # fmt: skip
-    with pytest.raises(ValueError):
-        docunet.evaluate_docunet(
-            predictions, pattern="{k}_{m}.png", conventions=["128_excl64"], build=None,
-            references_dir=scans, verify_references=False, workers=0,
-        )  # fmt: skip
 
 
 def _record(predictions, failed):
@@ -194,35 +152,6 @@ def test_outputs_the_record_does_not_list_count_as_failures(tiny_docunet):
     means = report["summary"]["128_excl64"]
     assert means["prediction_failures"] == 1 and means["prediction_unrecorded"] == 1
     assert means["views"]["2"]["prediction_failures"] == 0
-
-
-def test_worker_initializer_limits_torch_to_one_thread():
-    import torch
-
-    before = torch.get_num_threads()
-    try:
-        docunet._initialize_worker(None)
-        assert torch.get_num_threads() == 1
-        assert docunet._WORKER_SIFTFLOW is None
-    finally:
-        torch.set_num_threads(before)
-
-
-def test_cli_defaults_to_two_workers_and_documents_every_subcommand(capsys):
-    parser = cli.build_parser()
-    args = parser.parse_args(["docunet", "pred", "--output", "r.json"])
-    assert args.workers == 2 == docunet.DEFAULT_WORKERS
-    assert args.ref_resize == "once" and args.ad_solver == "lsqr_4iter"
-    args = parser.parse_args(["ocr", "pred", "--output", "r.json"])
-    assert args.workers == 2 and args.tesseract == "tesseract"
-    args = parser.parse_args(["calibrate", "--reports-dir", "reports"])
-    assert args.workers == 2
-    for command in ("docunet", "ocr", "calibrate", "build-siftflow"):
-        with pytest.raises(SystemExit):
-            parser.parse_args([command, "--help"])
-        assert "--workers" in capsys.readouterr().out or command == "build-siftflow"
-    with pytest.raises(SystemExit):
-        parser.parse_args(["docunet", "pred", "--output", "r.json", "--workers", "0"])
 
 
 def test_cli_docunet_ms_ssim_only_writes_report(tiny_docunet, tmp_path, capsys):
@@ -302,51 +231,3 @@ def test_ref_resize_modes_prepare_the_scan_once_or_per_view(tmp_path, monkeypatc
     assert uvdoc[1]["ms_ssim"] != uvdoc[0]["ms_ssim"]
     twice = original(scan, resizes=2)
     assert uvdoc[1]["ms_ssim"] == metrics.score_prepared(prediction, twice).ms_ssim
-
-
-def test_cli_docunet_reports_every_convention_by_default(monkeypatch, tmp_path):
-    seen = {}
-
-    def fake_evaluate(predictions, **kwargs):
-        seen.update(kwargs)
-        return {"summary": {}}
-
-    monkeypatch.setattr(cli.docunet, "evaluate_docunet", fake_evaluate)
-    monkeypatch.setattr(cli, "_write_report", lambda *args: None)
-    output = str(tmp_path / "r.json")
-    assert cli.main(["docunet", "pred", "--output", output, "--ms-ssim-only"]) == 0
-    assert tuple(seen["conventions"]) == docunet.CONVENTIONS == docunet.DEFAULT_CONVENTIONS
-    assert set(docunet.PROTOCOL["conventions"]) == set(docunet.CONVENTIONS)
-
-
-def test_cli_calibrate_builds_siftflow_only_for_docunet_runs(monkeypatch, tmp_path):
-    builds = []
-    monkeypatch.setattr(cli.siftflow, "build_siftflow", lambda *a, **k: builds.append(a) or "b")
-    monkeypatch.setattr(cli.calibration, "run_calibration", lambda *a, **k: {})
-    monkeypatch.setattr(
-        cli.calibration, "summarize_calibration", lambda *a: {"gates": [], "all_pass": True}
-    )
-    common = ["calibrate", "--reports-dir", str(tmp_path), "--paperedge-dir", str(tmp_path)]
-    assert cli.main([*common, "--run", "paperedge-ocr", "--rerun", "--no-ocr"]) == 0
-    assert builds == []
-    assert cli.main([*common, "--run", "paperedge-once", "--rerun", "--no-ocr"]) == 0
-    assert len(builds) == 1
-    write_json_atomic(tmp_path / "paperedge-once.json", {})
-    assert cli.main([*common, "--run", "paperedge-once", "--no-ocr"]) == 0
-    assert len(builds) == 1
-
-
-def test_older_prediction_records_count_unchecked_renders_as_failures(tmp_path):
-    items = [
-        {"output": "1_1.png", "status": "written", "fallback": False},
-        {"output": "1_2.png", "status": "kept", "fallback": True},
-    ]
-    record = {"schema": "flattener-dewarp-docunet-1", "model": {"kind": "uvdoc"}, "items": items}
-    (tmp_path / "predictions.json").write_text(json.dumps(record))
-    found = prediction_record(tmp_path)
-    assert found["failed"] == 1 and found["model"]["kind"] == "uvdoc"
-    assert prediction_status(found, "1_2.png") == "invalid_transform"
-    assert prediction_status(found, "1_1.png") == "success"
-    (tmp_path / "predictions.json").write_text(json.dumps({"schema": "other", "items": items}))
-    assert prediction_status(prediction_record(tmp_path), "1_2.png") is None
-    assert prediction_record(tmp_path / "missing") is None

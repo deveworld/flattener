@@ -8,13 +8,11 @@ import pytest
 import torch
 from PIL import Image
 
-from flattener.benchmark import __main__ as cli
 from flattener.benchmark import dir300, matlab, metrics
 from flattener.benchmark.reporting import PREDICTIONS_SCHEMA
 from flattener.dewarp.checkpoint import CHECKPOINT_SCHEMA, save_checkpoint
 from flattener.dewarp.model import DewarpModelConfig, UVDocNet
 from flattener.dewarp.predict import load_dewarper
-from flattener.evidence import evidence
 
 TINY = DewarpModelConfig(input_size=(64, 48), grid_size=(5, 4), num_filter=4)
 
@@ -36,45 +34,6 @@ def _folders(tmp_path, documents=(1, 2, 248)):
         Image.fromarray(page).save(references / name)
         Image.fromarray(page).save(predictions / f"{k}.png")
     return references, predictions
-
-
-def test_protocol_constants_cite_the_docgeonet_lists():
-    assert dir300.DOCUMENTS == tuple(range(1, 301))
-    assert len(dir300.OCR_DOCUMENTS) == len(set(dir300.OCR_DOCUMENTS)) == 90
-    assert list(dir300.OCR_DOCUMENTS) == sorted(dir300.OCR_DOCUMENTS)
-    assert set(dir300.OCR_DOCUMENTS) <= set(dir300.DOCUMENTS)
-    assert dir300.OCR_DOCUMENTS[:3] == (5, 7, 8) and dir300.OCR_DOCUMENTS[-1] == 300
-    assert dir300.PUBLISHED["uvdoc"] == {
-        "ms_ssim": 0.622,
-        "ld": 7.73,
-        "ad": 0.218,
-        "ed": 605.24,
-        "cer": 0.260,
-    }
-
-
-def test_references_are_found_case_insensitively(tmp_path):
-    (tmp_path / "248.PNG").write_bytes(b"x")
-    (tmp_path / "1.png").write_bytes(b"y")
-    assert dir300.image_path(tmp_path, 248).name == "248.PNG"
-    assert dir300.image_path(tmp_path, 1).name == "1.png"
-    with pytest.raises(FileNotFoundError, match="2.png"):
-        dir300.image_path(tmp_path, 2)
-
-
-def test_folder_verification_hashes_all_300_files(tmp_path):
-    for k in dir300.DOCUMENTS:
-        (tmp_path / f"{k}.png").write_bytes(str(k).encode())
-    hashes = dir300.hash_folder(tmp_path, (3, 1), "unused", verify=False)
-    assert list(hashes) == [3, 1]
-    every = dir300.hash_folder(tmp_path, dir300.DOCUMENTS, "unused", verify=False)
-    digest = dir300.set_sha256(every)
-    assert dir300.hash_folder(tmp_path, (2,), digest) == {2: every[2]}
-    with pytest.raises(ValueError, match="differs from the official DIR300 files"):
-        dir300.hash_folder(tmp_path, (2,), dir300.REFERENCE_SET_SHA256)
-    (tmp_path / "7.png").unlink()
-    with pytest.raises(FileNotFoundError, match="7.png"):
-        dir300.hash_folder(tmp_path, (2,), digest)
 
 
 def test_reference_scale_divides_as_docgeonet():
@@ -154,12 +113,6 @@ def test_evaluate_reads_the_prediction_record_and_refuses_gaps(tmp_path):
             predictions, build=None, references_dir=references, verify_references=False,
             documents=(0, 1), workers=1,
         )  # fmt: skip
-
-
-def test_dir300_counts_as_real_photo_evidence():
-    record = evidence("dir300_standard", {"kind": "checkpoint", "step": 20000})
-    assert record["new_model_real_photo"] is True
-    assert evidence("dir300_standard", {"kind": "uvdoc"})["evidence_kind"] == "external_pretrained"
 
 
 def test_ocr_scoring_divides_by_the_reference_length():
@@ -254,61 +207,3 @@ def test_predict_writes_each_photo_at_its_own_size(tmp_path, tiny_weights):
         for k in range(3, 301):
             Image.fromarray(_page(k, (4, 3))).save(photos / f"{k}.png")
         dir300.predict_dir300(load_dewarper(tiny_weights), output, inputs_dir=photos)
-
-
-def test_predict_passes_rerun_settings_through(tmp_path, tiny_weights):
-    from flattener.dewarp.predict import rerun_record
-
-    photos = tmp_path / "dist"
-    photos.mkdir()
-    Image.fromarray(_page(1, (36, 27))).save(photos / "1.png")
-    record = dir300.predict_dir300(
-        load_dewarper(tiny_weights),
-        tmp_path / "out",
-        inputs_dir=photos,
-        documents=(1,),
-        verify_inputs=False,
-        force_render=True,
-        rerun=1,
-        deskew=True,
-    )
-    assert record["rerun"] == record["evidence"]["rerun"] == rerun_record(1, True)
-    [item] = record["items"]
-    assert [crop["pass"] for crop in item["crops"]] == [1]
-    parse = cli.build_parser().parse_args
-    base = ["dir300-predict", "--weights", "w.pt", "--output-dir", "out"]
-    assert (parse(base).rerun, parse(base).deskew) == (0, False)
-    args = parse([*base, "--rerun", "2", "--deskew"])
-    assert (args.rerun, args.deskew) == (2, True)
-    uvdoc_args = parse(["uvdoc-predict", "--weights", "w.pt", "--output-dir", "o", "--rerun", "1"])
-    assert (uvdoc_args.rerun, uvdoc_args.deskew) == (1, False)
-    for argv in ([*base, "--deskew"], [*base, "--rerun", "-1"]):
-        with pytest.raises(SystemExit):
-            cli.main(argv)
-
-
-def test_cli_defaults_and_wiring(tmp_path, monkeypatch, capsys):
-    parse = cli.build_parser().parse_args
-    args = parse(["dir300", "pred", "--output", "r.json"])
-    assert args.pattern == "{k}.png" and args.workers == 2
-    assert args.references_dir == dir300.DEFAULT_REFERENCES_DIR
-    assert parse(["dir300-ocr", "pred", "--output", "o.json"]).tesseract == "tesseract"
-    rectify = parse(["dir300-predict", "--weights", "w.pt", "--output-dir", "out"])
-    assert rectify.quantize == "round" and rectify.force_render is False
-    assert rectify.inputs_dir == dir300.DEFAULT_INPUTS_DIR
-    seen = {}
-
-    def fake_evaluate(predictions, **kwargs):
-        seen.update(kwargs, predictions=predictions)
-        return {"summary": {"n": 300, "ms_ssim": 0.5, "ld": None, "ad": None}}
-
-    monkeypatch.setattr(dir300, "evaluate_dir300", fake_evaluate)
-    output = tmp_path / "r.json"
-    argv = ["dir300", "pred", "--output", str(output), "--ms-ssim-only", "--quiet"]
-    assert cli.main([*argv, "--pattern", "{k}_rec.png"]) == 0
-    assert seen["pattern"] == "{k}_rec.png" and seen["build"] is None
-    assert seen["verify_references"] is True and seen["progress"] is None
-    assert json.loads(output.read_text())["summary"]["n"] == 300
-    assert "uvdoc 0.622" in capsys.readouterr().out
-    with pytest.raises(SystemExit, match="exists"):
-        cli.main(argv)

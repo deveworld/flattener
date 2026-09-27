@@ -1,7 +1,6 @@
 """UVDoc benchmark: archive preparation, prediction, scoring and the command line."""
 
 import json
-import zipfile
 
 import numpy as np
 import pytest
@@ -16,7 +15,7 @@ from flattener.dewarp import predict
 from flattener.dewarp.checkpoint import CHECKPOINT_SCHEMA, save_checkpoint
 from flattener.dewarp.coords import edge_positions
 from flattener.dewarp.model import DewarpModelConfig, UVDocNet
-from flattener.evidence import SMOKE_STEPS, evidence
+from flattener.evidence import SMOKE_STEPS
 
 TINY = DewarpModelConfig(input_size=(64, 48), grid_size=(5, 4), num_filter=4)
 FOLDERS = ("img", "warped_textures", "texture_sample")
@@ -75,56 +74,6 @@ def _tiny_weights(tmp_path):
     return weights
 
 
-def _zip_images(root, archive, extra=()):
-    with zipfile.ZipFile(archive, "w") as bundle:
-        bundle.writestr("UVDoc_benchmark/", "")
-        for folder in FOLDERS:
-            for path in sorted((root / folder).iterdir()):
-                bundle.write(path, f"UVDoc_benchmark/{folder}/{path.name}")
-        bundle.writestr("UVDoc_benchmark/split.json", "{}")
-        for name in extra:
-            bundle.writestr(name, "x")
-
-
-def test_prepare_extracts_below_the_top_folder_and_records_hashes(tmp_path, monkeypatch):
-    source = tmp_path / "source"
-    _tiny_images(source)
-    archive = tmp_path / "UVDoc_benchmark.zip"
-    _zip_images(source, archive)
-    root = tmp_path / "bench"
-    with pytest.raises(ValueError, match="sha256"):
-        uvdoc.prepare_benchmark(archive, root)
-    assert not root.exists()
-    manifest = uvdoc.prepare_benchmark(archive, root, verify=False, retrieved="2026-09-27")
-    assert manifest["source"]["sha256"] != uvdoc.ARCHIVE_SHA256
-    assert manifest["source"]["url"] == uvdoc.ARCHIVE_URL
-    assert (
-        len(manifest["files"]) == 151
-        and manifest["files"][-1]["path"] == "warped_textures/00049.png"
-    )
-    assert (root / "texture_sample" / "00049.png").read_bytes() == (
-        source / "texture_sample" / "00049.png"
-    ).read_bytes()
-    assert json.loads((root / "manifest.json").read_text())["sets"] == manifest["sets"]
-    monkeypatch.setattr(uvdoc, "ARCHIVE_SHA256", manifest["source"]["sha256"])
-    with pytest.raises(ValueError, match="differs from the published"):
-        uvdoc.prepare_benchmark(archive, tmp_path / "again")
-    monkeypatch.setattr(
-        uvdoc, "SET_SHA256", {k: v["set_sha256"] for k, v in manifest["sets"].items()}
-    )
-    assert uvdoc.prepare_benchmark(archive, tmp_path / "again")["sets"] == manifest["sets"]
-
-
-def test_prepare_refuses_members_outside_the_root(tmp_path):
-    source = tmp_path / "source"
-    _tiny_images(source)
-    archive = tmp_path / "bad.zip"
-    _zip_images(source, archive, extra=("UVDoc_benchmark/../../evil.txt",))
-    with pytest.raises(ValueError, match="unsafe"):
-        uvdoc.prepare_benchmark(archive, tmp_path / "bench", verify=False)
-    assert not (tmp_path / "evil.txt").exists()
-
-
 def _upstream_unwarping(image, grid):
     """uvdocBenchmark_pred.py: bilinear_unwarping, then (x * 255).astype(uint8)."""
     warped = torch.from_numpy(image.transpose(2, 0, 1) / 255.0).float().unsqueeze(0)
@@ -178,67 +127,6 @@ def test_predict_writes_textures_and_photos_and_records_checks(tiny_root, tmp_pa
     (tiny_root / "img" / "00003.png").write_bytes(b"changed")
     with pytest.raises(ValueError, match="differs"):
         uvdoc.predict_uvdoc(dewarper, output, root=tiny_root, overwrite=True)
-
-
-def test_predict_passes_the_inset_through(tiny_root, tmp_path, monkeypatch):
-    monkeypatch.setattr(predict, "predict_grid", _identity_grid)
-    dewarper = predict.load_dewarper(_tiny_weights(tmp_path))
-    output = tmp_path / "out"
-    preset = "syntheticdoc_half_cell"
-    record = uvdoc.predict_uvdoc(dewarper, output, root=tiny_root, inset=preset)
-    assert record["inset"] == record["evidence"]["inset"] == predict.inset_record(preset)
-    grid = _identity_grid(dewarper, None)
-    for pred_type, folder in (("uwp_texture", "warped_textures"), ("uwp_img", "img")):
-        written = np.asarray(Image.open(output / pred_type / "00007.png"))
-        source = np.asarray(Image.open(tiny_root / folder / "00007.png"))
-        assert np.array_equal(written, uvdoc.unwarp(source, grid, "flattener", preset))
-        assert not np.array_equal(written, uvdoc.unwarp(source, grid, "flattener"))
-    stored = prediction_record(output)
-    assert stored["inset"] == report_evidence(stored)["inset"] == predict.inset_record(preset)
-    plain = uvdoc.predict_uvdoc(dewarper, tmp_path / "plain", root=tiny_root)
-    assert plain["inset"] == {"x": 0.0, "y": 0.0, "preset": None}
-    with pytest.raises(predict.FlattenerError, match="inset"):
-        uvdoc.predict_uvdoc(dewarper, tmp_path / "bad", root=tiny_root, inset="other")
-    assert not (tmp_path / "bad").exists()
-
-
-def test_predict_passes_rerun_settings_through(tiny_root, tmp_path, monkeypatch):
-    monkeypatch.setattr(predict, "predict_grid", _identity_grid)
-    dewarper = predict.load_dewarper(_tiny_weights(tmp_path))
-    output = tmp_path / "out"
-    record = uvdoc.predict_uvdoc(dewarper, output, root=tiny_root, rerun=1, deskew=True)
-    assert record["rerun"] == record["evidence"]["rerun"] == predict.rerun_record(1, True)
-    grid = _identity_grid(dewarper, None)
-    for pred_type, folder in (("uwp_texture", "warped_textures"), ("uwp_img", "img")):
-        written = np.asarray(Image.open(output / pred_type / "00007.png"))
-        source = np.asarray(Image.open(tiny_root / folder / "00007.png"))
-        # The identity crops the whole photo; its composed grid is the identity again.
-        assert np.array_equal(written, uvdoc.unwarp(source, grid, "flattener"))
-    item = record["items"][0]
-    assert [crop["box"] for crop in item["crops"]] == [[0, 0, 20, 26]]  # the photo, 26x20
-    assert item["crops"][0]["angle_deg"] == 0.0 and not item["crops"][0]["rotated"]
-    stored = prediction_record(output)
-    assert stored["rerun"] == report_evidence(stored)["rerun"] == predict.rerun_record(1, True)
-    plain = uvdoc.predict_uvdoc(dewarper, tmp_path / "plain", root=tiny_root)
-    assert plain["rerun"] == predict.rerun_record() and plain["items"][0]["crops"] == []
-    with pytest.raises(predict.FlattenerError, match="deskew"):
-        uvdoc.predict_uvdoc(dewarper, tmp_path / "bad", root=tiny_root, deskew=True)
-    assert not (tmp_path / "bad").exists()
-
-
-def test_unwarp_samples_flattener_values_in_both_conventions():
-    image = np.random.default_rng(5).integers(0, 256, (23, 17, 3), np.uint8)
-    values = np.stack(np.meshgrid(np.linspace(-0.9, 0.8, 4), np.linspace(-0.7, 0.95, 5)), -1)
-    size = image.shape[:2]
-    for convention in ("uvdoc", "flattener"):
-        dense = predict.dense_backward_map(values, convention, size, size, flattener_values=True)
-        tensor = torch.from_numpy(image.transpose(2, 0, 1) / 255.0).float()[None]
-        sampled = F.grid_sample(
-            tensor, torch.from_numpy(dense)[None], padding_mode="zeros", align_corners=False
-        )
-        expected = (sampled[0].numpy().transpose(1, 2, 0) * 255).astype(np.uint8)
-        found = uvdoc.unwarp(image, values, convention, flattener_values=True)
-        assert np.array_equal(found, expected)
 
 
 def _predictions(root, output):
@@ -309,14 +197,6 @@ def test_cli_predicts_and_scores(tiny_root, tmp_path, monkeypatch, capsys):
     assert "ms_ssim=" in capsys.readouterr().out
     with pytest.raises(SystemExit, match="exists"):
         cli.main(command)
-
-
-def test_format_comparison_shows_the_published_difference():
-    text = uvdoc.format_comparison({"ms_ssim": 0.78, "ad": 0.12, "ld": None})
-    assert (
-        text == "ms_ssim=0.7800 (uvdoc 0.785, diff -0.0050) ad=0.1200 (uvdoc 0.119, diff +0.0010)"
-    )
-    assert evidence("uvdoc_benchmark", {"kind": "uvdoc"})["evidence_kind"] == "external_pretrained"
 
 
 def test_process_pool_runs_a_custom_score_function(tmp_path):

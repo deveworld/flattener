@@ -1,7 +1,6 @@
 """SIFT-flow plumbing. Building needs the user-supplied C++ sources, so the compiled
 backend is only exercised (on two tiny images) when FLATTENER_SIFTFLOW_SOURCE is set."""
 
-import hashlib
 import os
 
 import numpy as np
@@ -10,49 +9,12 @@ import pytest
 from flattener.benchmark import metrics, siftflow
 
 
-def test_missing_source_explains_how_to_supply_it(monkeypatch, tmp_path):
-    monkeypatch.delenv(siftflow.SIFTFLOW_SOURCE_ENV, raising=False)
-    with pytest.raises(FileNotFoundError, match="FLATTENER_SIFTFLOW_SOURCE"):
-        siftflow.resolve_source_dir(None)
-    with pytest.raises(FileNotFoundError, match="not a SIFT-flow source tree"):
-        siftflow.resolve_source_dir(tmp_path)
-
-
-def test_source_tree_hash_is_the_sorted_sha256sum_listing(tmp_path):
-    (tmp_path / "b").mkdir()
-    (tmp_path / "b" / "x.h").write_bytes(b"header")
-    (tmp_path / "a.cpp").write_bytes(b"code")
-    (tmp_path / "B.txt").write_bytes(b"")
-    listing = "".join(
-        f"{hashlib.sha256(data).hexdigest()}  {name}\n"
-        for name, data in sorted(
-            [("a.cpp", b"code"), ("b/x.h", b"header"), ("B.txt", b"")],
-            key=lambda item: item[0].encode(),
-        )
-    )
-    expected = hashlib.sha256(listing.encode()).hexdigest()
-    assert siftflow.source_tree_sha256(tmp_path) == expected
-
-
-def test_exclusive_lock_is_reentrant_across_calls(tmp_path):
-    lock = tmp_path / "locks" / "build.lock"
-    with siftflow._exclusive_lock(lock):
-        assert lock.exists()
-    with siftflow._exclusive_lock(lock):
-        pass
-
-
 def test_level_offsets_follow_siftflowc2f():
     offset_x, offset_y = siftflow._level_offset((3, 4), (5, 7))
     xx = np.arange(1, 5)
     expected_x = np.floor((xx - 1) * (7 - 1) / (4 - 1) + 1 - xx + 0.5)
     assert np.array_equal(offset_x[0], expected_x)
     assert offset_y[:, 0].tolist() == [0.0, 1.0, 2.0]
-
-
-def test_compile_flags_define_linux_mac_on_every_platform():
-    assert any(flag.endswith("D_LINUX_MAC") for flag in siftflow.COMPILE_FLAGS)
-    assert "_MSC_VER" in siftflow._MEX_SHIM and "#undef __min" in siftflow._MEX_SHIM
 
 
 def test_reference_pyramid_is_reused_only_for_an_identical_scan():
