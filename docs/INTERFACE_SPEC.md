@@ -87,3 +87,9 @@ CPU `float32`로 RGB를 [0,1]로 바꾸고 `grid_sample(mode="bilinear", padding
 `flattener.regions.context`의 `load_context_segmenter(checkpoint, *, device="cpu")`는 `region-context-unet-2.0` 체크포인트를 읽습니다. 파일 옆에 SHA-256 16진수 한 줄을 담은 `<파일>.sha256`이 있어야 합니다. 스키마는 `independent-locator-pilot-1.0`(위치 추정 연구의 `best.pt`)과 `region-context-1`(가중치, 설정, 전처리 버전, 출처 기록)입니다. 전처리는 `regions.segmentation.preprocess_image`이고, 읽은 모델은 `predict_probability`, `model_id`, `model_sha256`을 가지므로 `segmenter=` 자리에 넣을 수 있습니다.
 
 `gate_page_region(probability, source_size, *, config=None)`과 `gate_page(image, segmenter, *, config=None)`는 `detect_region`을 면적 상한 1.0으로 돌려 페이지 상자를 정합니다. 마스크가 화면의 90%를 넘거나 테두리 세 면 이상에 닿으면 `fills_frame=True`, `reasons=("page_fills_frame",)`이고 상자는 이미지 전체입니다. 이 경우는 성공입니다. `page_not_found`, `page_area_rejected`, `ambiguous_page_region`, `uncertain_page_region`은 `model_error` 상태의 `FlattenerError`로 알립니다. `confident`는 dominance ≥0.95이고 평균 확률 ≥0.85일 때 참입니다.
+
+## 스캐너
+
+`flattener.scan.pipeline.Scanner`의 결과 `ScanResult`는 기존 `Status` 값만 씁니다. 스캐너의 판정은 `reason_code` 문자열로 나타내고, 코드마다 상태, 심각도(`info`, `warning`, `failure`), 한/영 안내가 `scan.records.REASONS`에 있습니다. `outcome`은 `rectified`, `rectified_with_warnings`, `perspective`, `original_returned`, `failed`입니다. 대체 결과(원근 보정, 원본 반환)는 실패 상태와 사유를 유지하고 `used_fallback=True`입니다. 렌더러의 검사 사유(`fold_or_degenerate` 등)는 그대로 기록합니다.
+
+스캔 계획 `ScanPlan`의 격자는 원본 기준 flattener 값이고 노드는 가장자리 정렬, 페이지가 똑바로 선 순서입니다. 원근 계획의 homography는 출력 위치 `(u, v, 1)`(u, v ∈ [-1, 1])를 원본 flattener 값의 동차 좌표로 보냅니다. 두 경우 모두 조밀 맵은 원본을 한 번 샘플링합니다. `plan_sha256`은 계획의 정규 JSON sha256이고, 같은 값의 미리보기와 저장 결과는 같은 기하를 씁니다.

@@ -26,6 +26,7 @@ SECTION_1_5 = {
     "unverified_region",
     "source_downscaled",
     "low_resolution",
+    "rerun_discarded",  # L1: a candidate keeps pass A when only its crop passes fail
 }
 KOREAN = {  # design section 1.5, verbatim
     "page_not_found": "페이지 전체가 화면에 들어오게 찍어 주세요",
@@ -91,7 +92,13 @@ def test_registry_covers_section_1_5():
             assert spec.status == Status.SUCCESS
     for code, message in KOREAN.items():
         assert rec.REASONS[code].message_ko == message
-    silent = {"page_fills_frame", "neighbor_page_partial", "source_downscaled", "low_resolution"}
+    silent = {
+        "page_fills_frame",
+        "neighbor_page_partial",
+        "source_downscaled",
+        "low_resolution",
+        "rerun_discarded",
+    }
     assert {code for code, spec in rec.REASONS.items() if spec.message_ko is None} >= silent
 
 

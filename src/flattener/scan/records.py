@@ -221,6 +221,12 @@ REASONS: dict[str, ReasonSpec] = {
             _GEOMETRY_EN,
         ),
         ReasonSpec(
+            "rerun_discarded",
+            Status.SUCCESS,
+            Severity.INFO,
+            "The crop passes failed their checks; the first pass of the candidate is used (L1).",
+        ),
+        ReasonSpec(
             "curvature_not_corrected",
             Status.INVALID_TRANSFORM,
             Severity.WARNING,

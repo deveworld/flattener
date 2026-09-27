@@ -178,6 +178,36 @@ python tools/locator_v0.py exposure    # SmartDoc 노출 목록
 - `src/flattener/regions/locator_v0_smartdoc.json`은 v0가 학습에 쓴 SmartDoc 문서 22종(`exclude_from_evaluation`), 체크포인트 선택에 쓴 4종(`selection_exposed`), 쓰지 않은 4종(`unexposed`)을 적은 목록입니다. v0를 SmartDoc으로 평가할 때는 앞의 22종을 배경과 관계없이 모두 뺍니다. `flattener.regions.context.smartdoc_exposure()`로 읽습니다.
 - 페이지가 없는 사진으로는 평가한 적이 없습니다.
 
+## 스캐너 (flattener.scan)
+
+사진 한 장에서 페이지 하나를 찾아 펴고 저장합니다.
+
+```bash
+python -m flattener.scan IMG... --out DIR --bundle bundle.json
+python -m flattener.scan IMG... --out DIR --weights R4.pt --gate page-gate-v0.pt
+```
+
+```python
+from flattener.scan.pipeline import Scanner, ScanOptions, ScanOverrides
+
+scanner = Scanner.load("bundle.json")
+result = scanner.scan("photo.jpg")  # plan + render
+source = scanner.read("photo.jpg")
+planned = scanner.plan(source, ScanOptions(preview=1024), ScanOverrides(quarter=1))
+plan, preview = planned
+result = scanner.render(source, planned)
+```
+
+- 번들(`flattener-scan-bundle-1`)에는 `dewarp`와, 있으면 `gate`, `orient` 가중치 경로를 적습니다. 가중치는 `scan.shippable` 판정을 통과해야 불러옵니다. 통과하지 못한 가중치는 `--research`(`research=True`)일 때만 불러오고, 결과 기록에 `research: true`가 남습니다. backend는 지금 `torch`만 있습니다.
+- 단계는 read(EXIF 1회, 16MP 초과 JPEG는 draft decode) → detect(페이지 게이트, 필요할 때만 사진 전체 pass 0과 합의 규칙) → orient(OrientNet) → infer(pass A와 크롭 pass 1회, deskew) → verify(평면 미리보기 방향 확인, coverage ≥ 0.95, 패스 사이 노드 이동 ≤ 페이지 대각선의 4%) → plan(출력 크기 auto) → render(`flattener.render` 1회) → save입니다.
+- OrientNet 가중치가 없으면 사진 방향(EXIF 적용)을 그대로 쓰고 `orientation_uncertain` 경고를 남깁니다. `--quarter`로 방향을 지정할 수 있습니다.
+- 후보는 C1 기본, C2 deskew 없음, C3 다른 위치 추정기, C4 지금의 `rectify`(사진 전체 1패스) 순서로 시도하고 먼저 통과한 것을 씁니다. 크롭 pass만 실패하면 pass A를 씁니다(`rerun_discarded`). 모두 실패하면 원본과 사유, 안내(한/영)를 돌려줍니다. `--fallback perspective`이고 페이지 꼭짓점이 확실하면 원근만 보정합니다(`curvature_not_corrected`). 실패 상태와 사유 코드는 기록에 그대로 남습니다.
+- 수동 수정은 `--region L,T,R,B`, `--quad x1,y1,…,x4,y4`(읽기 순서), `--quarter 0..3`, `--no-dewarp`, `--long-side N`, `--output-size H,W`, `--aspect`입니다. 자동 경로와 같은 단계를 거치고 기록에 `manual`로 남습니다. 모델 출력은 입력 sha256별로 캐시하므로 바뀐 단계 뒤만 다시 계산합니다.
+- 출력은 JPEG q95 4:4:4(`--format png`도 됨)와 `<stem>.scan.json`입니다. `--timing F.jsonl`은 사진마다 단계별 시간을 한 줄씩 쓰고, `--debug`는 페이지 윤곽을 그린 사진을 씁니다.
+- 종료 코드는 모두 스캔되면 0, 대체 결과나 실패가 있으면 1, 사용 오류면 2입니다. `--no-dewarp`로 요청한 원근 보정 결과는 스캔된 것으로 셉니다.
+- 판정 임계값(`scan.locate.THRESHOLDS`, `scan.pipeline.VERIFY`)은 설계의 시작값이고 스캔 기록에 남습니다. SmartDoc train 분할과 합성 val로 정하는 일은 남아 있습니다.
+- `rectify_batch(..., rectifier=scanner.rectifier(options), pipeline=scanner.pipeline_record(options))`는 벤치마크 예측 폴더를 스캐너로 만듭니다. `predictions.json`에 pipeline이 남고, 다른 pipeline의 예측이 있는 폴더는 거부합니다.
+
 ## 라이선스
 
 코드는 [Apache-2.0](LICENSE)입니다. UVDoc에서 가져온 `flattener.dewarp.model`은 MIT, 함께 배포하는 글꼴은 OFL-1.1입니다. 외부 코드와 데이터의 출처·이용 조건은 [THIRD_PARTY.md](THIRD_PARTY.md)에 있습니다. `benchmarks/benchmark_renderer.py`는 렌더러 속도 스모크 테스트입니다.
