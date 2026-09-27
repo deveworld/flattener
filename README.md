@@ -83,10 +83,10 @@ python -m flattener.benchmark calibrate --reports-dir reports/calibration \
 - LD·AD에는 SIFT flow C++ 소스(Ce Liu)가 필요합니다. DocUNet `eval.zip`이나 UVDoc `eval_code`의 `SIFTflow` 폴더를 받아 `--siftflow-source` 또는 `FLATTENER_SIFTFLOW_SOURCE`로 지정합니다. 처음 실행할 때 C++ 컴파일러와 ninja로 빌드합니다.
 - `--convention`은 `130_raw`(PaperEdge, DocTr 계열), `128_excl64`(UVDoc), `130_rot64` 중에서 고르고, 기본값은 셋 모두입니다. 논문 수치와 비교할 때는 규약을 맞춥니다. `--ref-resize uvdoc_view2_double`은 UVDoc 스크립트가 view 2에서 스캔을 두 번 리사이즈하는 동작을 재현합니다.
 - AD는 MATLAB `lsqr` 기본값을 따르는 `lsqr_4iter`로 보고하고, 정확한 최소제곱 값 `exact_lstsq`도 함께 저장합니다.
-- OCR 보고서의 `comparable`은 G4를 통과한 Tesseract 빌드로 읽고 스캔 해시가 맞을 때만 `true`입니다. 빌드는 버전 문자열, Leptonica 버전, 실행 파일 SHA-256, `eng.traineddata` SHA-256으로 구분하며 목록은 `flattener.benchmark.ocr.CALIBRATED_TESSERACT_BUILDS`에 있습니다. 지금은 UB-Mannheim Windows 빌드 `v5.0.1.20220118`(Leptonica 1.78.0, tessdata_fast `eng`) 하나입니다.
-- Linux에서는 이 설치 파일(`tesseract-ocr-w64-setup-v5.0.1.20220118.exe`)을 `7z x`로 풀고 Wine으로 실행합니다: `--tesseract TREE/tesseract.exe --launcher wine`. `WINEPREFIX`와 `WINEDEBUG=-all`은 환경 변수로 줍니다. Wine 11.0(AVX2 CPU)에서 G4의 OCR 문자열 114개가 Windows(AVX-512 CPU) 실행과 모두 같았습니다.
-- conda-forge `tesseract=5.0.1`(Leptonica 1.82.0)은 G4를 통과하지 못해 비교 가능한 수치를 내지 않습니다(S1 ED 384.47 / CER 0.1593, S2 809.06 / 0.2079, 목표보다 2.4–4.0% 높음). 이 빌드는 `--tessdata-dir`로 `TESSDATA_PREFIX`를 지정해야 돌아갑니다.
-- G1–G4 보정 결과는 `outputs/benchmarks/docunet/calibration.json`에 있습니다.
+- OCR 보고서의 `comparable`은 OCR 점수 재현 검사를 통과한 Tesseract 빌드로 읽고 스캔 해시가 맞을 때만 `true`입니다. 빌드는 버전 문자열, Leptonica 버전, 실행 파일 SHA-256, `eng.traineddata` SHA-256으로 구분하며 목록은 `flattener.benchmark.ocr.CALIBRATED_TESSERACT_BUILDS`에 있습니다. 지금은 UB-Mannheim Windows 빌드 `v5.0.1.20220118`(Leptonica 1.78.0, tessdata_fast `eng`) 하나입니다.
+- Linux에서는 이 설치 파일(`tesseract-ocr-w64-setup-v5.0.1.20220118.exe`)을 `7z x`로 풀고 Wine으로 실행합니다: `--tesseract TREE/tesseract.exe --launcher wine`. `WINEPREFIX`와 `WINEDEBUG=-all`은 환경 변수로 줍니다. Wine 11.0(AVX2 CPU)에서 OCR 점수 재현 검사에 쓰는 OCR 문자열 114개가 Windows(AVX-512 CPU) 실행과 모두 같았습니다.
+- conda-forge `tesseract=5.0.1`(Leptonica 1.82.0)은 OCR 점수 재현 검사를 통과하지 못해 비교 가능한 수치를 내지 않습니다(DocTr 60장 세트 ED 384.47 / CER 0.1593, DewarpNet 50장 세트 809.06 / 0.2079, 목표보다 2.4–4.0% 높음). 이 빌드는 `--tessdata-dir`로 `TESSDATA_PREFIX`를 지정해야 돌아갑니다.
+- 평가기 보정 검사는 네 가지입니다. G1은 PaperEdge 결과 이미지로 PaperEdge가 공개한 MATLAB 값을 재현하는지, G2는 같은 이미지로 UVDoc 논문 표의 PaperEdge 행을, G3은 UVDoc 공개 결과로 같은 표의 UVDoc 행을, G4는 Tesseract 5.0.1로 DocScanner OCR 표를 재현하는지 봅니다. 결과는 `outputs/benchmarks/docunet/calibration.json`에 G1–G4 이름으로 남습니다.
 
 실사진 스트레스 평가는 DocUNet 사진을 바꿔 가며 같은 평가기로 채점합니다.
 
@@ -139,7 +139,7 @@ python -m flattener.benchmark dir300-ocr OUT --output reports/dir300-ocr.json
 - `external_pretrained`: UVDoc 공개 가중치, 논문 저자가 공개한 결과처럼 밖에서 학습한 모델의 결과입니다. 위 예제의 UVDoc 가중치와 기준선이 여기에 들어가며, 비교 기준으로 씁니다.
 - `smoke_training`: 1만 스텝 미만으로 학습한 체크포인트의 결과입니다. 코드가 도는지 확인하는 용도입니다.
 - `docunet_standard`, `docunet_stress`, `uvdoc_benchmark`, `dir300_standard`: 예측 폴더에 `predictions.json`이 없어 모델 출처를 모르거나, 예전 좌표 모델(`own_previous_model`)을 채점한 결과입니다.
-- `evaluator_calibration`은 평가기 보정(G1–G4) 보고서, `predictions`는 점수 없이 예측만 담은 기록, `training_loss`는 학습 로그와 `status.json`의 학습 손실입니다. `calibration.json`은 목록에 올린 보고서마다 `evidence`를 붙이고, 그전에 만든 보고서 파일은 해시가 기록돼 있어 그대로 둡니다.
+- `evaluator_calibration`은 평가기 보정 검사 보고서, `predictions`는 점수 없이 예측만 담은 기록, `training_loss`는 학습 로그와 `status.json`의 학습 손실입니다. `calibration.json`은 목록에 올린 보고서마다 `evidence`를 붙이고, 그전에 만든 보고서 파일은 해시가 기록돼 있어 그대로 둡니다.
 
 `measurement`(무엇을 쟀는지), `model_provenance`(`own_checkpoint`, `own_previous_model`, `external_pretrained`), `checkpoint_step`, `initialization`도 함께 기록합니다. `initialization`은 직접 학습한 체크포인트의 출발점(`scratch` 또는 UVDoc 가중치인 `external_pretrained`)입니다. UVDoc 가중치에서 시작한 미세조정도 `new_model_real_photo`로 세고, 향상 폭은 같은 변형의 UVDoc 기준선과 비교해 읽습니다.
 

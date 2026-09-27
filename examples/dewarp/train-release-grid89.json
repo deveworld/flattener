@@ -1,6 +1,6 @@
 {
   "data_spec": "data-release.json",
-  "output_dir": "${FLATTENER_RUNS}/G1",
+  "output_dir": "${FLATTENER_RUNS}/grid89-finetune",
   "track": "release",
   "model": {"input_size": [712, 488], "grid_size": [89, 61]},
   "init": "checkpoint",

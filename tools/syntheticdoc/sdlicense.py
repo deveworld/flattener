@@ -539,7 +539,7 @@ def license_report(state: State, layout: Layout) -> dict[str, Any]:
             "precedence": "nc > unknown > sa > clean (worst component wins)",
             "components": "document (per paper/book/work or whole source), background material "
             "(MatSynth license field), mesh (CC BY 4.0, always clean)",
-            "release": "clean only (owner decision D1a/D2a: SA excluded initially)",
+            "release": "clean only (owner's decision: ShareAlike samples are left out for now)",
             "research": "all classes; weights never released",
         },
         "tables": state.get("license_tables"),

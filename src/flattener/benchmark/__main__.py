@@ -342,10 +342,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     calibrate = commands.add_parser(
         "calibrate",
-        help="run gates G1-G4 against published MATLAB/OCR numbers",
+        help="run the four evaluator calibration checks against published MATLAB and OCR numbers",
         description="Write the calibration reports that are missing in --reports-dir "
-        "(PaperEdge outputs with adres.txt, UVDoc DocUnet_results, OCR) and a gate "
-        "summary. Exit status 0 only if every gate passes.",
+        "(PaperEdge outputs with adres.txt, UVDoc DocUnet_results, OCR) and a summary of "
+        "the checks. Exit status 0 only if every check passes.",
     )
     _add_common(calibrate, predictions=False)
     _add_siftflow(calibrate)
@@ -369,7 +369,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=tuple(calibration.RUNS),
         help="only these runs (repeatable); default all",
     )
-    calibrate.add_argument("--no-ocr", action="store_true", help="skip the OCR run (G4)")
+    calibrate.add_argument("--no-ocr", action="store_true", help="skip the OCR score check")
     calibrate.add_argument(
         "--rerun", action="store_true", help="recompute reports that already exist"
     )

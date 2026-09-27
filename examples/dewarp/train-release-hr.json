@@ -1,6 +1,6 @@
 {
   "data_spec": "data-release-raw.json",
-  "output_dir": "${FLATTENER_RUNS}/HR1",
+  "output_dir": "${FLATTENER_RUNS}/hires-1440-finetune",
   "track": "release",
   "model": {"input_size": [1440, 1024], "grid_size": [90, 64]},
   "init": "checkpoint",

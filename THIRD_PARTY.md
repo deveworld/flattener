@@ -27,7 +27,7 @@
 | [SyntheticDoc 공식 코드](https://github.com/tanguymagne/SyntheticDoc/tree/aabd9cf05f479781df432e3bd7e940f3e6716dbd) | MIT, © 2026 Tanguy MAGNE | 좌표 규약 확인 |
 | SyntheticDoc `original_31x45.ckpt` | 가중치 조건은 따로 확인 필요 | 로컬 연구 진단 전용 |
 | [PaddlePaddle UVDoc](https://huggingface.co/PaddlePaddle/UVDoc/tree/16c3f0ea9c2f0c6a57e24160f7eeaa7574613fa3) | Apache-2.0 | 비교 실험 |
-| PaperEdge·UVDoc 공개 결과 이미지 | 저자 배포물 | 벤치마크 보정(G1–G4) |
+| PaperEdge·UVDoc 공개 결과 이미지 | 저자 배포물 | 평가기 보정 검사 |
 
 UVDoc 가중치로 초기화한 release 가중치의 배포 여부는 위 학습 데이터 조건을 보고 소유자가 정합니다.
 

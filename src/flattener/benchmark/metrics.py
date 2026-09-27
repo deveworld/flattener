@@ -20,8 +20,8 @@ from . import matlab
 METRIC_AREA = 598_400
 AD_SOLVERS = ("exact_lstsq", "lsqr_4iter")
 # LSQR with the defaults of MATLAB ``lsqr(A, B)`` as called by PaperEdge/UVDoc
-# ``alignLD.m``: its benchmark means are closest to MATLAB (G1-G3); per-image values
-# carry solver noise (see ``lsqr_solve``).
+# ``alignLD.m``: its benchmark means are closest to MATLAB (the DocUNet calibration
+# checks); per-image values carry solver noise (see ``lsqr_solve``).
 DEFAULT_AD_SOLVER = "lsqr_4iter"
 LSQR_STOP_REASONS = ("zero_rhs", "zero_normal", "relres", "normal_equations", "maxit")
 AD_GRADIENT_THRESHOLD = 0.5
@@ -126,11 +126,11 @@ def lsqr_solve(
     iterations.
 
     Implemented from MATLAB's documentation. On PaperEdge's outputs the benchmark
-    means match MATLAB within G1-G3; single images differ by up to ~0.016 AD (45_1)
-    even where the SIFT flow matches MATLAB, and ``exact_lstsq`` is closer on most of
-    them. There 129 of 130 systems stop at ``maxit`` after four iterations, so the
-    result is a partially converged iterate: treat per-image AD as carrying solver
-    noise.
+    means match MATLAB within the DocUNet calibration checks; single images differ by
+    up to ~0.016 AD (45_1) even where the SIFT flow matches MATLAB, and ``exact_lstsq``
+    is closer on most of them. There 129 of 130 systems stop at ``maxit`` after four
+    iterations, so the result is a partially converged iterate: treat per-image AD as
+    carrying solver noise.
     """
     rows, columns = matrix.shape
     if target.shape != (rows,):

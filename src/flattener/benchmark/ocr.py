@@ -18,11 +18,12 @@ composited over **white**, the image is re-saved in its own format (PNG by defau
 to a temporary file and ``tesseract IN OUTBASE [config] txt`` is run; the UTF-8 text
 file is returned verbatim. Metric scoring (``docunet.py``) composites over black.
 
-OCR numbers depend on the Tesseract build: gate G4 reproduces the DocScanner table
-with Tesseract 5.0.1, while 5.5.3 gives 3-5 % lower edit distances. Reports are
-marked ``comparable`` only for a build in ``CALIBRATED_TESSERACT_BUILDS`` (builds that
-passed G4, identified by version banner, Leptonica version, executable SHA-256 and
-``eng.traineddata`` SHA-256) and the published DocUNet scans.
+OCR numbers depend on the Tesseract build: the OCR score check reproduces the
+DocScanner table with Tesseract 5.0.1, while 5.5.3 gives 3-5 % lower edit distances.
+Reports are marked ``comparable`` only for a build in ``CALIBRATED_TESSERACT_BUILDS``
+(builds that passed the OCR score check, identified by version banner, Leptonica
+version, executable SHA-256 and ``eng.traineddata`` SHA-256) and the published
+DocUNet scans.
 """
 
 from __future__ import annotations
@@ -76,13 +77,14 @@ SETTINGS = {
     "setting2_dewarpnet_50": DEWARPNET_SETTING_2,
 }
 PROTOCOL_CONFIG = {"doctr": "", "uvdoc": "--oem 1"}
-# The engine version gate G4 is calibrated with; other versions give different OCR numbers.
+# The engine version the OCR score check uses; other versions give different OCR numbers.
 CALIBRATED_TESSERACT_VERSION = "5.0.1"
 _CALIBRATED_VERSION_PATTERN = re.compile(r"(?:^|[^\d.])v?5\.0\.1(?:$|[^\d])")
 _LEPTONICA_PATTERN = re.compile(r"leptonica-(\d+(?:\.\d+)*)")
 _ENG_SHA256 = "7d4322bd2a7749724879683fc3912cb542f19906c83bcc1a52132556427170b2"
-# Tesseract builds that passed gate G4 with the DocTr protocol (PaperEdge outputs,
-# verified scans). ``eng.traineddata`` is tessdata_fast eng (4,113,088 bytes) in each.
+# Tesseract builds that passed the OCR score check with the DocTr protocol (PaperEdge
+# outputs, verified scans). ``eng.traineddata`` is tessdata_fast eng (4,113,088 bytes)
+# in each.
 CALIBRATED_TESSERACT_BUILDS: dict[str, dict[str, Any]] = {
     "ub-mannheim-5.0.1.20220118-win64": {
         "version_first_line": "tesseract v5.0.1.20220118",
@@ -91,14 +93,17 @@ CALIBRATED_TESSERACT_BUILDS: dict[str, dict[str, Any]] = {
         "eng_traineddata_sha256": _ENG_SHA256,
         "source": "https://digi.bib.uni-mannheim.de/tesseract/"
         "tesseract-ocr-w64-setup-v5.0.1.20220118.exe",
+        # ``g4``: this build's numbers in the OCR score check
         "g4": {
             "setting1_doctr_60": {"ed": 375.60, "cer": 0.15410},
             "setting2_dewarpnet_50": {"ed": 777.76, "cer": 0.20144},
         },
     },
 }
-# Builds that ran G4 and missed it; reports name them in ``comparability``.
-G4_FAILED_TESSERACT_BUILDS: dict[str, dict[str, Any]] = {
+# Builds that ran the OCR score check and missed it. Reports name them under
+# ``comparability.tesseract_build_failed_g4`` (G4 is that check's name in
+# calibration.json).
+FAILED_TESSERACT_BUILDS: dict[str, dict[str, Any]] = {
     "conda-forge-5.0.1-h84e3e21_0-linux64": {
         "version_first_line": "tesseract 5.0.1",
         "leptonica_version": "1.82.0",
@@ -106,6 +111,7 @@ G4_FAILED_TESSERACT_BUILDS: dict[str, dict[str, Any]] = {
         "eng_traineddata_sha256": _ENG_SHA256,
         "source": "https://conda.anaconda.org/conda-forge/linux-64/"
         "tesseract-5.0.1-h84e3e21_0.tar.bz2",
+        # ``g4``: this build's numbers in the OCR score check
         "g4": {
             "setting1_doctr_60": {"ed": 384.47, "cer": 0.15932},
             "setting2_dewarpnet_50": {"ed": 809.06, "cer": 0.20790},
@@ -309,8 +315,8 @@ def calibrated_build(
     metadata: dict[str, Any] | None,
     builds: dict[str, dict[str, Any]] = CALIBRATED_TESSERACT_BUILDS,
 ) -> str | None:
-    """Name of the build in ``builds`` (default: the G4-calibrated builds) that
-    ``Tesseract.metadata()`` describes, or None."""
+    """Name of the build in ``builds`` (default: the builds that passed the OCR score
+    check) that ``Tesseract.metadata()`` describes, or None."""
     if not isinstance(metadata, dict):
         return None
     eng = (metadata.get("traineddata") or {}).get("eng.traineddata") or {}
@@ -328,7 +334,7 @@ def calibrated_build(
 
 
 def is_calibrated_tesseract(version_first_line: str | None) -> bool:
-    """Whether a ``tesseract --version`` banner is the version gate G4 calibrates.
+    """Whether a ``tesseract --version`` banner is the version the OCR score check uses.
 
     Comparability needs the full build identity: see ``calibrated_build``.
     """
@@ -627,9 +633,7 @@ def evaluate_ocr(
             "calibrated_tesseract_version": CALIBRATED_TESSERACT_VERSION,
             "references_verified": verify_references,
             "tesseract_build": build,
-            "tesseract_build_failed_g4": calibrated_build(
-                engine_metadata, G4_FAILED_TESSERACT_BUILDS
-            ),
+            "tesseract_build_failed_g4": calibrated_build(engine_metadata, FAILED_TESSERACT_BUILDS),
             "tesseract_version_matches": is_calibrated_tesseract(
                 engine_metadata.get("version_first_line")
             ),

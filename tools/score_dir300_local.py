@@ -64,7 +64,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=__doc__.splitlines()[0],
         epilog="example: .venv/bin/python tools/score_dir300_local.py "
-        "runs/r3/checkpoints/step_00046880.pt R3 --quantize truncate",
+        "runs/my-run/checkpoints/step_00046880.pt my-run --quantize truncate",
     )
     parser.add_argument("checkpoint", type=Path, help="dewarp checkpoint or UVDoc best_model.pkl")
     parser.add_argument("run", help="run name: reports go to outputs/dewarp-runs/RUN/")

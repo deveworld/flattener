@@ -18,7 +18,7 @@ DocUNet metric area) and the rectified image to the reference size (MATLAB bicub
 ``imresize``). MS-SSIM and LD are DocUNet's ``evalUnwarp.m``; AD is PaperEdge's
 ``evalAlignedUnwarp.m`` on the same SIFT flow. Every pair counts once in plain means
 over the 300 pairs; nothing is rotated or skipped. The MATLAB emulation is the one
-gates G1-G3 calibrate on DocUNet.
+used for DocUNet, and the DocUNet calibration checks confirm it.
 
 OCR (:func:`evaluate_dir300_ocr`) follows DocGeoNet ``OCR_eval_DIR300.py`` on the 90
 images of ``ocr_img_DIR300.txt``: ``pytesseract.image_to_string`` defaults on the
@@ -444,7 +444,8 @@ def evaluate_dir300_ocr(
 ) -> dict[str, Any]:
     """OCR the DIR300 OCR subset of ``predictions_dir`` and return the report.
 
-    The report is ``comparable`` only with a G4-calibrated Tesseract build
+    The report is ``comparable`` only with a Tesseract build that passed the OCR score
+    check
     (``ocr.calibrated_build``), verified references and all 90 documents.
     """
     _check_workers(workers)

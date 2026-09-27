@@ -2,7 +2,7 @@
 
 Usage (at low CPU priority, for example ``nice -n 19``, two threads):
   .venv/bin/python tools/fast_check_agreement.py --out REPORT.json
-      [--weights R4.pt --docunet-crops DIR --smartdoc DIR [--smartdoc-count N]]
+      [--weights DEWARP.pt --docunet-crops DIR --smartdoc DIR [--smartdoc-count N]]
       [--synthetic N] [--seed S]
 
 Each map is a grid (flattener values of a source), an output size, an inset and a border.

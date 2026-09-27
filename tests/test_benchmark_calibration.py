@@ -1,4 +1,5 @@
-"""Calibration gates evaluated on synthetic reports (no images, no SIFT flow)."""
+"""The four evaluator calibration checks (G1-G4 in calibration.json) on synthetic reports,
+with no images and no SIFT flow."""
 
 import pytest
 

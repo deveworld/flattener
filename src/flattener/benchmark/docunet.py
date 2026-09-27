@@ -45,11 +45,12 @@ DEFAULT_CONVENTIONS = CONVENTIONS
 CONVENTION_DESCRIPTIONS = {
     "130_raw": "all 130 photos as published (64_1/64_2 upside down); what PaperEdge "
     "adres.txt and the released DocTr/DocScanner/DocGeoNet MATLAB scripts compute "
-    "(their rot90 block for document 64 is commented out); validated by gate G1",
+    "(their rot90 block for document 64 is commented out); validated by the PaperEdge "
+    "MATLAB check",
     "130_rot64": "64_1/64_2 rotated 180 degrees before scoring (those scripts with the "
-    "rot90 block enabled); not validated by any gate",
+    "rot90 block enabled); not covered by the calibration checks",
     "128_excl64": "64_1/64_2 excluded (UVDoc: DocUnet_results has 128 images and "
-    "evalScript.m skips missing files); validated by gates G2/G3",
+    "evalScript.m skips missing files); validated by the UVDoc table checks",
 }
 REF_RESIZE_MODES = ("once", "uvdoc_view2_double")
 DEFAULT_WORKERS = 2
@@ -150,8 +151,8 @@ PROTOCOL = {
     "ad": "PaperEdge evalAlignedUnwarp.m: Sobel mask > 0.5, per-axis scale+shift removed",
     "ad_solvers": {
         "exact_lstsq": "exact least squares (numpy lstsq)",
-        "lsqr_4iter": "LSQR with MATLAB lsqr(A,B) defaults; matches MATLAB means (G1-G3), "
-        "per-image AD can differ by up to ~0.016",
+        "lsqr_4iter": "LSQR with MATLAB lsqr(A,B) defaults; its means match MATLAB in the "
+        "DocUNet calibration checks, per-image AD can differ by up to ~0.016",
     },
     "conventions": CONVENTION_DESCRIPTIONS,
 }

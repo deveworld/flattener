@@ -37,7 +37,7 @@ Steps:
      (``-inset-L``, ``-rerunR`` and ``-deskew`` before .json as set). An existing
      report is kept when its prediction hashes, Tesseract executable and eng.traineddata
      match. Its numbers are comparable only when the report says so (a Tesseract build
-     that passed gate G4, see flattener.benchmark.ocr).
+     that passed the OCR score check, see flattener.benchmark.ocr).
 
 outputs/dewarp-runs/RUN/ also gets predictions.json, or predictions-truncate.json for
 Q=truncate (the prediction record, no images; ``-inset-L``, ``-rerunR`` and ``-deskew``
@@ -111,7 +111,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=__doc__.splitlines()[0],
         epilog="example: .venv/bin/python tools/score_docunet_local.py "
-        "runs/r2/checkpoints/step_00003600.pt r2 --stress rot90 small_page",
+        "runs/my-run/checkpoints/step_00003600.pt my-run --stress rot90 small_page",
     )
     parser.add_argument("checkpoint", type=Path, help="dewarp checkpoint or UVDoc best_model.pkl")
     parser.add_argument("run", help="run name: reports go to outputs/dewarp-runs/RUN/")

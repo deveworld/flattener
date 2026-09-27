@@ -106,7 +106,7 @@ UVDOC_FINAL_PARTS = ("img", "grid2d", "grid3d", "metadata_sample", "metadata_geo
 
 RESEARCH_NOTE = (
     "RESEARCH TRACK ONLY. Weights trained with any of this data are research-track and are "
-    "never released (owner decision D1(a)). Do not mix into release-track runs."
+    "never released (owner's decision). Do not mix into release-track runs."
 )
 
 DATASETS: dict[str, dict] = {

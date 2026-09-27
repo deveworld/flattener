@@ -1,6 +1,6 @@
 {
   "data_spec": "data-release.json",
-  "output_dir": "${FLATTENER_RUNS}/release-b1-uvdoc-init-s0",
+  "output_dir": "${FLATTENER_RUNS}/uvdoc-init-s0",
   "track": "release",
   "model": {"input_size": [712, 488], "grid_size": [45, 31]},
   "init": "uvdoc",

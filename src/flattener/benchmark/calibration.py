@@ -1,18 +1,23 @@
-"""Calibration gates G1-G4: the evaluator must reproduce published DocUNet numbers.
+"""Evaluator calibration: four checks that the evaluator reproduces published DocUNet numbers.
 
-G1  PaperEdge outputs, ``130_raw``, compared with the per-image MATLAB values that
-    PaperEdge ships in ``adres.txt`` (mean differences).
-G2  PaperEdge outputs, ``128_excl64`` + ``uvdoc_view2_double``: UVDoc paper Table 2
-    PaperEdge row 0.472 / 7.98 / 0.367 within rounding.
-G3  UVDoc ``DocUnet_results`` (128 images), UVDoc convention: 0.544 / 6.83 / 0.315
-    within 0.002 / 0.03 / 0.003.
-G4  DocTr OCR protocol on PaperEdge outputs with Tesseract 5.0.1: DocScanner table
-    S1 ED 375.60 / CER 0.1541, S2 ED 777.76 / CER 0.2014 within 2 %. The report must
-    come from Tesseract 5.0.1 with the plain DocTr configuration and verified scans.
-    A build that passes G4 is added to ``ocr.CALIBRATED_TESSERACT_BUILDS``; OCR reports
-    are comparable only with those builds.
+The checks are named G1-G4 in ``calibration.json`` and in the printed summary, and the
+constants and ``gate_g*`` functions below follow those names.
 
-Each gate reads a report written by :func:`run_calibration`; existing reports are
+G1  PaperEdge MATLAB match. PaperEdge outputs under ``130_raw`` against the per-image
+    MATLAB values that PaperEdge ships in ``adres.txt`` (mean differences).
+G2  UVDoc table from PaperEdge outputs. PaperEdge outputs under ``128_excl64`` +
+    ``uvdoc_view2_double`` against the PaperEdge row of UVDoc paper Table 2,
+    0.472 / 7.98 / 0.367, within rounding.
+G3  UVDoc table from UVDoc's published results. UVDoc ``DocUnet_results`` (128 images)
+    under the UVDoc convention against 0.544 / 6.83 / 0.315, within 0.002 / 0.03 / 0.003.
+G4  OCR score match. The DocTr OCR protocol on PaperEdge outputs with Tesseract 5.0.1
+    against the DocScanner table: Setting 1 (DocTr, 60 images) ED 375.60 / CER 0.1541
+    and Setting 2 (DewarpNet, 50 images) ED 777.76 / CER 0.2014, within 2 %. The report
+    must come from Tesseract 5.0.1 with the plain DocTr configuration and verified scans.
+    A build that passes this check is added to ``ocr.CALIBRATED_TESSERACT_BUILDS``; OCR
+    reports are comparable only with those builds.
+
+Each check reads a report written by :func:`run_calibration`; existing reports are
 reused, so the summary can be rebuilt from copied reports without the inputs. Reused
 reports keep their bytes because summaries record their sha256; the summary labels
 every report it lists with its evidence (``evaluator_calibration``), also reports
