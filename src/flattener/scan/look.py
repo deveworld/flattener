@@ -12,6 +12,12 @@ smoothed) by more than ``INK`` of it. The line pitch is the strongest autocorrel
 of the ink profile across the lines (rows, or columns for a sideways page). A full page
 shows 25 or more lines and blank margins; a close-up whose page runs out of the photo
 shows a few large lines cut by two or more edges of the flattened page.
+
+``paper_colour``, ``page_coloured`` and ``crop_edge_share`` work on a small copy of the
+photo: the paper colour of a grid is the median colour of the ink-free pixels inside its
+outline, and a pixel is page-coloured when every channel lies within ``TOLERANCE`` of it.
+The verify stage uses them to tell a first crop that cut the page (blank paper runs along
+the crop edge) from a gate mask that took some background.
 """
 
 from __future__ import annotations
@@ -24,6 +30,8 @@ DARK = 0.35  # luminance (0-1) below which a pixel counts as dark
 INK = 0.3  # ink: darker than the local paper by this share of it
 EDGE_BAND = 0.04  # outer band of each edge, share of the page size
 EDGE_SEGMENTS = 20  # an edge is split into this many parts; a part with 2 % ink has ink
+TOLERANCE = 0.08  # page-coloured: every channel (0-1) within this of the paper colour
+STRIP = 0.015  # strip inside a crop edge, share of the image's short side
 
 
 def luminance(image: NDArray[np.uint8]) -> NDArray[np.float32]:
@@ -115,3 +123,40 @@ def text(image: NDArray[np.uint8]) -> dict[str, object]:
         parts = np.array_split(band, EDGE_SEGMENTS, axis=1)
         edges[side] = float(np.mean([part.mean() >= 0.02 for part in parts]))
     return {"lines": lines, "periodicity": strength, "edges": edges}
+
+
+def paper_colour(image: NDArray[np.uint8], inside: NDArray[np.bool_]) -> NDArray | None:
+    """Median RGB (0-1) of the ink-free pixels of ``inside``; ``None`` for under 50."""
+    blank = inside & (ink(image) < 0.1)
+    if blank.sum() < 50:
+        return None
+    return np.median(np.asarray(image, dtype=np.float32)[blank] / 255.0, axis=0)
+
+
+def page_coloured(image: NDArray[np.uint8], colour: NDArray) -> NDArray[np.bool_]:
+    rgb = np.asarray(image, dtype=np.float32) / 255.0
+    return np.abs(rgb - colour).max(axis=-1) < TOLERANCE
+
+
+def crop_edge_share(
+    coloured: NDArray[np.bool_], box: tuple[float, float, float, float], size: tuple[int, int]
+) -> float:
+    """The largest share of page-coloured pixels in a strip just inside an edge of ``box``
+    (source pixels of a photo of ``size``), over the edges that lie inside the photo; 0
+    when every edge is a photo edge."""
+    height, width = size
+    rows, cols = coloured.shape
+    left, top, right, bottom = box
+    x0, x1 = round(left * cols / width), round(right * cols / width)
+    y0, y1 = round(top * rows / height), round(bottom * rows / height)
+    strip = max(2, round(STRIP * min(rows, cols)))
+    strips = []
+    if left > 1:
+        strips.append(coloured[y0:y1, x0 : x0 + strip])
+    if right < width - 1:
+        strips.append(coloured[y0:y1, x1 - strip : x1])
+    if top > 1:
+        strips.append(coloured[y0 : y0 + strip, x0:x1])
+    if bottom < height - 1:
+        strips.append(coloured[y1 - strip : y1, x0:x1])
+    return max((float(part.mean()) for part in strips if part.size), default=0.0)

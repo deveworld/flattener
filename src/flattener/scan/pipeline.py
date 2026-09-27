@@ -31,7 +31,13 @@ plan and checks the plan's map; ``render(source, planned)`` makes the image of a
   Such a grid must also look like paper on a 384-pixel flat preview (``scan.look``:
   median saturation at most 0.28, at most 35 % dark pixels); otherwise the photo holds no
   page (a keyboard or a desk the gate took for one) and the grid fails with
-  ``page_not_found``. Against a manual quad, coverage below 0.95 fails. The median node
+  ``page_not_found``. When blank paper of the page's colour runs along an edge of the
+  first crop and the whole-photo pass holds the mask and adds mostly page-coloured area
+  no larger than the page, the crop cut the page (the gate missed white margins): the
+  grid fails (``unstable_geometry``, check ``page_continues``) and the chain goes on to
+  the whole-photo outline. A grid whose preview shows a few large text lines cut by two
+  or more of its edges is a close-up whose page runs out of the photo: ``page_cut_off``
+  ends the chain. Against a manual quad, coverage below 0.95 fails. The median node
   drift between the last two passes must stay within 4 % of the page diagonal.
 * ``plan``: ``scan.output_policy.plan_output`` (auto size, standard-ratio snap) and a
   ``ScanPlan`` with its ``plan_sha256``.
@@ -81,6 +87,7 @@ from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
+from PIL import Image
 
 from ..contracts import FlattenerError, RenderConfig, RenderResult, Status
 from ..dewarp.model import sha256_file
@@ -154,6 +161,13 @@ VERIFY: dict[str, Any] = {
     "fragment_max_lines": 20,
     "fragment_min_periodicity": 0.4,
     "fragment_min_edges": 0.5,
+    # The first crop cut the page: blank paper of the page's colour runs along a crop edge,
+    # and the whole-photo pass holds the gate mask and adds at most the page's own area,
+    # mostly page-coloured (scan.look on a copy of the photo with this long side).
+    "crop_edge_paper": 0.5,
+    "continue_max_area": 1.0,
+    "continue_min_paper": 0.5,
+    "look_photo_long_side": 768,
     "max_drift": 0.04,  # median node drift between passes, fraction of the page diagonal
     "low_resolution_density": 0.5,  # source pixels per output pixel below this warn
     "post_preview_long_side": 768,
@@ -1293,6 +1307,63 @@ class Scanner:
             )
         return None
 
+    def _small_photo(self, src: SourceImage) -> NDArray[np.uint8]:
+        """The photo with a long side of ``VERIFY["look_photo_long_side"]`` pixels (or
+        less for a smaller photo), from the smallest pyramid level that is large enough."""
+        long_side = VERIFY["look_photo_long_side"]
+        longest = max(src.info.size)
+        factor = max(f for f in (1, 2, 4, 8) if f == 1 or longest / f >= long_side)
+        with Image.fromarray(src.level(factor)) as image:
+            image.thumbnail((long_side, long_side))
+            return np.asarray(image)
+
+    def _page_continues(
+        self,
+        src: SourceImage,
+        memo: _Memo,
+        options: ScanOptions,
+        located: locating.Localization,
+        box: tuple[int, int, int, int],
+        grid: NDArray,
+        checks: dict[str, Any],
+    ) -> Reason | None:
+        """For a grid the gate mask reaches past: the failure when the first crop ``box``
+        cut the page, else ``None``. The crop cut the page when blank paper of the grid's
+        colour fills at least ``crop_edge_paper`` of a strip along a box edge inside the
+        photo, and the whole-photo pass G0 holds the gate mask (coverage at least
+        ``min_coverage``) and adds at most the grid's own area, at least
+        ``continue_min_paper`` of it page-coloured (as when the gate misses white page
+        margins). The chain then goes on to the candidates whose box is G0's outline or
+        the whole photo. The measures go to ``checks["beyond"]``."""
+        photo = self._small_photo(src)
+        shape = photo.shape[:2]
+        inside = locating.rasterize_polygon(locating.outline_polygon(grid), shape)
+        colour = look.paper_colour(photo, inside)
+        if colour is None:
+            return None
+        coloured = look.page_coloured(photo, colour)
+        beyond = {"crop_edge": look.crop_edge_share(coloured, box, src.info.size)}
+        checks["beyond"] = beyond
+        if beyond["crop_edge"] < VERIFY["crop_edge_paper"]:
+            return None
+        whole = self._pass0(src, memo, options)()
+        if not np.isfinite(whole).all():
+            return None
+        try:
+            beyond["whole_coverage"] = locating.grid_coverage(whole, located.mask)
+        except FlattenerError:
+            return None
+        added = locating.rasterize_polygon(locating.outline_polygon(whole), shape) & ~inside
+        beyond["added_area"] = float(added.sum() / max(1, inside.sum()))
+        beyond["added_paper"] = float(coloured[added].mean()) if added.sum() >= 50 else 0.0
+        if (
+            beyond["whole_coverage"] >= VERIFY["min_coverage"]
+            and beyond["added_area"] <= VERIFY["continue_max_area"]
+            and beyond["added_paper"] >= VERIFY["continue_min_paper"]
+        ):
+            return reason("unstable_geometry", check="page_continues", **checks)
+        return None
+
     def _plan_for(
         self,
         src: SourceImage,
@@ -1641,6 +1712,10 @@ class Scanner:
                         bad = reason("unstable_geometry", check="drift", **checks)
                     elif not strict:
                         bad = self._judge_look(src, grid, checks, bool(excess))
+                        if bad is None and excess and candidate.box is not None:
+                            bad = self._page_continues(
+                                src, memo, options, located, candidate.box, grid, checks
+                            )
             if bad is not None:
                 failures.append((bad, {"grid": label, "checks": checks}))
                 if bad.code == "page_cut_off":
@@ -1732,6 +1807,7 @@ class Scanner:
             "region_excess": outcome["checks"].get("excess"),
             "paper": outcome["checks"].get("paper"),
             "text": outcome["checks"].get("text"),
+            "beyond": outcome["checks"].get("beyond"),
             "drift": outcome["checks"].get("drift"),
             "drift_limit": VERIFY["max_drift"],
             "orientation": orientation_qa,
