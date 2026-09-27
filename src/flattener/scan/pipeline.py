@@ -23,7 +23,10 @@ plan and checks the plan's map; ``render(source, planned)`` makes the image of a
 * ``plan``: ``scan.output_policy.plan_output`` (auto size, standard-ratio snap) and a
   ``ScanPlan`` with its ``plan_sha256``.
 * ``render``: the dense map of the plan through ``flattener.render`` once, with all of its
-  checks and failure records.
+  checks and failure records. With ``fast_check`` a dewarp plan is checked by
+  ``scan.fast_check`` in ``plan`` (the renderer's decisions from the grid;
+  ``flattener.render`` runs on a proxy of at most 2 MP and 1/16 of the output) and
+  ``render`` samples the full size once.
 
 Candidates, first one to pass wins: C1 the full path, C2 without deskew, C3 the other
 localizer's box (gate and outline swapped), C4 the current ``rectify`` (whole photo, one
@@ -76,6 +79,7 @@ from ..regions.context import GateConfig, LoadedContextSegmenter, load_context_s
 from ..renderer import render as flattener_render
 from ..validation import validate_image
 from . import locate as locating
+from .fast_check import FastCheck, fast_check
 from .io import SourceImage, read_source
 from .orient import Orienter, OrientResult, ViewGeometry
 from .output_policy import MAX_PIXELS, MAX_SIDE, OutputPlan, plan_output, round_half_up
@@ -129,7 +133,9 @@ class ScanOptions:
     ``passes``: crop passes after pass A (``"auto"`` is 1). ``output``: ``"auto"``, a long
     side or (height, width). ``aspect``: ``"auto"``, ``"estimate"``, ``"snap"``, a paper
     name or width / height. ``inset``: as ``dewarp.predict --inset``; ``border`` moves each
-    side out by border / 2 of the page extent. ``preview``: long side of a preview image
+    side out by border / 2 of the page extent. ``fast_check``: check dewarp plans with
+    ``scan.fast_check`` (the renderer's decisions from the grid, a small proxy render) and
+    sample the full size in ``render``. ``preview``: long side of a preview image
     sampled from the same map (``None``: no preview). ``chain``: try C2-C4 after C1 fails.
     ``use_focal``: take the EXIF focal length into the aspect estimate.
     """
@@ -142,6 +148,7 @@ class ScanOptions:
     inset: Inset = None
     border: float = 0.0
     quantize: str = "round"
+    fast_check: bool = False
     view_source: str = "original"
     view_extent: str = "canvas"
     fallback: str = "original"
@@ -164,7 +171,7 @@ class ScanOptions:
         ):
             if getattr(self, name) not in allowed:
                 raise _option_error(f"{name} must be one of {allowed}, got {getattr(self, name)!r}")
-        for name in ("deskew", "chain", "use_focal"):
+        for name in ("deskew", "fast_check", "chain", "use_focal"):
             if not isinstance(getattr(self, name), bool):
                 raise _option_error(f"{name} must be a bool")
         try:
@@ -312,7 +319,7 @@ class _Checked:
 
     plan: ScanPlan
     result: RenderResult
-    backward_map: NDArray[np.float32] | None = None
+    fast: FastCheck | None = None
 
     @property
     def ok(self) -> bool:
@@ -1157,15 +1164,27 @@ class Scanner:
         }
 
     def _check(self, src: SourceImage, plan: ScanPlan, options: ScanOptions) -> _Checked:
-        """``flattener.render`` of the plan's map, once (the renderer's checks)."""
-        backward = _dense(plan)
+        """``flattener.render`` of the plan's map, once (the renderer's checks); with
+        ``fast_check`` a dewarp plan gets ``scan.fast_check`` and no image yet."""
         config = RenderConfig(on_error="return", fill_rgb=tuple(options.fill_rgb))
+        if options.fast_check and plan.kind == "dewarp":
+            fast = fast_check(
+                src.image,
+                plan.grid,
+                plan.output.size,
+                inset=plan.inset,
+                border=plan.border,
+                config=config,
+                levels=src.level,
+            )
+            return _Checked(plan, fast.result(), fast)
+        backward = _dense(plan)
         result = flattener_render(src.image, backward, config=config)
         if result.status == Status.SUCCESS and plan.quantize != "round":
             result.image = sample_rgb(
                 src.image, backward, result.valid_mask, config.fill_rgb, plan.quantize
             )
-        return _Checked(plan, result, None)
+        return _Checked(plan, result)
 
     def _perspective_plan(
         self,
@@ -1635,6 +1654,10 @@ class Scanner:
         options, src, clock = planned.options, planned.source, planned.clock
         if planned.plan is not None and planned.checked is not None:
             result = planned.checked.result
+            fast = planned.checked.fast
+            if fast is not None and result.image is None:
+                with clock.stage("render"):
+                    result.image = fast.sample(src.image, options.fill_rgb, planned.plan.quantize)
             record.image = result.image
             record.valid_mask = result.valid_mask
             record.plan = planned.plan

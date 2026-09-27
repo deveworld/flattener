@@ -14,6 +14,8 @@ Modules:
 - ``timing``: per-stage timing.
 - ``output_policy``: output size and aspect.
 - ``io``: reading sources and writing scan files.
+- ``fast_check``: the renderer's decisions for a grid's dense map from the grid, a 2 MP
+  proxy render and full-resolution sampling (opt-in).
 - ``pipeline``: ``Scanner`` (load, plan, render, scan), the candidate chain and fallbacks.
 - ``__main__``: ``python -m flattener.scan IMG... --out DIR``.
 """

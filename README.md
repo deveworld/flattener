@@ -205,6 +205,7 @@ result = scanner.render(source, planned)
 - 수동 수정은 `--region L,T,R,B`, `--quad x1,y1,…,x4,y4`(읽기 순서), `--quarter 0..3`, `--no-dewarp`, `--long-side N`, `--output-size H,W`, `--aspect`입니다. 자동 경로와 같은 단계를 거치고 기록에 `manual`로 남습니다. 모델 출력은 입력 sha256별로 캐시하므로 바뀐 단계 뒤만 다시 계산합니다.
 - 출력은 JPEG q95 4:4:4(`--format png`도 됨)와 `<stem>.scan.json`입니다. `--timing F.jsonl`은 사진마다 단계별 시간을 한 줄씩 쓰고, `--debug`는 페이지 윤곽을 그린 사진을 씁니다.
 - 종료 코드는 모두 스캔되면 0, 대체 결과나 실패가 있으면 1, 사용 오류면 2입니다. `--no-dewarp`로 요청한 원근 보정 결과는 스캔된 것으로 셉니다.
+- `--fast-check`(`ScanOptions(fast_check=True)`)는 전체 해상도 맵의 셀 검사를 격자에서 계산합니다. 격자 칸 안에서 맵은 쌍선형이라 렌더러가 보는 셀 행렬식이 그 칸 안 픽셀 중심의 정확한 야코비안이고, 한 칸 안의 최솟값은 맨 끝 픽셀 중심에서 나옵니다. 격자 노드를 걸치는 셀(12MP에서 약 2%)만 렌더러와 같은 식으로 맵에서 계산합니다. 범위 이탈 비율은 전체 해상도 맵에서 그대로 셉니다. `flattener.render`는 출력 픽셀의 1/16 이하(최대 2MP)인 proxy에서 한 번 돌아 기록을 남기고, 저장 이미지는 `render`에서 전체 해상도로 한 번 샘플링합니다(`flattener.render`와 같은 이미지). `tools/fast_check_agreement.py`는 격자 맵 약 500개(R4 격자와 합성 격자)에서 두 검사의 판정을 비교하고 다른 판정을 모두 나열합니다. 픽셀 간격보다 좁은 접힘은 두 검사 모두 통과시키며, `continuous_min_jacobian_ratio`에 남습니다.
 - 판정 임계값(`scan.locate.THRESHOLDS`, `scan.pipeline.VERIFY`)은 설계의 시작값이고 스캔 기록에 남습니다. SmartDoc train 분할과 합성 val로 정하는 일은 남아 있습니다.
 - `rectify_batch(..., rectifier=scanner.rectifier(options), pipeline=scanner.pipeline_record(options))`는 벤치마크 예측 폴더를 스캐너로 만듭니다. `predictions.json`에 pipeline이 남고, 다른 pipeline의 예측이 있는 폴더는 거부합니다.
 

@@ -143,6 +143,11 @@ def parser() -> argparse.ArgumentParser:
         "--no-orient", action="store_true", help="keep the photo's orientation (EXIF applied)"
     )
     processing.add_argument("--no-chain", action="store_true", help="try the first candidate only")
+    processing.add_argument(
+        "--fast-check",
+        action="store_true",
+        help="take the render checks from the grid (and a small proxy), then sample once",
+    )
     output = parser.add_argument_group("output")
     size = output.add_mutually_exclusive_group()
     size.add_argument("--long-side", type=int, help="long side of the output in pixels")
@@ -189,6 +194,7 @@ def _options(args: argparse.Namespace) -> ScanOptions:
         border=args.border,
         fallback=args.fallback,
         on_error=args.on_error,
+        fast_check=args.fast_check,
         chain=not args.no_chain,
     )
 
@@ -331,6 +337,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "outcome": result.outcome.value,
                     "device": args.device,
                     "threads": torch.get_num_threads(),
+                    "fast_check": options.fast_check,
                 },
             )
     return EXIT_SCANNED if scanned else EXIT_FALLBACK
