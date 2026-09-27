@@ -186,15 +186,22 @@ def failure_counts(statuses: list[str | None]) -> dict[str, int | None]:
     }
 
 
-def report_evidence(record: dict[str, Any] | None) -> dict[str, Any]:
-    """Evidence of a DocUNet report from the predictions record (``prediction_record``).
+def report_evidence(
+    record: dict[str, Any] | None, measurement: str | None = None
+) -> dict[str, Any]:
+    """Evidence of a benchmark report from the predictions record (``prediction_record``).
 
-    Stress-variant inputs make it ``docunet_stress``; anything else is scored as the
-    standard benchmark. Without a record the model provenance is ``unknown``.
-    ``quantize`` is the record's output quantization (``None`` when unknown).
+    Stress-variant inputs make it ``docunet_stress``, UVDoc benchmark inputs
+    ``uvdoc_benchmark``; anything else is scored as the standard DocUNet benchmark
+    (``measurement`` overrides this). Without a record the model provenance is
+    ``unknown``. ``quantize`` is the record's output quantization (``None`` when unknown).
     """
     inputs = "" if record is None else str(record.get("inputs") or "")
-    measurement = "docunet_stress" if inputs.startswith("docunet_stress") else "docunet_standard"
+    if measurement is None:
+        measurement = "docunet_standard"
+        for prefix in ("docunet_stress", "uvdoc_benchmark"):
+            if inputs.startswith(prefix):
+                measurement = prefix
     return {
         **evidence(measurement, None if record is None else record["model"]),
         "quantize": None if record is None else record.get("quantize"),

@@ -1,7 +1,8 @@
 """Command line: ``python -m flattener.benchmark
-{docunet,ocr,calibrate,docunet-stress,build-siftflow}``.
+{docunet,ocr,calibrate,docunet-stress,uvdoc-prepare,uvdoc-predict,uvdoc,build-siftflow}``.
 
-``docunet``, ``ocr``, ``calibrate`` and ``docunet-stress`` take ``--workers`` (default 2).
+``docunet``, ``ocr``, ``calibrate``, ``docunet-stress`` and ``uvdoc`` take ``--workers``
+(default 2).
 Scoring LD/AD needs your copy of the SIFT-flow C++ sources: pass ``--siftflow-source
 DIR`` or set ``FLATTENER_SIFTFLOW_SOURCE``.
 """
@@ -13,7 +14,7 @@ import json
 import sys
 from pathlib import Path
 
-from . import calibration, docunet, metrics, ocr, siftflow, stress
+from . import calibration, docunet, metrics, ocr, siftflow, stress, uvdoc
 from .reporting import write_json_atomic
 
 _EPILOG = """\
@@ -26,6 +27,9 @@ examples:
       --paperedge-dir res_test --uvdoc-dir DocUnet_results --tesseract tesseract
   python -m flattener.benchmark docunet-stress --weights best_model.pkl \\
       --output-dir stress/uvdoc --force-render --device cuda
+  python -m flattener.benchmark uvdoc-prepare UVDoc_benchmark.zip
+  python -m flattener.benchmark uvdoc-predict --weights best_model.pkl --output-dir OUT
+  python -m flattener.benchmark uvdoc OUT --output reports/uvdoc.json
 """
 
 
@@ -88,6 +92,15 @@ def _add_tesseract(parser: argparse.ArgumentParser) -> None:
         "--tesseract", default="tesseract", help="tesseract executable; default %(default)s"
     )
     parser.add_argument("--temp-dir", default=None, help="directory for Tesseract temp files")
+
+
+def _add_uvdoc_root(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--root",
+        type=Path,
+        default=uvdoc.DEFAULT_ROOT,
+        help="extracted UVDoc benchmark; default %(default)s",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -249,6 +262,71 @@ def build_parser() -> argparse.ArgumentParser:
         help="accept scans whose bytes differ from the published DocUNet scans",
     )
 
+    prepare = commands.add_parser(
+        "uvdoc-prepare",
+        help="extract UVDoc_benchmark.zip and write its manifest",
+        description="Check the archive hash, extract it into --root and write "
+        "ROOT/manifest.json (source URL, archive and file hashes). Download: " + uvdoc.ARCHIVE_URL,
+    )
+    prepare.add_argument("archive", type=Path, help="UVDoc_benchmark.zip")
+    _add_uvdoc_root(prepare)
+    prepare.add_argument("--url", default=uvdoc.ARCHIVE_URL, help="recorded source URL")
+    prepare.add_argument("--retrieved", default=None, help="download date for the manifest")
+    prepare.add_argument(
+        "--no-verify", action="store_true", help="accept other archive and image bytes"
+    )
+
+    rectify = commands.add_parser(
+        "uvdoc-predict",
+        help="rectify the 50 UVDoc benchmark samples with a dewarp model",
+        description="Predict a grid from img/{id}.png and apply it to warped_textures/"
+        "{id}.png (uwp_texture/) and to the photo (uwp_img/), truncated to uint8 as "
+        "uvdocBenchmark_pred.py does. Every image is written; render checks go to "
+        "OUT/predictions.json.",
+    )
+    rectify.add_argument("--weights", required=True, help="dewarp checkpoint or best_model.pkl")
+    rectify.add_argument("--output-dir", type=Path, required=True)
+    _add_uvdoc_root(rectify)
+    rectify.add_argument("--device", default="cpu")
+    rectify.add_argument(
+        "--threads", type=_positive_int, default=2, help="torch threads; default %(default)s"
+    )
+    rectify.add_argument("--overwrite", action="store_true", help="predict every image again")
+    rectify.add_argument("--no-verify-inputs", action="store_true", help="accept other image bytes")
+    rectify.add_argument("--quiet", action="store_true", help="no per-image progress")
+
+    bench = commands.add_parser(
+        "uvdoc",
+        help="MS-SSIM / AD / LD on the UVDoc benchmark",
+        description="Score PREDICTIONS/{pred-type}/{id}.png (00000-00049) against "
+        "texture_sample/{id}.png as evalScriptUVDoc.m does; means over all 50 samples.",
+    )
+    bench.add_argument("predictions", type=Path, help="folder with uwp_texture/ (and uwp_img/)")
+    bench.add_argument("--output", type=Path, required=True, help="report JSON path")
+    bench.add_argument("--overwrite", action="store_true", help="replace an existing report")
+    bench.add_argument(
+        "--pred-type",
+        choices=uvdoc.PRED_TYPES,
+        default=uvdoc.DEFAULT_PRED_TYPE,
+        help="unwarped textures (the published protocol) or unwarped photos; default %(default)s",
+    )
+    _add_uvdoc_root(bench)
+    _add_siftflow(bench)
+    bench.add_argument("--ad-solver", choices=metrics.AD_SOLVERS, default=metrics.DEFAULT_AD_SOLVER)
+    bench.add_argument(
+        "--workers",
+        type=_positive_int,
+        default=docunet.DEFAULT_WORKERS,
+        help="parallel worker processes; default %(default)s (1 torch thread each)",
+    )
+    bench.add_argument("--ms-ssim-only", action="store_true", help="skip SIFT flow (no LD/AD)")
+    bench.add_argument(
+        "--no-verify-references",
+        action="store_true",
+        help="accept textures whose bytes differ from the published benchmark",
+    )
+    bench.add_argument("--quiet", action="store_true", help="no per-image progress on stderr")
+
     build = commands.add_parser(
         "build-siftflow",
         help="compile the SIFT-flow extension and print its build record",
@@ -298,6 +376,51 @@ def main(argv: list[str] | None = None) -> int:
         )
         _write_report(args.output, report, args.overwrite)
         print(json.dumps(report["summary"], indent=2, sort_keys=True))
+        return 0
+    if args.command == "uvdoc-prepare":
+        manifest = uvdoc.prepare_benchmark(
+            args.archive,
+            args.root,
+            url=args.url,
+            verify=not args.no_verify,
+            retrieved=args.retrieved,
+        )
+        print(json.dumps(manifest["sets"], indent=2, sort_keys=True))
+        return 0
+    if args.command == "uvdoc-predict":
+        import torch
+
+        from ..dewarp.predict import load_dewarper
+
+        torch.set_num_threads(args.threads)
+        record = uvdoc.predict_uvdoc(
+            load_dewarper(args.weights, device=args.device),
+            args.output_dir,
+            root=args.root,
+            verify_inputs=not args.no_verify_inputs,
+            overwrite=args.overwrite,
+            log=None if args.quiet else lambda text: print(text, file=sys.stderr, flush=True),
+        )
+        print(json.dumps(record["counts"]))
+        return 0
+    if args.command == "uvdoc":
+        _check_output(args.output, args.overwrite)
+        build = None
+        if not args.ms_ssim_only:
+            build = siftflow.build_siftflow(args.siftflow_source, cache_dir=args.cache_dir)
+        report = uvdoc.evaluate_uvdoc(
+            args.predictions,
+            build=build,
+            pred_type=args.pred_type,
+            root=args.root,
+            ad_solver=args.ad_solver,
+            verify_references=not args.no_verify_references,
+            workers=args.workers,
+            progress=None if args.quiet else uvdoc.print_progress,
+        )
+        _write_report(args.output, report, args.overwrite)
+        print(json.dumps(report["summary"], indent=2, sort_keys=True))
+        print(uvdoc.format_comparison(report["summary"]))
         return 0
     if args.command == "docunet-stress":
         build = None

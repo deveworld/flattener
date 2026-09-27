@@ -264,6 +264,7 @@ def score_document(task: DocumentTask, siftflow: SiftFlow | None) -> list[dict[s
     return rows
 
 
+ScoreTask = Callable[[Any, SiftFlow | None], list[dict[str, Any]]]
 _WORKER_SIFTFLOW: SiftFlow | None = None
 
 
@@ -275,8 +276,8 @@ def _initialize_worker(build: SiftFlowBuild | None) -> None:
     _WORKER_SIFTFLOW = None if build is None else SiftFlow(build)
 
 
-def _score_in_worker(task: DocumentTask) -> list[dict[str, Any]]:
-    return score_document(task, _WORKER_SIFTFLOW)
+def _score_in_worker(score: ScoreTask, task: Any) -> list[dict[str, Any]]:
+    return score(task, _WORKER_SIFTFLOW)
 
 
 @contextlib.contextmanager
@@ -296,16 +297,24 @@ def _single_thread_environment():
 
 
 def run_tasks(
-    tasks: Sequence[DocumentTask],
+    tasks: Sequence[Any],
     build: SiftFlowBuild | None,
     *,
     workers: int = DEFAULT_WORKERS,
     progress: Callable[[dict[str, Any], int, int], None] | None = None,
+    score: ScoreTask = score_document,
+    total: int | None = None,
 ) -> list[dict[str, Any]]:
-    """Score documents in-process (``workers == 1``) or in a spawned process pool."""
+    """Score tasks in-process (``workers == 1``) or in a spawned process pool.
+
+    ``score`` turns one task into rows; it must be a module-level function so the pool
+    can pickle it. ``total`` is the expected row count for ``progress`` (default: the
+    views of the ``DocumentTask`` list).
+    """
     if isinstance(workers, bool) or not isinstance(workers, int) or workers < 1:
         raise ValueError("workers must be a positive integer")
-    total = sum(len(task.views) for task in tasks)
+    if total is None:
+        total = sum(len(task.views) for task in tasks)
     rows: list[dict[str, Any]] = []
 
     def collect(new_rows: list[dict[str, Any]]) -> None:
@@ -317,7 +326,7 @@ def run_tasks(
     if workers == 1:
         siftflow = None if build is None else SiftFlow(build)
         for task in tasks:
-            collect(score_document(task, siftflow))
+            collect(score(task, siftflow))
         return rows
     context = multiprocessing.get_context("spawn")
     with _single_thread_environment():
@@ -327,7 +336,7 @@ def run_tasks(
             initializer=_initialize_worker,
             initargs=(build,),
         ) as executor:
-            futures = [executor.submit(_score_in_worker, task) for task in tasks]
+            futures = [executor.submit(_score_in_worker, score, task) for task in tasks]
             try:
                 for future in as_completed(futures):
                     collect(future.result())

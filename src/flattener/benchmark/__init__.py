@@ -2,7 +2,8 @@
 
 ``score_pair`` scores one rectified image against its scan (MS-SSIM always; LD and
 AD with a SIFT-flow backend). ``evaluate_docunet`` and ``evaluate_ocr`` score a
-directory of DocUNet predictions and return JSON-ready reports. SIFT flow (Ce Liu)
+directory of DocUNet predictions and return JSON-ready reports; ``predict_uvdoc`` and
+``evaluate_uvdoc`` run the UVDoc benchmark protocol. SIFT flow (Ce Liu)
 is compiled at run time from sources the user supplies (``load_siftflow``). Command
 line: ``python -m flattener.benchmark``.
 """
@@ -39,6 +40,7 @@ from .ocr import (
     levenshtein,
 )
 from .siftflow import SiftFlow, SiftFlowBuild, build_siftflow, load_siftflow
+from .uvdoc import evaluate_uvdoc, predict_uvdoc
 
 __all__ = [
     "AD_SOLVERS",
@@ -62,9 +64,11 @@ __all__ = [
     "evaluate_docunet",
     "evaluate_gates",
     "evaluate_ocr",
+    "evaluate_uvdoc",
     "levenshtein",
     "load_siftflow",
     "local_distortion",
+    "predict_uvdoc",
     "prepare_reference",
     "read_image",
     "reference_resizes",

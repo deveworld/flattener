@@ -12,6 +12,7 @@
 - **`benchmark/matlab.py`, `benchmark/siftflow.py`**: [OARDoc](https://github.com/GreatV/oardoc/tree/9c45c0e783748554a83abea482924a2443294bef)의 `oardoc/metrics/uvdoc.py`와 `oardoc/metrics/siftflow.py`를 고친 코드입니다. [Apache-2.0](https://www.apache.org/licenses/LICENSE-2.0), © OARDoc authors. 변경 사항은 각 파일 머리말에 있습니다.
   `siftflow.py`의 coarse-to-fine 구동부(`SiftFlow._coarse_to_fine`, `_level_offset`)는 OARDoc처럼 SIFT flow 패키지의 `SIFTflowc2f.m` 제어 흐름과 매개변수 일정을 Python으로 옮긴 것입니다. 이 부분의 배포 여부는 소유자가 정합니다.
 - **`benchmark/ocr.py`의 `prepare_like_pytesseract`**: [pytesseract](https://github.com/madmaze/pytesseract) 0.3.8 `prepare()`를 문장 단위로 따릅니다. [Apache-2.0](https://www.apache.org/licenses/LICENSE-2.0), © pytesseract authors. OCR 입력을 공개 규약과 바이트 단위로 맞추기 위한 것입니다. DocTr·UVDoc OCR 규약은 직접 구현했고 OCR 문서 목록만 인용합니다.
+- **`benchmark/uvdoc.py`**: [UVDoc](https://github.com/tanguymagne/UVDoc/tree/4c9b82b537057aff2526e6dd118a847cdd072e82)의 `uvdocBenchmark_pred.py`(`bilinear_unwarping`과 저장 방식), `uvdocBenchmark_eval.py`, `eval/eval_code/evalScriptUVDoc.m`의 벤치마크 규약을 옮겼습니다. MIT, © 2023 Tanguy MAGNE. 고지 전문은 [LICENSES/UVDoc-MIT.txt](LICENSES/UVDoc-MIT.txt)에 있습니다.
 - **`dewarp/model.py`**: [UVDoc](https://github.com/tanguymagne/UVDoc/tree/4c9b82b537057aff2526e6dd118a847cdd072e82)의 `model.py`에서 파생했습니다. MIT, © 2023 Tanguy MAGNE. 고지 전문은 파일 머리말과 [LICENSES/UVDoc-MIT.txt](LICENSES/UVDoc-MIT.txt)에 있습니다.
 
 ## 사용자가 직접 받는 외부 코드와 가중치
@@ -41,6 +42,7 @@ UVDoc 가중치로 초기화한 release 가중치의 배포 여부는 위 학습
 | [SyntheticDoc](https://doi.org/10.3929/ethz-c-000801994) | CC BY 4.0, 하위 출처마다 조건이 다름 | release 학습(조건이 확인된 하위 출처만) | `collection.sources.syntheticdoc` |
 | [Doc3D](https://github.com/cvlab-stonybrook/doc3D-dataset) | 텍스처 CC BY-NC-ND 3.0, Laval HDR 비상업 | research 학습 전용 | data spec의 `license` |
 | [UVDoc 데이터셋](https://github.com/tanguymagne/UVDoc-Dataset) | 비상업 텍스처(DeepFloyd IF), DTD 배경 연구용 | research 학습 전용 | data spec의 `license` |
+| [UVDoc 벤치마크](https://igl.ethz.ch/projects/uvdoc/UVDoc_benchmark.zip) 50샘플 (SHA-256 `8bf91a3e0d9bfa3655a8bcb38b74c1a8c02a9f1ba5ce34cfc51e5ae0660067ac`) | 저장소 MIT, 압축 파일에는 라이선스 파일 없음 | 평가 전용 | `outputs/benchmarks/uvdoc-bench/manifest.json` |
 | [DIR300](https://github.com/fh2019ustc/DocGeoNet) | © Hao Feng, 비상업·동일조건변경허락 | 평가 전용 | – |
 
 인용

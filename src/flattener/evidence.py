@@ -11,6 +11,7 @@ and whether they count as a real-photo result of a new model.
 * ``training_loss``: losses on augmented training samples (training log, run status).
 * ``docunet_standard``: DocUNet crops scored with ``flattener.benchmark``.
 * ``docunet_stress``: DocUNet stress variants (whole photos, quarter turns, small pages).
+* ``uvdoc_benchmark``: the 50 UVDoc benchmark photos scored with ``flattener.benchmark``.
 * ``predictions``: rectified images without scores (``predictions.json``).
 * ``evaluator_calibration``: the evaluator checked against published outputs.
 
@@ -22,10 +23,11 @@ and whether they count as a real-photo result of a new model.
 where an own checkpoint's training started: ``scratch``, ``external_pretrained`` (the
 UVDoc weights, also through a parent checkpoint) or ``unknown``.
 
-``new_model_real_photo`` is true only for DocUNet results (standard or stress) of an
-own checkpoint that is not a smoke run, whatever its initialization. ``evidence_kind``
-is one label for the whole record: ``external_pretrained``, then ``smoke_training``,
-then ``new_model_real_photo``, and otherwise the measurement.
+``new_model_real_photo`` is true only for real-photo benchmark results (DocUNet standard
+or stress, UVDoc benchmark) of an own checkpoint that is not a smoke run, whatever its
+initialization. ``evidence_kind`` is one label for the whole record:
+``external_pretrained``, then ``smoke_training``, then ``new_model_real_photo``, and
+otherwise the measurement.
 """
 
 from __future__ import annotations
@@ -38,10 +40,11 @@ MEASUREMENTS = (
     "training_loss",
     "docunet_standard",
     "docunet_stress",
+    "uvdoc_benchmark",
     "predictions",
     "evaluator_calibration",
 )
-REAL_PHOTO_MEASUREMENTS = frozenset({"docunet_standard", "docunet_stress"})
+REAL_PHOTO_MEASUREMENTS = frozenset({"docunet_standard", "docunet_stress", "uvdoc_benchmark"})
 PROVENANCES = ("own_checkpoint", "own_previous_model", "external_pretrained", "unknown")
 INITIALIZATIONS = ("scratch", "external_pretrained", "unknown")
 SMOKE_STEPS = 10_000
