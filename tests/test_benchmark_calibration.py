@@ -131,6 +131,7 @@ def test_g4_relative_tolerance_on_doctr_settings():
     assert calibration.gate_g4(_ocr_report(0.979))["status"] == "fail"
     gate = calibration.gate_g4(_ocr_report(1.0))
     assert gate["tesseract_version"] == "tesseract v5.0.1.20220118"
+    assert gate["tesseract_build"] is None and gate["tesseract_leptonica_version"] is None
     assert gate["checks"][-1]["metric"] == "tesseract_version" and gate["checks"][-1]["pass"]
     assert "'tesseract v5.0.1.20220118' must be 5.0.1 -> ok" in calibration.format_gates([gate])
 

@@ -60,3 +60,50 @@ def test_stress_runs_only_with_the_default_protocol(tmp_path, monkeypatch):
         tool.main([str(weights), "r1", "--quantize", "truncate", "--stress"])
     with pytest.raises(SystemExit, match="--stress"):
         tool.main([str(weights), "r1", "--ref-resize", "uvdoc_view2_double", "--stress"])
+
+
+def test_ocr_reports_have_their_own_names_and_match_engine_and_images(tmp_path):
+    assert tool.ocr_report_name("round") == "ocr-doctr.json"
+    assert tool.ocr_report_name("truncate") == "ocr-doctr-truncate.json"
+    args = tool.build_parser().parse_args(["model.pt", "r1", "--ocr", "--tessdata-dir", "td"])
+    assert args.ocr and args.tessdata_dir == Path("td")
+    images = tmp_path / "pred"
+    images.mkdir()
+    (images / "1_1.png").write_bytes(b"image")
+    engine = {
+        "executable_sha256": "e",
+        "traineddata": {"eng.traineddata": {"sha256": "t"}},
+    }
+    report = {
+        "config": {"protocols": ["doctr"]},
+        "inputs": {"predictions": {"1_1": tool.sha256_file(images / "1_1.png")}},
+        "predictions_record": {"quantize": "truncate"},
+        "tesseract": engine,
+    }
+    path = tmp_path / "ocr.json"
+    path.write_text(json.dumps(report))
+    assert tool.ocr_report_matches(path, images, engine, "truncate")
+    assert not tool.ocr_report_matches(path, images, engine, "round")
+    assert not tool.ocr_report_matches(
+        path, images, {**engine, "executable_sha256": "x"}, "truncate"
+    )
+    assert not tool.ocr_report_matches(path, images, {**engine, "traineddata": {}}, "truncate")
+    (images / "1_1.png").write_bytes(b"other")
+    assert not tool.ocr_report_matches(path, images, engine, "truncate")
+    report["inputs"]["predictions"] = {}
+    path.write_text(json.dumps(report))
+    assert not tool.ocr_report_matches(path, images, engine, "truncate")
+
+
+def test_ocr_text_marks_reports_that_are_not_comparable():
+    setting = {"ed": 375.6, "cer": 0.1541}
+    report = {
+        "summary": {"doctr": {"setting1_doctr_60": setting, "setting2_dewarpnet_50": setting}},
+        "comparable": True,
+        "comparability": {"tesseract_build": "build-a"},
+    }
+    assert tool.ocr_text(report) == (
+        "ocr S1 ed=375.60 cer=0.1541 S2 ed=375.60 cer=0.1541 (build-a)"
+    )
+    report["comparable"] = False
+    assert tool.ocr_text(report).endswith("(not comparable)")

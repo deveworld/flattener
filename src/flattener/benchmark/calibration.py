@@ -9,6 +9,8 @@ G3  UVDoc ``DocUnet_results`` (128 images), UVDoc convention: 0.544 / 6.83 / 0.3
 G4  DocTr OCR protocol on PaperEdge outputs with Tesseract 5.0.1: DocScanner table
     S1 ED 375.60 / CER 0.1541, S2 ED 777.76 / CER 0.2014 within 2 %. The report must
     come from Tesseract 5.0.1 with the plain DocTr configuration and verified scans.
+    A build that passes G4 is added to ``ocr.CALIBRATED_TESSERACT_BUILDS``; OCR reports
+    are comparable only with those builds.
 
 Each gate reads a report written by :func:`run_calibration`; existing reports are
 reused, so the summary can be rebuilt from copied reports without the inputs. Reused
@@ -351,7 +353,9 @@ def gate_g4(report: dict[str, Any] | None) -> dict[str, Any]:
         description,
         checks,
         tesseract_version=tesseract.get("version_first_line"),
+        tesseract_leptonica_version=ocr.leptonica_version(tesseract.get("version")),
         tesseract_executable_sha256=tesseract.get("executable_sha256"),
+        tesseract_build=ocr.calibrated_build(tesseract),
         traineddata=tesseract.get("traineddata"),
     )
 

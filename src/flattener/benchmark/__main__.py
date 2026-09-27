@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 import sys
 from pathlib import Path
 
@@ -92,6 +93,27 @@ def _add_tesseract(parser: argparse.ArgumentParser) -> None:
         "--tesseract", default="tesseract", help="tesseract executable; default %(default)s"
     )
     parser.add_argument("--temp-dir", default=None, help="directory for Tesseract temp files")
+    parser.add_argument(
+        "--tessdata-dir",
+        default=None,
+        help="tessdata folder, passed as TESSDATA_PREFIX (conda-forge builds need it); "
+        "default: the inherited TESSDATA_PREFIX or the build's own path",
+    )
+    parser.add_argument(
+        "--launcher",
+        default=None,
+        help='command prefix for the executable, for example "wine" to run tesseract.exe; '
+        "the report still hashes the executable itself",
+    )
+
+
+def _tesseract(args: argparse.Namespace) -> ocr.Tesseract:
+    return ocr.Tesseract(
+        args.tesseract,
+        temp_dir=args.temp_dir,
+        tessdata_dir=args.tessdata_dir,
+        launcher=tuple(shlex.split(args.launcher or "")),
+    )
 
 
 def _add_uvdoc_root(parser: argparse.ArgumentParser) -> None:
@@ -455,7 +477,7 @@ def main(argv: list[str] | None = None) -> int:
             args.predictions,
             pattern=args.pattern,
             protocols=args.protocol or ("doctr",),
-            engine=ocr.Tesseract(args.tesseract, temp_dir=args.temp_dir),
+            engine=_tesseract(args),
             references_dir=args.references_dir,
             reference_pattern=args.reference_pattern,
             verify_references=not args.no_verify_references,
@@ -478,7 +500,7 @@ def main(argv: list[str] | None = None) -> int:
     build = None
     if has_inputs and needs_flow:
         build = siftflow.build_siftflow(args.siftflow_source, cache_dir=args.cache_dir)
-    engine = None if args.no_ocr else ocr.Tesseract(args.tesseract, temp_dir=args.temp_dir)
+    engine = None if args.no_ocr else _tesseract(args)
     status = calibration.run_calibration(
         args.reports_dir,
         paperedge_dir=args.paperedge_dir,

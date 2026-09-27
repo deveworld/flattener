@@ -19,9 +19,10 @@ to a temporary file and ``tesseract IN OUTBASE [config] txt`` is run; the UTF-8 
 file is returned verbatim. Metric scoring (``docunet.py``) composites over black.
 
 OCR numbers depend on the Tesseract build: gate G4 reproduces the DocScanner table
-only with Tesseract 5.0.1 (UB-Mannheim 5.0.1.20220118), while 5.5.3 gives 3-5 % lower
-edit distances. Reports are marked ``comparable`` only for that engine version and
-the published DocUNet scans.
+with Tesseract 5.0.1, while 5.5.3 gives 3-5 % lower edit distances. Reports are
+marked ``comparable`` only for a build in ``CALIBRATED_TESSERACT_BUILDS`` (builds that
+passed G4, identified by version banner, Leptonica version, executable SHA-256 and
+``eng.traineddata`` SHA-256) and the published DocUNet scans.
 """
 
 from __future__ import annotations
@@ -75,9 +76,43 @@ SETTINGS = {
     "setting2_dewarpnet_50": DEWARPNET_SETTING_2,
 }
 PROTOCOL_CONFIG = {"doctr": "", "uvdoc": "--oem 1"}
-# The engine gate G4 is calibrated with; other versions give different OCR numbers.
+# The engine version gate G4 is calibrated with; other versions give different OCR numbers.
 CALIBRATED_TESSERACT_VERSION = "5.0.1"
 _CALIBRATED_VERSION_PATTERN = re.compile(r"(?:^|[^\d.])v?5\.0\.1(?:$|[^\d])")
+_LEPTONICA_PATTERN = re.compile(r"leptonica-(\d+(?:\.\d+)*)")
+_ENG_SHA256 = "7d4322bd2a7749724879683fc3912cb542f19906c83bcc1a52132556427170b2"
+# Tesseract builds that passed gate G4 with the DocTr protocol (PaperEdge outputs,
+# verified scans). ``eng.traineddata`` is tessdata_fast eng (4,113,088 bytes) in each.
+CALIBRATED_TESSERACT_BUILDS: dict[str, dict[str, Any]] = {
+    "ub-mannheim-5.0.1.20220118-win64": {
+        "version_first_line": "tesseract v5.0.1.20220118",
+        "leptonica_version": "1.78.0",
+        "executable_sha256": "dfec41705223dae733967ff7df256d27caca1dc589c5b1fece00a877ded6f3e5",
+        "eng_traineddata_sha256": _ENG_SHA256,
+        "source": "https://digi.bib.uni-mannheim.de/tesseract/"
+        "tesseract-ocr-w64-setup-v5.0.1.20220118.exe",
+        "g4": {
+            "setting1_doctr_60": {"ed": 375.60, "cer": 0.15410},
+            "setting2_dewarpnet_50": {"ed": 777.76, "cer": 0.20144},
+        },
+    },
+}
+# Builds that ran G4 and missed it; reports name them in ``comparability``.
+G4_FAILED_TESSERACT_BUILDS: dict[str, dict[str, Any]] = {
+    "conda-forge-5.0.1-h84e3e21_0-linux64": {
+        "version_first_line": "tesseract 5.0.1",
+        "leptonica_version": "1.82.0",
+        "executable_sha256": "b33601380f1004c4093b98b867e00758c6abc11be7e4e81d2f99c768e22194ee",
+        "eng_traineddata_sha256": _ENG_SHA256,
+        "source": "https://conda.anaconda.org/conda-forge/linux-64/"
+        "tesseract-5.0.1-h84e3e21_0.tar.bz2",
+        "g4": {
+            "setting1_doctr_60": {"ed": 384.47, "cer": 0.15932},
+            "setting2_dewarpnet_50": {"ed": 809.06, "cer": 0.20790},
+        },
+    },
+}
+
 DEFAULT_CROP_DIR = Path("outputs/benchmarks/docunet/crop")
 DEFAULT_CROP_PATTERN = "{k}_{m} copy.png"
 # Image formats pytesseract 0.3.8 accepts (SUPPORTED_FORMATS).
@@ -173,13 +208,30 @@ class OcrEngine(Protocol):
 
 @dataclass(frozen=True)
 class Tesseract:
-    """The ``tesseract`` executable, called the way ``pytesseract.image_to_string`` does."""
+    """The ``tesseract`` executable, called the way ``pytesseract.image_to_string`` does.
+
+    ``tessdata_dir`` sets ``TESSDATA_PREFIX`` for every call (conda-forge builds need it);
+    without it an inherited ``TESSDATA_PREFIX`` applies. ``launcher`` is a command prefix,
+    for example ``("wine",)`` to run the Windows build on Linux; the executable hash is
+    still taken from ``executable``.
+    """
 
     executable: str = "tesseract"
     temp_dir: str | None = None
+    tessdata_dir: str | None = None
+    launcher: tuple[str, ...] = ()
 
     def _command(self) -> str:
         return self.executable
+
+    def _arguments(self) -> list[str]:
+        return [*self.launcher, self._command()]
+
+    def _env(self) -> dict[str, str]:
+        env = {**os.environ, "OMP_THREAD_LIMIT": "1"}
+        if self.tessdata_dir is not None:
+            env["TESSDATA_PREFIX"] = str(Path(self.tessdata_dir).expanduser().resolve())
+        return env
 
     def image_to_string(self, image: Image.Image, config: str = "") -> str:
         prepared, extension = prepare_like_pytesseract(image)
@@ -187,12 +239,12 @@ class Tesseract:
             base = os.path.join(directory, "tess")
             input_path = f"{base}.{extension}"
             prepared.save(input_path, format=prepared.format)
-            arguments = [self._command(), input_path, base, *shlex.split(config), "txt"]
+            arguments = [*self._arguments(), input_path, base, *shlex.split(config), "txt"]
             completed = subprocess.run(
                 arguments,
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
-                env={**os.environ, "OMP_THREAD_LIMIT": "1"},
+                env=self._env(),
                 check=False,
             )
             if completed.returncode != 0:
@@ -202,19 +254,22 @@ class Tesseract:
                 return stream.read().decode("utf-8")
 
     def metadata(self) -> dict[str, Any]:
-        """Version banner plus SHA-256 of the executable and the language data."""
+        """Version banner plus SHA-256 of the executable, its libraries and the language data."""
+        env = self._env()
         version = subprocess.run(
-            [self._command(), "--version"],
+            [*self._arguments(), "--version"],
             capture_output=True,
             check=True,
             stdin=subprocess.DEVNULL,
+            env=env,
         )
         banner = (version.stdout or version.stderr).decode("utf-8", "replace").replace("\r\n", "\n")
         languages = subprocess.run(
-            [self._command(), "--list-langs"],
+            [*self._arguments(), "--list-langs"],
             capture_output=True,
             check=True,
             stdin=subprocess.DEVNULL,
+            env=env,
         )
         listing = (languages.stdout + languages.stderr).decode("utf-8", "replace")
         resolved = _resolve_executable(self._command())
@@ -225,22 +280,78 @@ class Tesseract:
                 path = tessdata / name
                 if path.is_file():
                     traineddata[name] = {"bytes": path.stat().st_size, "sha256": sha256_file(path)}
+        recorded_env = {"OMP_THREAD_LIMIT": "1"}
+        if "TESSDATA_PREFIX" in env:
+            recorded_env["TESSDATA_PREFIX"] = env["TESSDATA_PREFIX"]
         return {
             "executable": None if resolved is None else str(resolved),
             "executable_sha256": None if resolved is None else sha256_file(resolved),
+            "libraries": {} if resolved is None else _library_hashes(resolved),
+            "launcher": list(self.launcher),
+            "leptonica_version": leptonica_version(banner),
             "tessdata_dir": None if tessdata is None else str(tessdata),
             "traineddata": traineddata,
             "version": banner.strip(),
             "version_first_line": banner.strip().splitlines()[0] if banner.strip() else None,
-            "env": {"OMP_THREAD_LIMIT": "1"},
+            "env": recorded_env,
         }
 
 
+def leptonica_version(banner: str | None) -> str | None:
+    """Leptonica version from a ``tesseract --version`` banner (``leptonica-1.82.0``)."""
+    if not isinstance(banner, str):
+        return None
+    match = _LEPTONICA_PATTERN.search(banner)
+    return None if match is None else match.group(1)
+
+
+def calibrated_build(
+    metadata: dict[str, Any] | None,
+    builds: dict[str, dict[str, Any]] = CALIBRATED_TESSERACT_BUILDS,
+) -> str | None:
+    """Name of the build in ``builds`` (default: the G4-calibrated builds) that
+    ``Tesseract.metadata()`` describes, or None."""
+    if not isinstance(metadata, dict):
+        return None
+    eng = (metadata.get("traineddata") or {}).get("eng.traineddata") or {}
+    first_line = metadata.get("version_first_line")
+    identity = {
+        "version_first_line": first_line.strip() if isinstance(first_line, str) else None,
+        "leptonica_version": leptonica_version(metadata.get("version")),
+        "executable_sha256": metadata.get("executable_sha256"),
+        "eng_traineddata_sha256": eng.get("sha256"),
+    }
+    for name, build in builds.items():
+        if all(build[key] == value for key, value in identity.items()):
+            return name
+    return None
+
+
 def is_calibrated_tesseract(version_first_line: str | None) -> bool:
-    """Whether a ``tesseract --version`` banner is the version gate G4 calibrates."""
+    """Whether a ``tesseract --version`` banner is the version gate G4 calibrates.
+
+    Comparability needs the full build identity: see ``calibrated_build``.
+    """
     if not isinstance(version_first_line, str):
         return False
     return _CALIBRATED_VERSION_PATTERN.search(version_first_line.strip()) is not None
+
+
+def _library_hashes(executable: Path) -> dict[str, str]:
+    """SHA-256 of the Tesseract and Leptonica shared libraries next to the executable
+    or in ``../lib`` (keys relative to the executable's parent's parent)."""
+    base = executable.parent.parent
+    hashes = {}
+    for folder in (executable.parent, base / "lib"):
+        if not folder.is_dir():
+            continue
+        for path in sorted(folder.iterdir()):
+            name = path.name.lower()
+            if not name.startswith(("libtesseract", "liblept")) or path.is_symlink():
+                continue
+            if path.is_file() and (".so" in name or name.endswith((".dll", ".dylib"))):
+                hashes[path.relative_to(base).as_posix()] = sha256_file(path)
+    return hashes
 
 
 def _resolve_executable(command: str) -> Path | None:
@@ -256,7 +367,11 @@ def _tessdata_dir(listing: str) -> Path | None:
     match = re.search(r'List of available languages in "(.+?)"', listing)
     if match is None:
         return None
-    path = Path(match.group(1).rstrip("/\\"))
+    listed = match.group(1).rstrip("/\\")
+    path = Path(listed)
+    if not path.is_dir() and re.match(r"[Zz]:[\\/]", listed):
+        # A Windows build under Wine lists Z:\..., and Wine maps drive Z: to /.
+        path = Path("/" + listed[3:].replace("\\", "/"))
     return path if path.is_dir() else None
 
 
@@ -503,14 +618,21 @@ def evaluate_ocr(
             uvdoc_summary.update(failures(DEWARPNET_SETTING_2))
             summary["uvdoc"] = {"uvdoc_50": uvdoc_summary}
             rows["uvdoc"] = {"uvdoc_50": uvdoc_rows}
-    calibrated_engine = is_calibrated_tesseract(engine_metadata.get("version_first_line"))
+    build = calibrated_build(engine_metadata)
     return {
         "benchmark": "docunet-ocr",
-        "comparable": calibrated_engine and verify_references,
+        "comparable": build is not None and verify_references,
         "comparability": {
+            "calibrated_builds": sorted(CALIBRATED_TESSERACT_BUILDS),
             "calibrated_tesseract_version": CALIBRATED_TESSERACT_VERSION,
             "references_verified": verify_references,
-            "tesseract_version_matches": calibrated_engine,
+            "tesseract_build": build,
+            "tesseract_build_failed_g4": calibrated_build(
+                engine_metadata, G4_FAILED_TESSERACT_BUILDS
+            ),
+            "tesseract_version_matches": is_calibrated_tesseract(
+                engine_metadata.get("version_first_line")
+            ),
         },
         "config": {
             "crop_pattern": crop_pattern if "uvdoc" in protocols else None,

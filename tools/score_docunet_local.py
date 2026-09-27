@@ -4,6 +4,8 @@ Usage (from any directory; put --stress after CHECKPOINT and RUN):
   .venv/bin/python tools/score_docunet_local.py CHECKPOINT RUN [--stress [VARIANT ...]]
   .venv/bin/python tools/score_docunet_local.py CHECKPOINT RUN \
       --quantize truncate --ref-resize uvdoc_view2_double    # the published protocol
+  .venv/bin/python tools/score_docunet_local.py CHECKPOINT RUN --ocr \
+      --tesseract TREE/tesseract.exe --tesseract-launcher wine   # UB-Mannheim 5.0.1 via Wine
 
 Steps:
   1. ``flattener.dewarp.predict docunet`` rectifies the 130 crops with ``--force-render``
@@ -20,6 +22,11 @@ Steps:
      stress variants (default: full_frame, rot90, rot270, small_page) into
      CACHE/stress/RUN and copies stress.json and each variant's docunet.json and
      predictions.json to outputs/dewarp-runs/RUN/stress/.
+  4. With ``--ocr``: ``flattener.benchmark ocr`` (DocTr protocol, Setting 1 and 2) into
+     outputs/dewarp-runs/RUN/ocr-doctr.json, or ocr-doctr-Q.json for Q=truncate. An
+     existing report is kept when its prediction hashes, Tesseract executable and
+     eng.traineddata match. Its numbers are comparable only when the report says so
+     (a Tesseract build that passed gate G4, see flattener.benchmark.ocr).
 
 outputs/dewarp-runs/RUN/ also gets predictions.json, or predictions-truncate.json for
 Q=truncate (the prediction record, no images). Each quantization and ref-resize has its
@@ -46,13 +53,14 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
 import time
 from pathlib import Path
 
-from flattener.benchmark import siftflow
+from flattener.benchmark import ocr, siftflow
 
 REPO = Path(__file__).resolve().parents[1]
 CROP_DIR = REPO / "outputs/benchmarks/docunet/crop"
@@ -138,6 +146,28 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="predict and score again even when outputs for this run exist",
     )
+    parser.add_argument(
+        "--ocr",
+        action="store_true",
+        help="also OCR the predictions with the DocTr protocol (ocr-doctr*.json)",
+    )
+    parser.add_argument(
+        "--tesseract",
+        default=os.environ.get("FLATTENER_TESSERACT", "tesseract"),
+        help="tesseract executable for --ocr; default $FLATTENER_TESSERACT or tesseract",
+    )
+    parser.add_argument(
+        "--tessdata-dir",
+        type=Path,
+        default=None,
+        help="tessdata folder for --ocr (TESSDATA_PREFIX); default: inherited",
+    )
+    parser.add_argument(
+        "--tesseract-launcher",
+        default=os.environ.get("FLATTENER_TESSERACT_LAUNCHER"),
+        help='command prefix for --tesseract, for example "wine"; '
+        "default $FLATTENER_TESSERACT_LAUNCHER",
+    )
     parser.add_argument("--quiet", action="store_true", help="no per-image progress")
     return parser
 
@@ -196,6 +226,40 @@ def report_name(ref_resize: str, quantize: str) -> str:
 def record_name(quantize: str) -> str:
     """predictions.json for round, predictions-Q.json otherwise."""
     return "predictions.json" if quantize == DEFAULT_QUANTIZE else f"predictions-{quantize}.json"
+
+
+def ocr_report_name(quantize: str) -> str:
+    """ocr-doctr.json for round, ocr-doctr-Q.json otherwise."""
+    return "ocr-doctr.json" if quantize == DEFAULT_QUANTIZE else f"ocr-doctr-{quantize}.json"
+
+
+def ocr_report_matches(
+    report_path: Path, pred_dir: Path, engine: dict, quantize: str = DEFAULT_QUANTIZE
+) -> bool:
+    """Whether the OCR report read exactly the current images (DocTr protocol, images
+    quantized by ``quantize``) with the Tesseract executable and eng.traineddata that
+    ``engine`` (``Tesseract.metadata()``) describes."""
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    if report.get("config", {}).get("protocols") != ["doctr"]:
+        return False
+    if (report.get("predictions_record") or {}).get("quantize", DEFAULT_QUANTIZE) != quantize:
+        return False
+    used = report.get("tesseract") or {}
+
+    def eng(metadata: dict) -> str | None:
+        return ((metadata.get("traineddata") or {}).get("eng.traineddata") or {}).get("sha256")
+
+    if used.get("executable_sha256") != engine.get("executable_sha256"):
+        return False
+    if eng(used) is None or eng(used) != eng(engine):
+        return False
+    scored = report.get("inputs", {}).get("predictions", {})
+    if not scored:
+        return False
+    return all(
+        (pred_dir / f"{key}.png").is_file() and sha256_file(pred_dir / f"{key}.png") == digest
+        for key, digest in scored.items()
+    )
 
 
 def report_matches(
@@ -296,6 +360,41 @@ def stress(args, cache: Path, env: dict[str, str], out_dir: Path) -> dict:
     return summary
 
 
+def run_ocr(args, cache: Path, env: dict[str, str], out_dir: Path) -> tuple[dict, str]:
+    images = prediction_dir(cache, args.run, args.quantize)
+    report_path = out_dir / ocr_report_name(args.quantize)
+    tessdata = None if args.tessdata_dir is None else str(args.tessdata_dir)
+    launcher = args.tesseract_launcher or ""
+    if report_path.is_file() and not args.overwrite:
+        engine = ocr.Tesseract(
+            args.tesseract, tessdata_dir=tessdata, launcher=tuple(shlex.split(launcher))
+        ).metadata()
+        if ocr_report_matches(report_path, images, engine, args.quantize):
+            return json.loads(report_path.read_text(encoding="utf-8")), "kept"
+        raise SystemExit(f"error: {report_path} read other images or Tesseract; pass --overwrite")
+    command = [
+        sys.executable, "-m", "flattener.benchmark", "ocr", str(images),
+        "--tesseract", args.tesseract, "--temp-dir", str(cache / "tmp"),
+        "--workers", str(args.workers), "--output", str(report_path), "--overwrite",
+    ]  # fmt: skip
+    if tessdata is not None:
+        command += ["--tessdata-dir", tessdata]
+    if launcher:
+        command += ["--launcher", launcher]
+    if args.quiet:
+        command.append("--quiet")
+    run(command, {**env, "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"})
+    return json.loads(report_path.read_text(encoding="utf-8")), "scored"
+
+
+def ocr_text(report: dict) -> str:
+    doctr = report["summary"]["doctr"]
+    s1, s2 = doctr["setting1_doctr_60"], doctr["setting2_dewarpnet_50"]
+    text = f"ocr S1 ed={s1['ed']:.2f} cer={s1['cer']:.4f} S2 ed={s2['ed']:.2f} cer={s2['cer']:.4f}"
+    build = (report.get("comparability") or {}).get("tesseract_build")
+    return text + (f" ({build})" if report.get("comparable") else " (not comparable)")
+
+
 def metric_text(summary: dict) -> str:
     return f"ms_ssim={summary['ms_ssim']:.4f} ld={summary['ld']:.3f} ad={summary['ad']:.4f}"
 
@@ -352,6 +451,11 @@ def main(argv: list[str] | None = None) -> int:
                 status = 1
                 continue
             parts.append(f"stress {name} 128_excl64 {metric_text(entry['summary']['128_excl64'])}")
+    if args.ocr:
+        ocr_report, ocr_state = run_ocr(args, cache, env, out_dir)
+        parts.append(
+            f"{ocr_text(ocr_report)} {ocr_state}: {ocr_report['timing']['wall_seconds']:.0f} s wall"
+        )
     print(f"total predict wall {predict_wall:.0f} s", file=sys.stderr)
     print(" | ".join(parts), flush=True)
     return status

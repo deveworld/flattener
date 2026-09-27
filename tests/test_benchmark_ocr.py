@@ -9,7 +9,7 @@ import pytest
 from PIL import Image
 
 from flattener.benchmark import ocr
-from flattener.benchmark.reporting import write_json_atomic
+from flattener.benchmark.reporting import sha256_file, write_json_atomic
 
 
 def _dp_distance(first: str, second: str) -> int:
@@ -134,11 +134,160 @@ def test_tesseract_metadata_records_version_and_hashes(monkeypatch, tmp_path):
         return subprocess.CompletedProcess(arguments, 0, listing, b"")
 
     monkeypatch.setattr(ocr.subprocess, "run", fake_run)
+    monkeypatch.delenv("TESSDATA_PREFIX", raising=False)
     record = ocr.Tesseract(str(executable)).metadata()
     assert record["version_first_line"] == "tesseract v5.0.1"
     assert record["executable"] == str(executable.resolve())
     assert len(record["executable_sha256"]) == 64
     assert record["traineddata"]["eng.traineddata"]["bytes"] == 5
+    assert record["leptonica_version"] is None and record["libraries"] == {}
+    assert record["env"] == {"OMP_THREAD_LIMIT": "1"}
+
+
+def test_tessdata_dir_sets_tessdata_prefix_and_libraries_are_hashed(monkeypatch, tmp_path):
+    prefix = tmp_path / "env"
+    (prefix / "bin").mkdir(parents=True)
+    (prefix / "lib").mkdir()
+    executable = prefix / "bin" / "tesseract"
+    executable.write_bytes(b"binary")
+    (prefix / "lib" / "libtesseract.so.5.0.0").write_bytes(b"tess")
+    (prefix / "lib" / "libtesseract.so.5").symlink_to("libtesseract.so.5.0.0")
+    (prefix / "lib" / "liblept.so.5.0.4").write_bytes(b"lept")
+    (prefix / "lib" / "liblept.a").write_bytes(b"static")
+    (prefix / "lib" / "libz.so.1").write_bytes(b"zlib")
+    tessdata = prefix / "share" / "tessdata"
+    tessdata.mkdir(parents=True)
+    (tessdata / "eng.traineddata").write_bytes(b"model")
+    envs = []
+
+    def fake_run(arguments, **kwargs):
+        envs.append(kwargs["env"])
+        if arguments[1] == "--version":
+            banner = b"tesseract 5.0.1\n leptonica-1.82.0\n  libgif 5.2.1\n"
+            return subprocess.CompletedProcess(arguments, 0, banner, b"")
+        if arguments[1] == "--list-langs":
+            where = kwargs["env"]["TESSDATA_PREFIX"]
+            listing = f'List of available languages in "{where}/" (1):\neng\n'.encode()
+            return subprocess.CompletedProcess(arguments, 0, listing, b"")
+        with open(arguments[2] + ".txt", "wb") as stream:
+            stream.write(b"text")
+        return subprocess.CompletedProcess(arguments, 0, b"", b"")
+
+    monkeypatch.setattr(ocr.subprocess, "run", fake_run)
+    engine = ocr.Tesseract(str(executable), temp_dir=str(tmp_path), tessdata_dir=str(tessdata))
+    record = engine.metadata()
+    assert engine.image_to_string(Image.new("L", (2, 2))) == "text"
+    assert all(env["TESSDATA_PREFIX"] == str(tessdata) for env in envs)
+    assert all(env["OMP_THREAD_LIMIT"] == "1" for env in envs)
+    assert record["env"] == {"OMP_THREAD_LIMIT": "1", "TESSDATA_PREFIX": str(tessdata)}
+    assert record["tessdata_dir"] == str(tessdata)
+    assert record["leptonica_version"] == "1.82.0"
+    assert sorted(record["libraries"]) == ["lib/liblept.so.5.0.4", "lib/libtesseract.so.5.0.0"]
+    monkeypatch.setenv("TESSDATA_PREFIX", str(tessdata))
+    inherited = ocr.Tesseract(str(executable)).metadata()
+    assert inherited["env"]["TESSDATA_PREFIX"] == str(tessdata)
+
+
+def test_launcher_prefixes_every_call_and_wine_tessdata_paths_map_to_unix(monkeypatch, tmp_path):
+    tree = tmp_path / "tree"
+    (tree / "tessdata").mkdir(parents=True)
+    executable = tree / "tesseract.exe"
+    executable.write_bytes(b"exe")
+    (tree / "libtesseract-5.dll").write_bytes(b"dll")
+    (tree / "tessdata" / "eng.traineddata").write_bytes(b"model")
+    wine_path = "Z:" + str(tree).replace("/", "\\") + "/tessdata/"
+    calls = []
+
+    def fake_run(arguments, **kwargs):
+        calls.append(arguments)
+        if arguments[2] == "--version":
+            return subprocess.CompletedProcess(arguments, 0, b"tesseract v5.0.1.20220118\r\n", b"")
+        if arguments[2] == "--list-langs":
+            listing = f'List of available languages in "{wine_path}" (1):\r\neng\r\n'
+            return subprocess.CompletedProcess(arguments, 0, listing.encode(), b"")
+        with open(arguments[3] + ".txt", "wb") as stream:
+            stream.write(b"text")
+        return subprocess.CompletedProcess(arguments, 0, b"", b"")
+
+    monkeypatch.setattr(ocr.subprocess, "run", fake_run)
+    engine = ocr.Tesseract(str(executable), temp_dir=str(tmp_path), launcher=("wine",))
+    record = engine.metadata()
+    assert engine.image_to_string(Image.new("L", (2, 2))) == "text"
+    assert all(call[:2] == ["wine", str(executable)] for call in calls)
+    assert record["launcher"] == ["wine"]
+    assert record["executable"] == str(executable.resolve())
+    assert record["tessdata_dir"] == str(tree / "tessdata")
+    assert record["traineddata"]["eng.traineddata"]["bytes"] == 5
+    assert record["libraries"] == {
+        "tree/libtesseract-5.dll": sha256_file(tree / "libtesseract-5.dll")
+    }
+    missing = 'List of available languages in "Z:\\no\\such\\dir/" (0):'
+    assert ocr._tessdata_dir(missing) is None
+
+
+def _build_metadata(name, builds=ocr.CALIBRATED_TESSERACT_BUILDS):
+    build = builds[name]
+    return {
+        "executable_sha256": build["executable_sha256"],
+        "traineddata": {"eng.traineddata": {"sha256": build["eng_traineddata_sha256"]}},
+        "version": f"{build['version_first_line']}\n leptonica-{build['leptonica_version']}\n",
+        "version_first_line": build["version_first_line"],
+    }
+
+
+def test_calibrated_build_needs_version_leptonica_executable_and_traineddata():
+    assert ocr.leptonica_version("tesseract 5.0.1\n leptonica-1.82.0\n") == "1.82.0"
+    assert ocr.leptonica_version("tesseract 5.0.1") is None
+    for name in ocr.CALIBRATED_TESSERACT_BUILDS:
+        metadata = _build_metadata(name)
+        assert ocr.calibrated_build(metadata) == name
+        assert ocr.is_calibrated_tesseract(metadata["version_first_line"])
+        for key, value in (
+            ("executable_sha256", "0" * 64),
+            ("version", metadata["version"].replace("leptonica-1.", "leptonica-9.")),
+            ("version_first_line", "tesseract 5.5.3"),
+            ("traineddata", {"eng.traineddata": {"sha256": "1" * 64}}),
+            ("traineddata", {}),
+        ):
+            assert ocr.calibrated_build({**metadata, key: value}) is None, (name, key)
+    assert ocr.calibrated_build(None) is None and ocr.calibrated_build({}) is None
+    failed = ocr.G4_FAILED_TESSERACT_BUILDS
+    assert not set(failed) & set(ocr.CALIBRATED_TESSERACT_BUILDS)
+    for name in failed:
+        metadata = _build_metadata(name, failed)
+        assert ocr.calibrated_build(metadata) is None
+        assert ocr.calibrated_build(metadata, failed) == name
+
+
+def test_report_is_comparable_only_with_a_calibrated_build(tmp_path, monkeypatch):
+    scans, predictions = tmp_path / "scans", tmp_path / "pred"
+    scans.mkdir()
+    predictions.mkdir()
+    for k in ocr.protocol_documents("doctr"):
+        Image.new("L", (6, 8), 100).save(scans / f"docunet-reference-{k}.png")
+        for m in (1, 2):
+            Image.new("L", (5, 7), 100).save(predictions / f"{k}_{m}.png")
+    monkeypatch.setattr(ocr, "hash_references", lambda *args, **kwargs: {})
+    name = sorted(ocr.CALIBRATED_TESSERACT_BUILDS)[0]
+
+    class Calibrated(_FakeEngine):
+        def metadata(self):
+            return _build_metadata(name)
+
+    report = ocr.evaluate_ocr(
+        predictions, pattern="{k}_{m}.png", engine=Calibrated(), references_dir=scans, workers=1
+    )
+    assert report["comparable"] is True
+    assert report["comparability"]["tesseract_build"] == name
+    same_version = {**_build_metadata(name), "executable_sha256": "0" * 64}
+    Calibrated.metadata = lambda self: same_version
+    other = ocr.evaluate_ocr(
+        predictions, pattern="{k}_{m}.png", engine=Calibrated(), references_dir=scans, workers=1
+    )
+    assert other["comparable"] is False
+    assert other["comparability"]["tesseract_build"] is None
+    assert other["comparability"]["tesseract_build_failed_g4"] is None
+    assert other["comparability"]["tesseract_version_matches"] is True
 
 
 class _FakeEngine:
@@ -196,6 +345,7 @@ def test_evaluate_ocr_report_with_fake_engine(tmp_path):
     assert report["tesseract"] == {"version_first_line": "fake 1.0"}
     assert report["comparable"] is False
     assert report["comparability"]["tesseract_version_matches"] is False
+    assert report["comparability"]["tesseract_build"] is None
     assert report["config"]["tesseract_config"] == {"doctr": "", "uvdoc": "--oem 1"}
     assert len(report["inputs"]["crops"]) == 50
     assert doctr["setting1_doctr_60"]["prediction_failures"] is None  # no predictions.json
