@@ -76,10 +76,11 @@ the schedule, and a rerun resumes it. Seed 1 keeps the augmentation draws apart 
 those of the seed-0 parent; validation does not depend on the seed, so its EPE compares
 with the parent's.
 
-The lineage of a fine-tuned checkpoint records only the sha256 of the parent's data
-spec. `python -m flattener.scan.shippable` reads the spec from the parent's sidecar when
-the parent sits at its recorded `init_path`; elsewhere pass the parent's sidecar (or
-its spec file) with `--spec`, or the gate answers `unverified_data_spec`.
+The start record of a fine-tune carries the parent's data spec, so
+`python -m flattener.scan.shippable` checks every training step of the chain from the
+child's sidecar alone. Fine-tunes trained before that record only the spec's sha256: the
+gate then reads the parent's sidecar at the recorded `init_path`, or takes the parent's
+sidecar or spec file through `--spec`, and otherwise answers `unverified_data_spec`.
 
 On Windows `cmd.exe`, set the variables with `set FLATTENER_CACHE=E:\cache` and so on.
 Command-line options (`--output-dir`, `--data-spec`, `--init-path`, `--num-workers`, ...)

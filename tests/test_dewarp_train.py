@@ -207,6 +207,16 @@ def test_resume_compatibility_and_initialization_lineage(tmp_path):
     )
     assert lineage["kind"] == "checkpoint" and lineage["track"] == "research"
     assert lineage["sha256"] == json.loads((tmp_path / "research.pt.json").read_text())["sha256"]
+    assert "data_spec" not in lineage  # the parent recorded none
+    # A release fine-tune carries its parent's data spec, so the ship gate can check the
+    # parent's training step without the parent's sidecar.
+    release = tmp_path / "release.pt"
+    save_checkpoint(release, _payload(9, data_spec=spec.to_dict(), data_spec_sha256=spec.sha256))
+    lineage = _initialize(
+        UVDocNet(TINY), replace(config, init="checkpoint", init_path=str(release))
+    )
+    assert lineage["data_spec"] == spec.to_dict()
+    assert DataSpec.from_dict(lineage["data_spec"]).sha256 == lineage["data_spec_sha256"]
     # The weights do not depend on the sizes: a checkpoint trained at another input and
     # grid size initializes a larger model, and the lineage keeps the parent's sizes.
     larger = UVDocNet(DewarpModelConfig(input_size=(96, 64), grid_size=(6, 4), num_filter=4))
