@@ -155,6 +155,8 @@ python -m flattener.learning.evaluation --dataset outputs/dataset \
 
 검증 세트는 `--split validation`으로 평가합니다. 후보 체크포인트 선택은 `python -m flattener.learning.evaluation select --help`를 봅니다.
 
+한국어 실사진 평가 세트 KR-Real v1의 촬영 가이드, 라벨 스키마, 라벨러, 전사 틀, manifest 도구는 [`tools/krreal/`](tools/krreal/README.md)에 있습니다. 사진은 `outputs/krreal/`에 두는 비공개 평가 자료입니다.
+
 ## 좌표 모델 학습
 
 옵션은 `python -m flattener.learning.coordinate_study {check-device,inspect,train} --help`로 확인합니다.

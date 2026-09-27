@@ -1,0 +1,219 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "krreal-label-1",
+  "title": "KR-Real v1 photo label",
+  "description": "One JSON file per photo. Coordinates are pixels of the EXIF-applied image: (0, 0) is the centre of the top-left pixel, x grows right, y grows down (docs/INTERFACE_SPEC.md). Normalized flattener values follow g = 2 * (p + 0.5) / size - 1. Geometry rules that JSON Schema cannot state (quad order and convexity, curve end points, counts per status) are checked by tools/krreal/krreal.py check.",
+  "type": "object",
+  "required": [
+    "schema", "photo", "capture", "coordinates", "page_count", "pages",
+    "flags", "cut_off_sides", "notes", "review", "draft"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "krreal-label-1"},
+    "photo": {"$ref": "#/$defs/photo"},
+    "capture": {"$ref": "#/$defs/capture"},
+    "coordinates": {"$ref": "#/$defs/coordinates"},
+    "page_count": {
+      "description": "Pages visible and labelled: 0 for no page, 2 for a two-page spread.",
+      "type": "integer", "minimum": 0, "maximum": 4
+    },
+    "pages": {"type": "array", "maxItems": 4, "items": {"$ref": "#/$defs/page"}},
+    "flags": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "occluded", "cut_off", "neighbor_page", "vertical_text", "no_page",
+          "two_page", "exif_wrong", "glare", "shadow", "blur"
+        ]
+      }
+    },
+    "cut_off_sides": {
+      "description": "Sides of the EXIF-applied image where the page leaves the photo.",
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"enum": ["top", "right", "bottom", "left"]}
+    },
+    "notes": {"type": "string", "maxLength": 2000},
+    "review": {"$ref": "#/$defs/review"},
+    "draft": {"anyOf": [{"type": "null"}, {"$ref": "#/$defs/draft"}]}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "size": {
+      "description": "[width, height] in pixels.",
+      "type": "array",
+      "prefixItems": [{"type": "integer", "minimum": 1}, {"type": "integer", "minimum": 1}],
+      "items": false,
+      "minItems": 2
+    },
+    "point": {
+      "description": "[x, y] in EXIF-applied pixels. Points may lie outside the image for a page that is cut off.",
+      "type": "array",
+      "prefixItems": [{"type": "number"}, {"type": "number"}],
+      "items": false,
+      "minItems": 2
+    },
+    "text_or_null": {"type": ["string", "null"], "maxLength": 200},
+    "number_or_null": {"type": ["number", "null"]},
+    "photo": {
+      "type": "object",
+      "required": ["file", "sha256", "bytes", "raw_size", "size", "exif_orientation"],
+      "additionalProperties": false,
+      "properties": {
+        "file": {"type": "string", "pattern": "^[^/\\\\]+\\.jpg$", "maxLength": 120},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "bytes": {"type": "integer", "minimum": 1},
+        "raw_size": {"$ref": "#/$defs/size"},
+        "size": {"$ref": "#/$defs/size"},
+        "exif_orientation": {"type": "integer", "minimum": 1, "maximum": 8}
+      }
+    },
+    "capture": {
+      "type": "object",
+      "required": ["phone_id", "stratum", "source_id", "seq", "device", "exif"],
+      "additionalProperties": false,
+      "properties": {
+        "phone_id": {"type": "string", "pattern": "^p[1-9]$"},
+        "stratum": {
+          "enum": [
+            "curved", "small", "table", "rotate", "clutter", "tiny", "flat", "hard", "spread"
+          ]
+        },
+        "source_id": {"type": "string", "pattern": "^[bdx][0-9]{2}$"},
+        "seq": {"type": "integer", "minimum": 1, "maximum": 999},
+        "device": {
+          "type": "object",
+          "required": ["make", "model"],
+          "additionalProperties": false,
+          "properties": {
+            "make": {"$ref": "#/$defs/text_or_null"},
+            "model": {"$ref": "#/$defs/text_or_null"}
+          }
+        },
+        "exif": {
+          "description": "Capture settings copied from EXIF. GPS data is never copied.",
+          "type": "object",
+          "required": ["datetime_original"],
+          "additionalProperties": false,
+          "properties": {
+            "datetime_original": {"$ref": "#/$defs/text_or_null"},
+            "software": {"$ref": "#/$defs/text_or_null"},
+            "lens_model": {"$ref": "#/$defs/text_or_null"},
+            "focal_length_mm": {"$ref": "#/$defs/number_or_null"},
+            "focal_length_35mm": {"$ref": "#/$defs/number_or_null"},
+            "f_number": {"$ref": "#/$defs/number_or_null"},
+            "exposure_s": {"$ref": "#/$defs/number_or_null"},
+            "iso": {"$ref": "#/$defs/number_or_null"}
+          }
+        }
+      }
+    },
+    "coordinates": {
+      "type": "object",
+      "required": ["frame", "origin", "x", "y", "units"],
+      "additionalProperties": false,
+      "properties": {
+        "frame": {"const": "exif_applied"},
+        "origin": {"const": "pixel_center"},
+        "x": {"const": "right"},
+        "y": {"const": "down"},
+        "units": {"const": "px"}
+      }
+    },
+    "polyline_curve": {
+      "description": "Seven or more points along one curved page edge, from corner to corner. top: TL to TR, bottom: BL to BR, left: TL to BL, right: TR to BR. The end points equal the quad corners.",
+      "type": "array",
+      "minItems": 7,
+      "maxItems": 200,
+      "items": {"$ref": "#/$defs/point"}
+    },
+    "text_polygon": {
+      "type": "object",
+      "required": ["kind", "points"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {"enum": ["text", "table", "formula"]},
+        "points": {"type": "array", "minItems": 3, "maxItems": 500, "items": {"$ref": "#/$defs/point"}}
+      }
+    },
+    "reference_line": {
+      "type": "object",
+      "required": ["kind", "points"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {"enum": ["baseline", "table_rule", "vertical_line"]},
+        "points": {"type": "array", "minItems": 2, "maxItems": 200, "items": {"$ref": "#/$defs/point"}}
+      }
+    },
+    "page": {
+      "type": "object",
+      "required": [
+        "reading_order", "quad", "page_rotation_deg", "page_quarter",
+        "curved_edges", "text_polygons", "reference_lines"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "reading_order": {"type": "integer", "minimum": 1, "maximum": 4},
+        "quad": {
+          "description": "Page corners TL, TR, BR, BL in the page's own reading orientation, whatever way the page faces in the photo.",
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": {"$ref": "#/$defs/point"}
+        },
+        "page_rotation_deg": {
+          "description": "Clockwise angle of the TL to TR direction in the image, in (-180, 180]. Derived from quad.",
+          "type": "number", "minimum": -180, "maximum": 180
+        },
+        "page_quarter": {
+          "description": "Clockwise quarter turns of the page in the image (round(page_rotation_deg / 90) mod 4). Turning the image counter-clockwise by 90 * page_quarter degrees makes the page upright.",
+          "type": "integer", "minimum": 0, "maximum": 3
+        },
+        "curved_edges": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "top": {"$ref": "#/$defs/polyline_curve"},
+            "right": {"$ref": "#/$defs/polyline_curve"},
+            "bottom": {"$ref": "#/$defs/polyline_curve"},
+            "left": {"$ref": "#/$defs/polyline_curve"}
+          }
+        },
+        "text_polygons": {"type": "array", "maxItems": 20, "items": {"$ref": "#/$defs/text_polygon"}},
+        "reference_lines": {
+          "description": "3 to 5 lines that are straight on the flat page: text baselines, table rules, vertical lines.",
+          "type": "array",
+          "maxItems": 5,
+          "items": {"$ref": "#/$defs/reference_line"}
+        }
+      }
+    },
+    "review": {
+      "type": "object",
+      "required": ["status", "labeler", "labeled_at", "checker", "checked_at", "seconds_spent", "tool"],
+      "additionalProperties": false,
+      "properties": {
+        "status": {"enum": ["draft", "labeled", "checked"]},
+        "labeler": {"type": "string", "maxLength": 80},
+        "labeled_at": {"$ref": "#/$defs/text_or_null"},
+        "checker": {"type": "string", "maxLength": 80},
+        "checked_at": {"$ref": "#/$defs/text_or_null"},
+        "seconds_spent": {"type": "number", "minimum": 0},
+        "tool": {"type": "string", "maxLength": 80}
+      }
+    },
+    "draft": {
+      "description": "Where prefilled geometry came from. Kept after a person edits the label.",
+      "type": "object",
+      "required": ["provider", "created_at", "fields"],
+      "additionalProperties": false,
+      "properties": {
+        "provider": {"type": "string", "maxLength": 200},
+        "created_at": {"type": "string", "maxLength": 40},
+        "fields": {"type": "array", "uniqueItems": true, "items": {"type": "string", "maxLength": 40}}
+      }
+    }
+  }
+}
