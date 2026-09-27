@@ -621,7 +621,8 @@ def _initialize(model: UVDocNet, config: TrainConfig) -> dict[str, Any]:
     """Load the initial weights and return their lineage record.
 
     The weights do not depend on the input or grid size, so a checkpoint trained at
-    another size initializes this model; the record keeps the parent's model config.
+    another size initializes this model; the record keeps the parent's model config
+    and, when the parent has one, its data spec.
     """
     if config.init == "scratch":
         return {"kind": "scratch", "seed": config.seed}
@@ -646,7 +647,7 @@ def _initialize(model: UVDocNet, config: TrainConfig) -> dict[str, Any]:
     if model.out_point_positions3D is None:
         state = {k: v for k, v in state.items() if not k.startswith("out_point_positions3D.")}
     model.load_state_dict(state)
-    return {
+    record = {
         "kind": "checkpoint",
         "path": str(config.init_path),
         "sha256": checkpoint_sha256(config.init_path),
@@ -657,6 +658,11 @@ def _initialize(model: UVDocNet, config: TrainConfig) -> dict[str, Any]:
         "code_sha256": parent["code"]["sha256"],
         "lineage": parent["lineage"],
     }
+    if isinstance(parent.get("data_spec"), dict):
+        # The ship gate checks the data spec of every training step in the chain. With
+        # the parent's spec here, the child's record passes without the parent's sidecar.
+        record["data_spec"] = parent["data_spec"]
+    return record
 
 
 class _Logger:

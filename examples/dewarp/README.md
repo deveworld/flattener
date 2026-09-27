@@ -44,6 +44,12 @@ output resized to 89x61 (the like-for-like figure on 89x61 nodes) and 12.7 px as
 against the 89x61 target, so on SyntheticDoc maps the denser grid adds little the 45x31
 grid cannot represent.
 
+The start record of a fine-tune carries the parent's data spec, so
+`python -m flattener.scan.shippable` checks every training step of the chain from the
+child's sidecar alone. Fine-tunes trained before that record only the spec's sha256: the
+gate then reads the parent's sidecar at the recorded `init_path`, or takes the parent's
+sidecar or spec file through `--spec`, and otherwise answers `unverified_data_spec`.
+
 On Windows `cmd.exe`, set the variables with `set FLATTENER_CACHE=E:\cache` and so on.
 Command-line options (`--output-dir`, `--data-spec`, `--init-path`, `--num-workers`, ...)
 override the file. Keep configs with machine paths outside the repository.
