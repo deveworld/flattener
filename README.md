@@ -66,6 +66,7 @@ python -m flattener.dewarp.predict --weights CKPT docunet --input-dir crop --out
 
 - `release` 트랙은 이용 조건이 확인된 데이터만 받습니다. 배포 대상은 이 트랙의 가중치입니다.
 - `research` 트랙은 Doc3D·UVDoc 데이터셋처럼 비상업 조건이 붙은 자료로 학습하며, 가중치는 로컬 비교에만 씁니다.
+- 배포 여부는 `flattener.scan.shippable`이 체크포인트 계보 전체를 따라가며 정합니다. 기록된 트랙이 모두 `release`이고, 계보가 `scratch`에서 시작하고, 모든 학습 단계의 데이터 spec이 `require_track(spec, "release")`를 통과해야 배포할 수 있습니다. UVDoc 가중치에서 시작한 R3·R3long·R5는 release 트랙이어도 `research`로, UVDoc·SyntheticDoc 공개 가중치는 `external`로 분류합니다. `load_weights(path)`는 배포할 수 없는 가중치를 `not_shippable`로 거부하고, `research=True`일 때만 불러와 `info["ship_gate"]`에 `research: true`를 남깁니다. `python -m flattener.scan.shippable CKPT_OR_JSON...`은 판정을 한 줄에 하나씩 JSON으로 출력합니다. 모두 배포 가능하면 0, 하나라도 아니면 1, 사용 오류는 2로 끝납니다.
 
 ## 표준 벤치마크 평가
 
