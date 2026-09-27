@@ -1,0 +1,24 @@
+{
+  "schema": "flattener-dewarp-data-1",
+  "name": "release-clean-v2-raw",
+  "track": "release",
+  "sources": [
+    {
+      "name": "syntheticdoc-clean-train-raw",
+      "kind": "converted",
+      "root": "${FLATTENER_DATA}/release/syntheticdoc",
+      "track": "release",
+      "split": "train",
+      "license": "SyntheticDoc CC BY 4.0; documents CC BY, CC0 or ODC-BY, backgrounds CC0 or CC BY, meshes CC BY"
+    },
+    {
+      "name": "syntheticdoc-clean-val-raw",
+      "kind": "converted",
+      "root": "${FLATTENER_DATA}/release/syntheticdoc",
+      "track": "release",
+      "split": "val",
+      "max_samples": 2000,
+      "license": "SyntheticDoc CC BY 4.0; documents CC BY, CC0 or ODC-BY, backgrounds CC0 or CC BY, meshes CC BY"
+    }
+  ]
+}
