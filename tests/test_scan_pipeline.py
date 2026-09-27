@@ -1,13 +1,18 @@
 """The scanner pipeline with fake models and injected failures."""
 
 import json
+from dataclasses import replace
 
 import numpy as np
 import pytest
 import torch
+from PIL import Image
 from scan_fakes import (
+    CONFIG,
+    RELEASE_INFO,
     FakeGate,
     FakeOrienter,
+    Oracle,
     Page,
     oracle_dewarper,
     ramp_scene,
@@ -15,12 +20,13 @@ from scan_fakes import (
     twist,
 )
 
+from flattener.benchmark.reporting import prediction_record
 from flattener.contracts import FlattenerError, RenderConfig, Status
 from flattener.dewarp.checkpoint import CHECKPOINT_SCHEMA, save_checkpoint
 from flattener.dewarp.model import DewarpModelConfig, UVDocNet
-from flattener.dewarp.predict import BatchInput, rectify, rectify_batch, rerun_grid
+from flattener.dewarp.predict import BatchInput, Dewarper, rectify, rectify_batch, rerun_grid
 from flattener.scan import locate
-from flattener.scan.io import read_scan_record, save_scan
+from flattener.scan.io import read_scan_record, read_source, save_scan
 from flattener.scan.pipeline import (
     BUNDLE_SCHEMA,
     PlannedScan,
@@ -66,7 +72,9 @@ def _chain(result):
 
 
 def _error_px(grid, page=TRUE):
-    return float(np.abs(grid - page.grid(source_size=SIZE)).max() * SIZE[1] / 2)
+    """Largest node distance in pixels from the page's true grid of the same shape."""
+    truth = page.grid(grid.shape[:2], source_size=SIZE)
+    return float(np.abs(grid - truth).max() * SIZE[1] / 2)
 
 
 def test_the_default_path_rectifies_a_skewed_page():
@@ -283,9 +291,11 @@ def test_the_stage_cache_reruns_only_what_changed():
     assert scanner.gate.calls == 2 and model.calls == 6
 
 
-def test_whole_image_passes_render_what_rectify_renders():
+@pytest.mark.parametrize("convention", ["flattener", "uvdoc"])
+def test_whole_image_passes_render_what_rectify_renders(convention):
     page = Page((160, 120), (230, 180), 6.0)
-    dewarper = oracle_dewarper(page, SIZE)
+    model_config = replace(CONFIG, grid_convention=convention)
+    dewarper = Dewarper(Oracle(page, SIZE), model_config, torch.device("cpu"), dict(RELEASE_INFO))
     scanner = Scanner(dewarper)
     image = ramp_scene(SIZE, page)
     whole = ScanOverrides(region=(0, 0, SIZE[1], SIZE[0]))
@@ -298,6 +308,9 @@ def test_whole_image_passes_render_what_rectify_renders():
         assert result.image.tobytes() == expected.image.tobytes()
         grid, _ = rerun_grid(dewarper, image, passes, deskew)
         assert result.plan.grid.tobytes() == grid.tobytes()
+        assert result.plan.nodes == convention
+        fast = scanner.scan(image, replace(options, fast_check=True), whole)
+        assert fast.image.tobytes() == expected.image.tobytes()
 
 
 def test_plan_then_render_matches_scan_and_plans_round_trip(tmp_path):
@@ -338,6 +351,7 @@ def test_the_batch_rectifier_records_its_pipeline(tmp_path):
     assert item["status"] == "success" and item["output_size"] == list(SIZE)
     assert item["outcome"] == "rectified_with_warnings" and len(item["crops"]) == 2
     assert report["pipeline"]["name"] == "flattener.scan"
+    assert report["rerun"]["passes"] == 1 and report["rerun"]["deskew"] is True
     with pytest.raises(FlattenerError, match="another pipeline"):
         rectify_batch(scanner.dewarper, inputs, tmp_path)
     failing, _ = _scanner(always=twist)
@@ -351,6 +365,42 @@ def test_the_batch_rectifier_records_its_pipeline(tmp_path):
     )
     item = forced["items"][0]
     assert item["status"] == "invalid_transform" and item["forced"] and item["action"] == "written"
+
+
+def test_scanner_batches_record_the_scanners_protocol(tmp_path):
+    scanner, _ = _scanner()
+    image = ramp_scene(SIZE, TRUE)
+    inputs = [BatchInput("a.png", "a copy.png", lambda: image)]
+    options = ScanOptions(quantize="truncate", passes=1, inset=0.01)
+    report = rectify_batch(
+        scanner.dewarper, inputs, tmp_path / "paper", **scanner.batch_kwargs(options)
+    )
+    record = prediction_record(tmp_path / "paper")
+    assert record["quantize"] == "truncate" == report["evidence"]["quantize"]
+    assert record["inset"]["x"] == 0.01 and record["rerun"]["passes"] == 1
+    assert (
+        record["rerun"]["max_angle_deg"] is None and record["pipeline"]["name"] == "flattener.scan"
+    )
+    # Without the settings the folder still carries the scanner's labels.
+    bare = rectify_batch(
+        scanner.dewarper,
+        inputs,
+        tmp_path / "bare",
+        rectifier=scanner.rectifier(options),
+        pipeline=scanner.pipeline_record(options),
+    )
+    assert bare["quantize"] == "truncate" and bare["rerun"] == report["rerun"]
+    # Settings that disagree with the scanner are refused.
+    rounding = ScanOptions(passes=1)
+    with pytest.raises(FlattenerError, match="protocol"):
+        rectify_batch(
+            scanner.dewarper,
+            inputs,
+            tmp_path / "mislabeled",
+            quantize="truncate",
+            rectifier=scanner.rectifier(rounding),
+            pipeline=scanner.pipeline_record(rounding),
+        )
 
 
 def _tiny_checkpoint(path):
@@ -465,3 +515,179 @@ def test_a_non_finite_pass_is_refused_and_the_chain_goes_on():
     assert first["passes"][1]["skipped"] == "non_finite_outline"
     assert [item["failure"]["code"] for item in first["failures"]] == ["non_finite_grid"] * 2
     assert result.status == Status.SUCCESS and result.plan.region["candidate"] == "C2"
+
+
+def test_a_later_candidate_is_upright_and_says_it_fell_back():
+    # C1 to C3 fail (calls 0-3 and 5-6; call 4 is pass 0, which C4 reuses).
+    page = Page((170, 125), (150, 190), 90.0 + 7.0)
+    orienter = FakeOrienter(page, SIZE)
+    scanner, model = _scanner(
+        page, orienter=orienter, hooks=dict.fromkeys((0, 1, 2, 3, 5, 6), twist)
+    )
+    result = scanner.scan(ramp_scene(SIZE, page))
+    assert result.plan.region["candidate"] == "C4" and result.status == Status.SUCCESS
+    assert result.outcome == Outcome.RECTIFIED_WITH_WARNINGS
+    assert _codes(result) == ["candidate_fallback"]
+    fallback = result.reasons[0].detail
+    assert fallback["candidate"] == "C4" and fallback["failed"] == ["C1", "C2", "C3"]
+    assert fallback["failure"]["code"] == "fold_or_degenerate"
+    assert result.guidance[0].code == "candidate_fallback"
+    # The whole-photo pass is set upright by re-indexing its nodes.
+    assert result.plan.quarter == result.qa["orientation"]["quarter"] == 1
+    assert result.plan.views[0]["quarter_turn"] == 1 and model.calls == 7
+    assert _error_px(result.plan.grid, page) < 1.0  # one pass on the whole photo
+    assert result.image.shape[:2] == result.plan.output.size and result.image.shape[0] > 190
+    chain = result.metadata["chain"]
+    assert chain[-1]["turn"] == "nodes" and chain[-1]["orientation_post"]["action"] is None
+
+
+def test_the_c4_nodes_follow_a_quarter_turn_found_after_dewarping():
+    class LatePost(FakeOrienter):  # sure only from the fourth flat preview (C4's) on
+        def predict(self, image, geometry=None):
+            self.post = sum(kind == "post" for kind, _ in self.calls) >= 3
+            return super().predict(image, geometry)
+
+    page = Page((170, 125), (150, 190), -90.0 + 7.0)
+    orienter = LatePost(page, SIZE, pre=False)
+    hooks = dict.fromkeys((0, 1, 2, 3, 5, 6), twist)
+    scanner, model = _scanner(page, orienter=orienter, hooks=hooks)
+    result = scanner.scan(ramp_scene(SIZE, page))
+    assert [name for name, _, _ in _chain(result)] == ["C1", "C2", "C3", "C4"]
+    entry = next(item for item in result.metadata["chain"] if item["name"] == "C4")
+    assert entry["accepted"] == "final"
+    assert entry["orientation_post"]["action"] == "reindex_quarter_3"
+    assert result.plan.quarter == 3 and _error_px(result.plan.grid, page) < 1.0
+
+
+def test_an_orientation_settled_after_dewarping_carries_to_the_next_candidate():
+    class OncePost(FakeOrienter):
+        def predict(self, image, geometry=None):
+            if geometry is None and any(kind == "post" for kind, _ in self.calls):
+                self.post = False  # only the first flat preview is sure
+            return super().predict(image, geometry)
+
+    page = Page((170, 125), (150, 190), 180.0 + 7.0)
+    orienter = OncePost(page, SIZE, pre=False)
+    scanner, _ = _scanner(page, orienter=orienter, hooks={0: shrink(0.7), 1: shrink(0.7)})
+    result = scanner.scan(ramp_scene(SIZE, page))
+    first, second = result.metadata["chain"][:2]
+    assert first["accepted"] is None and first["orientation_post"]["action"] == "flip_180"
+    assert second["name"] == "C2" and second["quarter"] == 2 and second["accepted"] == "final"
+    assert result.plan.quarter == 2 and _error_px(result.plan.grid, page) < 0.5
+    assert result.qa["orientation"]["settled_by"] == "C1"
+    assert "orientation_uncertain" not in _codes(result)
+    assert _codes(result) == ["candidate_fallback"]
+
+
+def test_plan_and_check_errors_are_candidate_failures():
+    scanner, _ = _scanner(always=shrink(0))
+    image = ramp_scene(SIZE, TRUE)
+    region = ScanOverrides(region=(80, 20, 262, 232))
+    result = scanner.scan(image, ScanOptions(passes=0), region)
+    assert result.outcome == Outcome.ORIGINAL_RETURNED and result.used_fallback
+    assert result.reason_code == "degenerate_grid" and result.status == Status.INVALID_TRANSFORM
+    assert result.guidance[-1].code == "degenerate_grid"
+    with pytest.raises(FlattenerError) as error:
+        ScanOptions(output=(9000, 9000))
+    assert error.value.reason_code == "invalid_scan_option"
+    with pytest.raises(FlattenerError):
+        ScanOverrides(output_size=(4001, 4000))
+    for bad in (ScanOptions, ScanOverrides):
+        with pytest.raises(FlattenerError) as error:
+            bad(aspect="square")
+        assert error.value.reason_code == "invalid_scan_option"
+    assert ScanOptions(output=(8192, 1953)).output == (8192, 1953)
+
+
+def _shipped(page=TRUE, sha256="release-dewarp"):
+    info = {**RELEASE_INFO, "sha256": sha256, "ship_gate": {"shippable": True, "reasons": []}}
+    return Scanner(oracle_dewarper(page, SIZE, info))
+
+
+def test_a_stored_plan_keeps_the_models_that_made_it():
+    research, _ = _scanner(gate=False)
+    release = _shipped()
+    assert release.shippable and not research.shippable
+    image = ramp_scene(SIZE, TRUE)
+    plan = research.plan(image, ScanOptions(orient="none")).plan
+    stored = ScanPlan.from_dict(json.loads(json.dumps(plan.to_dict())))
+    result = release.render(image, stored)
+    assert result.status == Status.SUCCESS and result.research and not result.shippable
+    assert [model["sha256"] for model in result.models] == ["fake-dewarp"]
+    assert result.evidence["model_provenance"] == "own_checkpoint"
+    own = release.render(image, release.plan(image, ScanOptions(orient="none")).plan)
+    assert own.shippable and not own.research
+
+
+def test_a_plan_renders_only_from_a_source_it_can_verify(tmp_path):
+    scanner, _ = _scanner()
+    image = ramp_scene(SIZE, TRUE)
+    Image.fromarray(image).save(tmp_path / "page.png")
+    from_file = read_source(tmp_path / "page.png")
+    plan = scanner.plan(from_file).plan
+    assert plan.source.file_sha256 is not None and plan.source.pixels_sha256 is None
+    assert scanner.render(read_source(tmp_path / "page.png"), plan).status == Status.SUCCESS
+    with pytest.raises(FlattenerError, match="from that file"):
+        scanner.render(image, plan)
+    from_array = scanner.plan(image).plan
+    assert scanner.render(from_file, from_array).status == Status.SUCCESS  # pixels compared
+    other = ramp_scene(SIZE, Page((150, 110), (140, 180)))
+    Image.fromarray(other).save(tmp_path / "other.png")
+    with pytest.raises(FlattenerError, match="pixels_sha256"):
+        scanner.render(read_source(tmp_path / "other.png"), from_array)
+
+
+def test_skip_dewarp_asks_orientnet_like_the_dewarp_path():
+    page = Page((170, 125), (150, 190), 90.0 + 7.0)
+    region = ScanOverrides(region=(60, 20, 285, 232), skip_dewarp=True)
+    scanner, _ = _scanner(page, orienter=FakeOrienter(page, SIZE))
+    result = scanner.scan(ramp_scene(SIZE, page), overrides=region)
+    assert result.outcome == Outcome.PERSPECTIVE and result.plan.quarter == 1
+    assert result.qa["orientation"]["method"] == "model" and _codes(result) == []
+    assert result.plan.output.height > result.plan.output.width  # the page stands upright
+    blind, _ = _scanner(page)
+    unsure = blind.scan(ramp_scene(SIZE, page), overrides=region)
+    assert _codes(unsure) == ["orientation_uncertain"] and unsure.plan.quarter == 0
+
+
+def test_fill_and_quantization_belong_to_the_plan():
+    scanner, _ = _scanner()
+    image = ramp_scene(SIZE, TRUE)
+    options = ScanOptions(quantize="truncate", preview=4096, fill_rgb=(0, 0, 255))
+    planned = scanner.plan(image, options)
+    result = scanner.render(image, planned)
+    assert planned.plan.fill_rgb == (0, 0, 255) and planned.plan.quantize == "truncate"
+    assert planned.preview.tobytes() == result.image.tobytes()  # preview = saved image
+    stored = ScanPlan.from_dict(json.loads(json.dumps(planned.plan.to_dict())))
+    again = scanner.render(image, stored, ScanOptions(fill_rgb=(9, 9, 9)))
+    assert again.image.tobytes() == result.image.tobytes()
+    with pytest.raises(FlattenerError):
+        ScanOptions(fill_rgb=(0, 0, 256))
+
+
+def test_timings_name_every_part_of_the_scan(tmp_path):
+    scanner, _ = _scanner(orienter=FakeOrienter(TRUE, SIZE))
+    Image.fromarray(ramp_scene(SIZE, TRUE)).save(tmp_path / "page.png")
+    result = scanner.scan(tmp_path / "page.png", ScanOptions(preview=64))
+    timings = result.timings
+    for name in ("read", "detect", "orient", "orient_post", "infer", "infer_pass_A"):
+        assert name in timings
+    for name in ("infer_pass_1", "verify", "plan", "render", "render_map", "render_check"):
+        assert name in timings
+    assert {"render_sample", "preview", "total"} <= set(timings)
+    assert timings["read"] > 0 and timings["infer"] >= timings["infer_pass_A"]
+    stages = result.metadata["timing_stages"]
+    assert [item["name"] for item in stages][0] == "read"
+    assert all(item["ok"] for item in stages)
+
+
+def test_the_page_gate_ships_only_through_the_ship_gate_rules():
+    scanner, _ = _scanner()
+    gate = scanner.models[1]
+    assert gate["role"] == "gate" and gate["shippable"] and gate["gate_reasons"] == []
+    fake = FakeGate([TRUE], SIZE)
+    fake.metadata["provenance"]["data"] = [{"kind": "doc3d", "license": "CC BY-NC-ND 3.0"}]
+    fake.metadata["provenance"]["lineage"].append({"kind": "train", "track": "research"})
+    record = Scanner(oracle_dewarper(TRUE, SIZE), gate=fake).models[1]
+    assert not record["shippable"] and record["category"] == "research"
+    assert record["gate_reasons"] == ["data_license_not_release", "not_release_track"]

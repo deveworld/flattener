@@ -29,7 +29,8 @@ def _image(seed=0, size=(240, 320)):
     return np.random.default_rng(seed).integers(0, 256, (*size, 3), dtype=np.uint8)
 
 
-def test_the_grid_gives_the_renderers_fold_decision_and_minimum():
+@pytest.mark.parametrize("nodes", ["flattener", "uvdoc"])
+def test_the_grid_gives_the_renderers_fold_decision_and_minimum(nodes):
     rng = np.random.default_rng(11)
     image = _image()
     loose = RenderConfig(on_error="return", max_out_of_bounds_fraction=1.0)
@@ -39,9 +40,9 @@ def test_the_grid_gives_the_renderers_fold_decision_and_minimum():
         grid = _grid(rng, rows, cols, rng.choice([0.01, 0.06]))
         size = (int(rng.choice([2, 3, 6, 17, 90, 240])), int(rng.choice([2, 5, 13, 64, 200])))
         inset, border = float(rng.choice([0.0, 0.02])), float(rng.choice([0.0, 0.05, 0.2]))
-        dense = dense_map(grid, size, inset=inset, border=border)
+        dense = dense_map(grid, size, inset=inset, border=border, nodes=nodes)
         expected = render(image, dense, config=loose).metadata["validation"]
-        found = grid_jacobian(grid, size, inset=inset, border=border)
+        found = grid_jacobian(grid, size, inset=inset, border=border, nodes=nodes)
         assert found["fold_check"] == expected["fold_check"]
         folds += found["fold_check"] == "failed"
         if expected["min_jacobian_ratio"] is None:
@@ -125,6 +126,11 @@ def test_the_full_sample_is_the_render_and_the_proxy_is_recorded():
     assert found.proxy.image.shape[:2] == small
     rendered = found.result(image)
     assert rendered.image.tobytes() == expected.image.tobytes()
+    uvdoc = fast_check(image, grid, size, border=0.02, config=CONFIG, nodes="uvdoc")
+    reference = render(image, dense_map(grid, size, border=0.02, nodes="uvdoc"), config=CONFIG)
+    assert uvdoc.sample(image, CONFIG.fill_rgb).tobytes() == reference.image.tobytes()
+    edge = render(image, dense_map(grid, size, border=0.02), config=CONFIG)
+    assert uvdoc.sample(image, CONFIG.fill_rgb).tobytes() != edge.image.tobytes()
     skipped = fast_check(image, grid, size, config=CONFIG, proxy_pixels=None)
     assert skipped.ok and skipped.proxy is None and "proxy" not in skipped.metadata["timings"]
     with pytest.raises(FlattenerError):

@@ -10,7 +10,8 @@ measured elsewhere, such as the model load (cold start).
 Summaries: ``median_of_repeats`` takes the per-stage median over repeated runs of one
 image, ``summarize_stages`` the count, median and p95 of each stage over images, and
 ``summarize_by_bucket`` groups them by source megapixels (``megapixel_bucket``:
-``<=2``, ``2-6``, ``6-12``, ``12-16``, ``>16``; above 16 MP the JPEG is draft decoded).
+``<=2``, ``2-6``, ``6-12``, ``12-16``, ``>16``; above 16 MP the JPEG is draft decoded) and
+leaves out rows whose model outputs came from the scanner's cache.
 Percentiles interpolate linearly between order statistics (NumPy's default).
 """
 
@@ -174,12 +175,20 @@ def megapixel_bucket(height: int, width: int) -> str:
 
 
 def summarize_by_bucket(
-    rows: Iterable[Mapping[str, Any]], *, timings: str = "timings", bucket: str = "bucket"
+    rows: Iterable[Mapping[str, Any]],
+    *,
+    timings: str = "timings",
+    bucket: str = "bucket",
+    include_cached: bool = False,
 ) -> dict[str, dict[str, dict[str, Any]]]:
     """``summarize_stages`` per megapixel bucket; each row holds its bucket label and a
-    mapping of per-stage seconds. Buckets come in ``MEGAPIXEL_BUCKETS`` order."""
+    mapping of per-stage seconds. Buckets come in ``MEGAPIXEL_BUCKETS`` order. Rows marked
+    ``cached`` (a model output came from the scanner's cache) are left out unless
+    ``include_cached``."""
     groups: dict[str, list[Mapping[str, float]]] = {}
     for row in rows:
+        if row.get("cached") and not include_cached:
+            continue
         groups.setdefault(row[bucket], []).append(row[timings])
     order = [label for _, label in MEGAPIXEL_BUCKETS] + [TOP_BUCKET]
     labels = sorted(groups, key=lambda label: (order.index(label) if label in order else 99, label))

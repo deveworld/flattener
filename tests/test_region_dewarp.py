@@ -1,9 +1,22 @@
 """``regions.unwarp_page`` with a ``flattener.dewarp`` ``Dewarper``."""
 
+from dataclasses import replace
+
 import numpy as np
-from scan_fakes import FakeGate, Page, oracle_dewarper, ramp_scene, shrink
+import torch
+from scan_fakes import (
+    CONFIG,
+    RELEASE_INFO,
+    FakeGate,
+    Oracle,
+    Page,
+    oracle_dewarper,
+    ramp_scene,
+    shrink,
+)
 
 from flattener.contracts import RenderConfig, Status
+from flattener.dewarp.predict import Dewarper
 from flattener.regions import PageRegion, unwarp_page
 from flattener.renderer import render
 from flattener.scan.placement import dense_map
@@ -68,3 +81,35 @@ def test_a_failing_dewarper_map_keeps_the_renderer_status():
     )
     assert result.status == Status.INVALID_TRANSFORM and result.reason_code == "non_finite_grid"
     assert result.image is None
+
+
+def test_the_result_names_the_weights_and_their_ship_gate_stamp():
+    image = ramp_scene(SIZE, PAGE)
+    config = RenderConfig(on_error="return")
+    plain = unwarp_page(image, oracle_dewarper(PAGE, SIZE), (190, 150), region=_region())
+    metadata = plain.metadata
+    assert metadata["model_sha256"] == "fake-dewarp"
+    assert metadata["model_id"] == "dewarp-checkpoint-fake-dewarp"
+    assert metadata["research"] is True and metadata["ship_gate"] is None  # never gated
+    verdict = {"shippable": False, "research": True, "reasons": ["external_init"]}
+    research = oracle_dewarper(PAGE, SIZE, {**RELEASE_INFO, "ship_gate": verdict})
+    result = unwarp_page(image, research, (190, 150), region=_region(), config=config)
+    assert result.metadata["research"] is True and result.metadata["ship_gate"] == verdict
+    passed = {"shippable": True, "research": False, "reasons": []}
+    release = oracle_dewarper(PAGE, SIZE, {**RELEASE_INFO, "ship_gate": passed})
+    result = unwarp_page(image, release, (190, 150), region=_region(), config=config)
+    assert result.metadata["research"] is False and result.metadata["shippable"] is True
+
+
+def test_uvdoc_weights_are_densified_with_their_own_nodes():
+    config = RenderConfig(on_error="return")
+    model_config = replace(CONFIG, grid_convention="uvdoc")
+    dewarper = Dewarper(Oracle(PAGE, SIZE), model_config, torch.device("cpu"), dict(RELEASE_INFO))
+    image = ramp_scene(SIZE, PAGE)
+    result = unwarp_page(image, dewarper, (190, 150), region=_region(), config=config)
+    box = tuple(result.metadata["dewarp"]["box"])
+    grid, _ = run_view(dewarper, image, crop_placement(box, 0.0, SIZE), crop_box=box)
+    expected = render(image, dense_map(grid, (190, 150), nodes="uvdoc"), config=config)
+    edge_aligned = render(image, dense_map(grid, (190, 150)), config=config)
+    assert result.image.tobytes() == expected.image.tobytes()
+    assert result.image.tobytes() != edge_aligned.image.tobytes()

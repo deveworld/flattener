@@ -11,7 +11,7 @@ from flattener.scan import __main__ as cli
 from flattener.scan import locate
 from flattener.scan.io import read_scan_record
 from flattener.scan.pipeline import Scanner
-from flattener.scan.timing import read_jsonl
+from flattener.scan.timing import read_jsonl, summarize_by_bucket
 
 SIZE = (240, 320)
 PAGE = Page((170, 125), (150, 190), 7.0)
@@ -36,7 +36,12 @@ def _install(monkeypatch, *, always=None):
         dewarper = oracle_dewarper(PAGE, SIZE)
         dewarper.model.always = always
         loaded.append((args, kwargs))
-        return Scanner(dewarper, gate=FakeGate([PAGE], SIZE))
+        return Scanner(
+            dewarper,
+            gate=FakeGate([PAGE], SIZE),
+            cache_size=kwargs.get("cache_size", 4),
+            info={"load": {"seconds": 0.25, "device": "cpu"}},
+        )
 
     monkeypatch.setattr(cli.Scanner, "load", load)
     monkeypatch.setattr(cli.Scanner, "from_files", load)
@@ -126,7 +131,14 @@ def test_manual_corrections_and_a_requested_perspective(tmp_path, photo, capsys,
     assert max(record["plan"]["output"]["height"], record["plan"]["output"]["width"]) == 300
     assert record["plan"]["provenance"]["region"] == "manual"
     assert record["plan"]["provenance"]["orientation"] == "manual"
+    assert record["plan"]["provenance"]["output_size"] == "manual"
+    assert record["plan"]["provenance"]["aspect"] == "manual"
     assert [view["pass"] for view in record["plan"]["views"]] == ["A"]
+    auto = [str(photo), "--out", str(tmp_path / "auto"), "--weights", "w"]
+    assert cli.main(auto) == 0
+    record = json.loads((tmp_path / "auto" / "photo.scan.json").read_text())
+    assert record["plan"]["provenance"]["output_size"] == "auto"
+    assert record["plan"]["provenance"]["aspect"] == "auto"
 
 
 @pytest.mark.parametrize(
@@ -143,6 +155,7 @@ def test_manual_corrections_and_a_requested_perspective(tmp_path, photo, capsys,
         ["--bundle", "b", "--gate", "g"],
         ["--weights", "w", "--threads", "0"],
         ["--weights", "w", "--border", "1.5"],
+        ["--weights", "w", "--output-size", "9000,9000"],
     ],
 )
 def test_usage_errors_exit_2(tmp_path, photo, monkeypatch, extra, capsys):
@@ -170,3 +183,46 @@ def test_same_stems_get_numbered_and_unreadable_photos_fail(tmp_path, photo, cap
     assert lines[2]["status"] == "input_error"
     assert (out / "photo.jpg").is_file() and (out / "photo-2.jpg").is_file()
     assert np.asarray(Image.open(out / "photo-2.jpg")).shape == (190, 150, 3)
+
+
+def test_timing_rows_cover_decoding_and_flag_cached_repeats(tmp_path, photo, capsys, monkeypatch):
+    loaded = _install(monkeypatch)
+    timing = tmp_path / "timing.jsonl"
+    photos = [str(photo)] * 3
+    args = [*photos, "--out", str(tmp_path / "out"), "--weights", "w", "--timing", str(timing)]
+    assert cli.main(args) == 0
+    rows = read_jsonl(timing)
+    assert rows[0]["model_load"] == {"seconds": 0.25, "device": "cpu"}
+    assert all("model_load" not in row for row in rows[1:])
+    assert [row["cached"] for row in rows] == [False, True, True]
+    assert rows[1]["cache"]["hits"]["infer"] == 2
+    assert rows[0]["timings"]["read"] > 0 and "infer_pass_A" in rows[0]["timings"]
+    assert rows[0]["end_to_end"] >= rows[0]["timings"]["total"] + rows[0]["timings"]["save"] - 1e-9
+    assert summarize_by_bucket(rows)["<=2"]["total"]["count"] == 1  # the fresh row only
+    fresh = tmp_path / "fresh.jsonl"
+    args = [*photos, "--out", str(tmp_path / "fresh"), "--weights", "w", "--timing", str(fresh)]
+    assert cli.main([*args, "--no-cache"]) == 0
+    assert loaded[-1][1]["cache_size"] == 0
+    assert [row["cached"] for row in read_jsonl(fresh)] == [False, False, False]
+
+
+def test_an_unexpected_error_fails_one_photo_and_the_batch_goes_on(
+    tmp_path, photo, capsys, monkeypatch
+):
+    _install(monkeypatch)
+    calls = []
+    original = Scanner.plan
+
+    def plan(self, source, *args, **kwargs):
+        calls.append(source)
+        if len(calls) == 1:
+            raise RuntimeError("the model broke")
+        return original(self, source, *args, **kwargs)
+
+    monkeypatch.setattr(Scanner, "plan", plan)
+    args = [str(photo), str(photo), "--out", str(tmp_path / "out"), "--weights", "w"]
+    assert cli.main([*args, "--overwrite"]) == 1
+    first, second = _lines(capsys)
+    assert first["outcome"] == "failed" and first["status"] == "model_error"
+    assert first["reason_code"] == "unexpected_error" and "RuntimeError" in first["message"]
+    assert second["outcome"] == "rectified_with_warnings"

@@ -7,8 +7,11 @@ padding, residual expansion, ``ensure_page_coverage`` may widen the footprint) o
 once and placed in the source (``flattener.scan.placement``); the estimated page coverage
 of a segmenter's mask is a check only (``page_coverage_insufficient`` below
 ``required_coverage``; a manual rectangle's coverage is recorded), and the map is the
-edge-aligned densification of the placed grid at ``output_size``. Both paths sample
-the original once through ``flattener.render``.
+densification of the placed grid at ``output_size`` with the weights' own node placement
+(``dense_map(..., nodes=grid_convention)``: edge-aligned, or align_corners=True for UVDoc
+weights). The metadata names the weights (``model_id``, ``model_sha256``) and their ship
+gate stamp (``ship_gate``, ``shippable``, ``research``). Both paths sample the original
+once through ``flattener.render``.
 """
 
 from dataclasses import asdict
@@ -146,6 +149,22 @@ def _is_dewarper(predictor):
     return isinstance(predictor, Dewarper)
 
 
+def _dewarper_identity(dewarper):
+    """Model id, sha256 and ship-gate stamp of a ``Dewarper``: weights without a passing
+    ship-gate verdict (``scan.shippable.load_weights``) are research."""
+    info = dewarper.info
+    verdict = info.get("ship_gate")
+    shippable = isinstance(verdict, dict) and bool(verdict.get("shippable"))
+    sha256 = info.get("sha256")
+    return {
+        "model_sha256": sha256,
+        "model_id": info.get("model_id") or f"dewarp-{info.get('kind')}-{str(sha256)[:12]}",
+        "ship_gate": verdict if isinstance(verdict, dict) else None,
+        "shippable": shippable,
+        "research": not shippable,
+    }
+
+
 def _dewarp_region_grid(image, dewarper, region, metadata):
     """Grid (source flattener values) of one ``Dewarper`` pass on the region's box."""
     from ..dewarp.predict import RERUN_MARGIN
@@ -268,8 +287,7 @@ def _pipeline(
             )
         if dewarper:
             metadata["page_method"] = "region_dewarp"
-            metadata["model_sha256"] = predictor.info.get("sha256")
-            metadata["model_id"] = predictor.info.get("kind")
+            metadata.update(_dewarper_identity(predictor))
         elif predictor is not None:
             predictor._metadata(metadata)
             metadata["model_preview_resize"] = metadata["input_resize"]
@@ -320,7 +338,7 @@ def _pipeline(
             )
             from ..scan.placement import dense_map
 
-            grid = dense_map(grid, output_size)
+            grid = dense_map(grid, output_size, nodes=predictor.config.grid_convention)
         else:
             grid, coverage = ensure_page_coverage(grid, estimate.mask, config=region_config)
         metadata["page_region"].update(coverage)

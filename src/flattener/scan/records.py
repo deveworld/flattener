@@ -64,6 +64,8 @@ PLAN_KEYS = frozenset(
         "inset",
         "border",
         "quantize",
+        "nodes",
+        "fill_rgb",
         "models",
         "thresholds",
         "provenance",
@@ -72,6 +74,7 @@ PLAN_KEYS = frozenset(
 )
 RENDER_KINDS = ("dewarp", "perspective", "original")
 QUANTIZE_MODES = ("round", "truncate")  # as flattener.dewarp.predict.QUANTIZE_MODES
+NODE_CONVENTIONS = ("flattener", "uvdoc")  # as flattener.scan.placement.CONVENTIONS
 PROVENANCE_VALUES = ("auto", "manual")
 EXIT_SCANNED = 0
 EXIT_FALLBACK = 1  # some page fell back (perspective or original) or failed
@@ -219,6 +222,16 @@ REASONS: dict[str, ReasonSpec] = {
             _RESHOOT_OR_REGION,
             _GEOMETRY_KO,
             _GEOMETRY_EN,
+        ),
+        ReasonSpec(
+            "candidate_fallback",
+            Status.SUCCESS,
+            Severity.WARNING,
+            "C1 failed and a later candidate (C2 to C4) passed; detail names the candidate "
+            "and C1's failure.",
+            (Action.SET_REGION,),
+            "결과를 확인하고, 필요하면 영역을 지정해 주세요",
+            "Check the result and set the page region if needed",
         ),
         ReasonSpec(
             "rerun_discarded",
@@ -566,7 +579,10 @@ class ScanPlan:
     ``angle_deg`` is the page angle (clockwise positive, as
     ``dewarp.predict.estimate_page_angle``), ``quarter`` the number k of clockwise
     quarter turns of the page's text-up direction, ``views`` one record per model pass,
-    ``provenance`` ``auto`` or ``manual`` per stage.
+    ``provenance`` ``auto`` or ``manual`` per stage. ``nodes`` says where the output
+    places the grid nodes (``scan.placement.dense_map``): ``flattener`` (edge-aligned) or
+    ``uvdoc`` (align_corners=True, the upstream UVDoc weights). ``fill_rgb`` fills output
+    pixels outside the source.
     """
 
     source: SourceInfo
@@ -582,6 +598,8 @@ class ScanPlan:
     inset: tuple[float, float] = (0.0, 0.0)
     border: float = 0.0
     quantize: str = "round"
+    nodes: str = "flattener"
+    fill_rgb: tuple[int, int, int] = (255, 255, 255)
     models: tuple[dict[str, Any], ...] = ()
     thresholds: dict[str, Any] = field(default_factory=dict)
     provenance: dict[str, str] = field(default_factory=dict)
@@ -628,6 +646,15 @@ class ScanPlan:
         put("border", border)
         if self.quantize not in QUANTIZE_MODES:
             raise _plan_error(f"quantize must be one of {QUANTIZE_MODES}")
+        if self.nodes not in NODE_CONVENTIONS:
+            raise _plan_error(f"nodes must be one of {NODE_CONVENTIONS}")
+        fill = tuple(self.fill_rgb) if isinstance(self.fill_rgb, (tuple, list)) else ()
+        if len(fill) != 3 or any(
+            isinstance(v, bool) or not isinstance(v, (int, np.integer)) or not 0 <= v <= 255
+            for v in fill
+        ):
+            raise _plan_error("fill_rgb must be three integers in 0..255")
+        put("fill_rgb", tuple(int(v) for v in fill))
         try:
             put("region", None if self.region is None else json_plain(dict(self.region)))
             put("views", tuple(json_plain(dict(view)) for view in self.views))
@@ -658,6 +685,8 @@ class ScanPlan:
             "inset": list(self.inset),
             "border": self.border,
             "quantize": self.quantize,
+            "nodes": self.nodes,
+            "fill_rgb": list(self.fill_rgb),
             "models": list(self.models),
             "thresholds": self.thresholds,
             "provenance": self.provenance,
@@ -694,6 +723,8 @@ class ScanPlan:
                 inset=tuple(data.get("inset", (0.0, 0.0))),
                 border=data.get("border", 0.0),
                 quantize=data.get("quantize", "round"),
+                nodes=data.get("nodes", "flattener"),
+                fill_rgb=tuple(data.get("fill_rgb", (255, 255, 255))),
                 models=tuple(data.get("models", ())),
                 thresholds=data.get("thresholds", {}),
                 provenance=data.get("provenance", {}),

@@ -10,11 +10,12 @@ from flattener.contracts import FlattenerError, Status
 from flattener.dewarp.model import DewarpModelConfig, UVDocNet
 from flattener.dewarp.predict import Dewarper, crop_pass_box, model_input, rerun_grid
 from flattener.scan.io import SourceImage
-from flattener.scan.placement import Placement
+from flattener.scan.placement import Placement, compose
 from flattener.scan.records import SourceInfo
 from flattener.scan.views import (
     crop_placement,
     level_factor,
+    on_source,
     run_view,
     sample_view,
     source_footprint,
@@ -107,6 +108,20 @@ def test_the_pyramid_source_reads_a_reduced_level():
     assert not torch.equal(tensor, model_input(dewarper, image))
     grid, record = run_view(dewarper, image, whole, view_source="pyramid", levels=levels)
     assert record["input"] == "view_map:pyramid" and np.isfinite(grid).all()
+
+
+def test_a_box_view_keeps_its_place_on_a_reduced_level():
+    box = Placement.from_box((10, 10, 110, 110), (200, 200))
+    corners = np.array([[-1.0, -1.0], [1.0, 1.0]])
+    np.testing.assert_allclose(compose(corners, box), [[-0.9, -0.9], [0.1, 0.1]])
+    level = on_source(box, (100, 100))
+    assert level.edges == (5.0, 5.0, 55.0, 55.0)
+    np.testing.assert_allclose(compose(corners, level), compose(corners, box), atol=1e-12)
+    image = ramp_scene((200, 200))  # red and green encode the source position
+    source = SourceImage(image, SourceInfo(size=(200, 200)))
+    full = sample_view(image, box, (20, 20))
+    reduced = sample_view(source.level(2), box, (20, 20))
+    assert float((full - reduced)[0, :2].abs().max()) < 2 / 255  # the same place
 
 
 def test_invalid_views_are_refused():

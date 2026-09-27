@@ -13,7 +13,8 @@ Steps:
   install    Copies ``best.pt`` to DIR/locator-v0-pilot.pt (schema
              independent-locator-pilot-1.0) and exports DIR/page-gate-v0.pt (schema
              region-context-1, weights plus a provenance record), each with a ``.sha256``
-             sidecar. DIR defaults to ~/.cache/flattener-sota-20260926/scan-weights.
+             sidecar. DIR defaults to $FLATTENER_CACHE_DIR/scan-weights
+             (~/.cache/flattener/scan-weights).
   reproduce  Runs the weights on the recorded validation samples (``best-validation.json``
              rows, read from ``outputs/dataset``) with the study's metric: sigmoid,
              bilinear upsampling to 384x288, threshold 0.5. It passes when the capture IoU
@@ -51,13 +52,14 @@ from torch.nn import functional as F
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from flattener.benchmark.siftflow import cache_root  # noqa: E402
 from flattener.evidence import evidence  # noqa: E402
 from flattener.regions import context  # noqa: E402
 
 OUTPUTS = Path(os.environ.get("FLATTENER_OUTPUTS", ROOT / "outputs"))
 DEFAULT_ZIP = OUTPUTS / "coordinate-fold" / "locator.zip"
 DEFAULT_DATASET = OUTPUTS / "dataset"
-DEFAULT_WEIGHTS_DIR = Path("~/.cache/flattener-sota-20260926/scan-weights").expanduser()
+DEFAULT_WEIGHTS_DIR = cache_root() / "scan-weights"
 DEFAULT_EXPOSURE = ROOT / "src" / "flattener" / "regions" / context.SMARTDOC_EXPOSURE_FILE
 PILOT_NAME = "locator-v0-pilot.pt"
 EXPORT_NAME = "page-gate-v0.pt"

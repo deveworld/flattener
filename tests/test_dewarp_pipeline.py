@@ -12,6 +12,7 @@ from PIL import Image
 
 from flattener import FlattenerError, RenderConfig
 from flattener.benchmark.reporting import prediction_record
+from flattener.benchmark.siftflow import cache_root
 from flattener.contracts import RenderResult, Status
 from flattener.dewarp.coords import edge_positions
 from flattener.dewarp.model import DewarpModelConfig, UVDocNet
@@ -38,8 +39,9 @@ from flattener.dewarp.predict import (
     rerun_grid,
 )
 
+# DocUNet crops: $FLATTENER_DOCUNET_CROP, else <cache>/docunet/crop ($FLATTENER_CACHE_DIR).
 DOCUNET_CROPS = Path(
-    os.environ.get("FLATTENER_DOCUNET_CROP", "~/.cache/flattener-sota-20260926/crop/crop")
+    os.environ.get("FLATTENER_DOCUNET_CROP") or cache_root() / "docunet" / "crop"
 ).expanduser()
 
 

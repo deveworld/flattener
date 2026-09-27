@@ -11,6 +11,7 @@ import torch
 from PIL import Image
 
 from flattener import FlattenerError
+from flattener.dewarp.data import DataSpec
 from flattener.scan import orient
 from flattener.scan.orient import SourceSampler, ViewGeometry, clockwise, quantize
 from flattener.scan.orient_train import (
@@ -18,6 +19,7 @@ from flattener.scan.orient_train import (
     OrientData,
     OrientDataset,
     TrainConfig,
+    _initialize,
     augmented_views,
     compute_losses,
     main,
@@ -390,3 +392,52 @@ def test_training_smoke_records_a_release_lineage(built, tmp_path):
     with pytest.raises(FlattenerError) as caught:
         train(replace(config, lr=1e-3))
     assert caught.value.reason_code == "resume_mismatch"
+
+
+def test_a_fine_tune_start_carries_the_parent_data_spec(tmp_path):
+    def spec(name):
+        source = {"name": name, "kind": "converted", "root": "files", "track": "release"}
+        source.update(split="train", license="Apache-2.0")
+        return {
+            "schema": "flattener-dewarp-data-1",
+            "name": name,
+            "track": "release",
+            "sources": [source],
+        }
+
+    def record(data_spec, lineage):
+        digest = DataSpec.from_dict(data_spec).sha256
+        sources = {"train": [{"name": "own", "track": "release", "license_classes": {"own": 1}}]}
+        steps = [{"kind": "train", "track": "release", "data_spec_sha256": digest}]
+        return {
+            "track": "release",
+            "lineage": [*lineage, *steps],
+            "data_spec": data_spec,
+            "data_spec_sha256": digest,
+            "data_sources": sources,
+        }
+
+    model = orient.OrientNet()
+    parent = record(spec("parent"), [{"kind": "scratch", "seed": 0}])
+    path = tmp_path / "parent.pt"
+    orient.save_checkpoint(
+        path,
+        {
+            "schema": orient.CHECKPOINT_SCHEMA,
+            "step": 5,
+            "model_config": model.config.to_dict(),
+            "code": orient.code_record(),
+            "model_state": model.state_dict(),
+            **parent,
+        },
+    )
+    config = TrainConfig(data=".", output_dir=".", init="checkpoint", init_path=str(path))
+    start = _initialize(orient.OrientNet(), config)
+    assert start["data_spec"] == parent["data_spec"]
+    path.unlink()
+    (tmp_path / "parent.pt.json").unlink()  # only the lineage entry is left
+    assert orient.release_problems(record(spec("child"), [start])) == []
+    bare = {key: value for key, value in start.items() if key != "data_spec"}
+    assert orient.release_problems(record(spec("child"), [bare])) == [
+        "ship gate: unverified_data_spec"
+    ]

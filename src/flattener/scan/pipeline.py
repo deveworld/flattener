@@ -15,32 +15,42 @@ plan and checks the plan's map; ``render(source, planned)`` makes the image of a
 * ``infer``: pass A on the view (box B, angle theta + 90 k), then ``passes`` crop passes
   whose box is the previous grid's outline plus 4 % and whose angle is that outline's
   angle (``dewarp.predict.rerun_box`` without the 45 degree limit, since k is already in
-  the grid). Every pass is placed in the source (``scan.placement``).
-* ``verify``: OrientNet on a flat 768-pixel preview of the grid: 180 degrees flips the
-  grid nodes; 90 or 270 degrees re-runs the passes once with the corrected k. Then the
-  checks: ``page_coverage(G, M) >= 0.95`` against the gate mask and a median node drift
-  between the last two passes of at most 4 % of the page diagonal.
+  the grid). Every pass is placed in the source (``scan.placement``) and timed on its own
+  (``infer_pass_A``, ``infer_pass_1``, ...).
+* ``orient_post`` and ``verify``: OrientNet on a flat 768-pixel preview of the grid: 180
+  degrees flips the grid nodes; 90 or 270 degrees re-runs the passes once with the
+  corrected k. A quarter turn settled this way carries over to the later candidates. Then
+  the checks: ``page_coverage(G, M) >= 0.95`` against the gate mask and a median node
+  drift between the last two passes of at most 4 % of the page diagonal.
 * ``plan``: ``scan.output_policy.plan_output`` (auto size, standard-ratio snap) and a
   ``ScanPlan`` with its ``plan_sha256``.
-* ``render``: the dense map of the plan through ``flattener.render`` once, with all of its
-  checks and failure records. With ``fast_check`` a dewarp plan is checked by
-  ``scan.fast_check`` in ``plan`` (the renderer's decisions from the grid;
-  ``flattener.render`` runs on a proxy of at most 2 MP and 1/16 of the output) and
-  ``render`` samples the full size once.
+* ``render``: the dense map of the plan (``render_map``; the grid nodes placed as the
+  weights place them, ``ScanPlan.nodes``) through ``flattener.render`` once, with all of
+  its checks and failure records (``render_check``, ``render_sample`` from the renderer's
+  own timings). With ``fast_check`` a dewarp plan is checked by ``scan.fast_check`` in
+  ``plan`` (the renderer's decisions from the grid; ``flattener.render`` runs on a proxy
+  of at most 2 MP and 1/16 of the output) and ``render`` samples the full size once.
+* ``preview``: the preview image, sampled from the plan's map on a source level.
+
+Stage names that extend another (``infer_pass_*``, ``render_*``) time parts of that
+stage, whose seconds include them. ``metadata["timing_stages"]`` keeps every stage record.
 
 Candidates, first one to pass wins: C1 the full path, C2 without deskew, C3 the other
 localizer's box (gate and outline swapped), C4 the current ``rectify`` (whole photo, one
-pass, no orientation). Duplicates are skipped. A candidate passes when its render
-succeeds and the checks hold; when only its crop passes fail, its pass A is used
-(``rerun_discarded``, L1). When every candidate fails: with ``fallback="perspective"``
-and a quad known for sure, the page quad is flattened by a homography
-(``curvature_not_corrected``, L2); otherwise the original comes back with the reason and
-guidance (L3, ``on_error="original"``, the default; ``"return"`` gives no image and
-``"raise"`` raises the failure).
+pass) with its nodes re-indexed by the quarter turn k (``quarter_turn_grid``), so its page
+is upright as well. Duplicates are skipped. A candidate passes when its render succeeds
+and the checks hold; when only its crop passes fail, its pass A is used
+(``rerun_discarded``, L1). A candidate after C1 that passes adds ``candidate_fallback``
+with C1's failure. When every candidate fails: with ``fallback="perspective"`` and a quad
+known for sure, the page quad is flattened by a homography (``curvature_not_corrected``,
+L2); otherwise the original comes back with the reason and guidance (L3,
+``on_error="original"``, the default; ``"return"`` gives no image and ``"raise"`` raises
+the failure). A plan or check that raises counts as that grid's failure.
 
 Overrides (``ScanOverrides``: region, quad, quarter, skip_dewarp, output size, aspect) go
-through the same stages and are recorded as ``manual`` provenance. Model outputs are
-cached per input sha256 (``cache_size`` inputs), so an override re-runs only the stages
+through the same stages and are recorded as ``manual`` provenance; ``skip_dewarp`` without
+a quarter or quad still asks OrientNet. Model outputs are cached per input sha256
+(``cache_size`` inputs; 0 turns the cache off), so an override re-runs only the stages
 after it.
 """
 
@@ -64,9 +74,12 @@ from numpy.typing import NDArray
 from ..contracts import FlattenerError, RenderConfig, RenderResult, Status
 from ..dewarp.model import sha256_file
 from ..dewarp.predict import (
+    DESKEW_MIN_AGREEMENT,
+    RERUN_MARGIN,
     Dewarper,
     Inset,
     estimate_page_angle,
+    inset_record,
     outline_points,
     render_unchecked,
     rerun_box,
@@ -82,8 +95,15 @@ from . import locate as locating
 from .fast_check import FastCheck, fast_check
 from .io import SourceImage, read_source
 from .orient import Orienter, OrientResult, ViewGeometry
-from .output_policy import MAX_PIXELS, MAX_SIDE, OutputPlan, plan_output, round_half_up
-from .placement import Placement, dense_map, flip_grid, split_angle
+from .output_policy import (
+    MAX_PIXELS,
+    MAX_SIDE,
+    OutputPlan,
+    plan_output,
+    resolve_aspect,
+    round_half_up,
+)
+from .placement import Placement, dense_map, flip_grid, quarter_turn_grid, split_angle
 from .records import (
     Outcome,
     Reason,
@@ -95,7 +115,7 @@ from .records import (
     json_plain,
     reason,
 )
-from .shippable import load_weights, shippable
+from .shippable import gate_verdict, load_weights, shippable
 from .timing import StageClock
 from .views import VIEW_SOURCES, crop_placement, run_view
 
@@ -137,7 +157,9 @@ class ScanOptions:
     ``scan.fast_check`` (the renderer's decisions from the grid, a small proxy render) and
     sample the full size in ``render``. ``preview``: long side of a preview image
     sampled from the same map (``None``: no preview). ``chain``: try C2-C4 after C1 fails.
-    ``use_focal``: take the EXIF focal length into the aspect estimate.
+    ``use_focal``: take the EXIF focal length into the aspect estimate. ``fill_rgb``: the
+    color of output pixels outside the source; the plan keeps it with ``quantize``, so a
+    stored plan renders the same image.
     """
 
     passes: str | int = "auto"
@@ -186,7 +208,18 @@ class ScanOptions:
             isinstance(self.preview, bool) or not isinstance(self.preview, int) or self.preview < 2
         ):
             raise _option_error("preview must be a long side of at least 2 pixels or None")
+        fill = self.fill_rgb
+        if (
+            not isinstance(fill, (tuple, list))
+            or len(fill) != 3
+            or any(
+                isinstance(v, bool) or not isinstance(v, (int, np.integer)) or not 0 <= v <= 255
+                for v in fill
+            )
+        ):
+            raise _option_error("fill_rgb must be three integers in 0..255")
         _check_output(self.output)
+        _check_aspect(self.aspect)
 
     @property
     def rerun(self) -> int:
@@ -199,7 +232,9 @@ class ScanOptions:
 
 
 def _check_output(output: Any) -> None:
-    if output == "auto":
+    """``output`` is ``"auto"``, a long side of at least 2 or a (height, width) of at least
+    2 per side within the renderer's limits (``MAX_SIDE``, ``MAX_PIXELS``)."""
+    if isinstance(output, str) and output == "auto":
         return
     if isinstance(output, (int, np.integer)) and not isinstance(output, bool) and output >= 2:
         return
@@ -209,8 +244,22 @@ def _check_output(output: Any) -> None:
         and all(isinstance(v, (int, np.integer)) and not isinstance(v, bool) for v in output)
         and min(output) >= 2
     ):
+        height, width = (int(v) for v in output)
+        if max(height, width) > MAX_SIDE or height * width > MAX_PIXELS:
+            raise _option_error(
+                f"output {height}x{width} is above the limits ({MAX_SIDE} pixels a side, "
+                f"{MAX_PIXELS} pixels)"
+            )
         return
     raise _option_error("output must be 'auto', a long side >= 2 or (height, width)")
+
+
+def _check_aspect(aspect: Any) -> None:
+    """``aspect`` is a mode, a paper name or a positive number (``resolve_aspect``)."""
+    try:
+        resolve_aspect(aspect, 1.0)
+    except FlattenerError as error:
+        raise _option_error(error.message) from None
 
 
 @dataclass(frozen=True)
@@ -221,7 +270,7 @@ class ScanOverrides:
     four (x, y) page corners in reading order (top-left, top-right, bottom-right,
     bottom-left); ``quarter``: clockwise quarter turns of the page's text-up direction;
     ``skip_dewarp``: flatten the region or quad by a homography only; ``output_size`` and
-    ``aspect``: as ``ScanOptions.output`` and ``aspect``.
+    ``aspect``: as ``ScanOptions.output`` and ``aspect`` (``"auto"`` is no correction).
     """
 
     region: Any = None
@@ -242,8 +291,14 @@ class ScanOverrides:
             raise _option_error("quarter must be an integer in 0..3")
         if not isinstance(self.skip_dewarp, bool):
             raise _option_error("skip_dewarp must be a bool")
+        for name in ("output_size", "aspect"):
+            value = getattr(self, name)
+            if isinstance(value, str) and value == "auto":
+                object.__setattr__(self, name, None)
         if self.output_size is not None:
             _check_output(self.output_size)
+        if self.aspect is not None:
+            _check_aspect(self.aspect)
 
     def record(self) -> dict[str, Any]:
         region = self.region
@@ -355,6 +410,7 @@ class _Orientation:
     result: OrientResult | None = None
     reasons: list[Reason] = field(default_factory=list)
     post: dict[str, Any] | None = None
+    settled_by: str | None = None  # the candidate whose post check accepted the quarter
 
     def record(self) -> dict[str, Any]:
         return {
@@ -363,7 +419,12 @@ class _Orientation:
             "provenance": self.provenance,
             "pre": None if self.result is None else self.result.to_dict(),
             "post": self.post,
+            "settled_by": self.settled_by,
         }
+
+
+def _post_accepted(post: dict[str, Any] | None) -> bool:
+    return bool(((post or {}).get("result") or {}).get("accepted"))
 
 
 @dataclass(eq=False)
@@ -375,13 +436,17 @@ class _Candidate:
     orient: bool
     method: str
     rerun: int
+    # How the quarter turn k is applied: "view" turns the view before the model sees it;
+    # "nodes" re-indexes the grids of the unturned view (quarter_turn_grid).
+    turn: str = "view"
 
     def key(self, quarter: int, source_size: tuple[int, int]) -> tuple:
         whole = (0, 0, source_size[1], source_size[0])
         box = None if self.box is None or tuple(self.box) == whole else tuple(self.box)
         theta = self.theta if self.deskew else 0.0
         turn = quarter if self.orient else 0
-        return (box, theta, self.deskew if self.rerun else None, turn, self.rerun)
+        mode = self.turn if turn else None
+        return (box, theta, self.deskew if self.rerun else None, turn, self.rerun, mode)
 
     def record(self) -> dict[str, Any]:
         return {
@@ -390,6 +455,7 @@ class _Candidate:
             "angle_deg": self.theta,
             "deskew": self.deskew,
             "orient": self.orient,
+            "turn": self.turn,
             "method": self.method,
             "passes": self.rerun,
         }
@@ -512,7 +578,7 @@ def _dense(plan: ScanPlan, size: tuple[int, int] | None = None) -> NDArray[np.fl
     size = plan.output.size if size is None else size
     if plan.kind == "perspective":
         return homography_map(plan.homography, size)
-    return dense_map(plan.grid, size, inset=plan.inset, border=plan.border)
+    return dense_map(plan.grid, size, inset=plan.inset, border=plan.border, nodes=plan.nodes)
 
 
 def preview_size(output_size: tuple[int, int], long_side: int) -> tuple[int, int]:
@@ -521,15 +587,16 @@ def preview_size(output_size: tuple[int, int], long_side: int) -> tuple[int, int
     return max(2, round_half_up(height * scale)), max(2, round_half_up(width * scale))
 
 
-def _preview(source: SourceImage, plan: ScanPlan, long_side: int, fill) -> NDArray[np.uint8]:
-    """The plan's image at ``long_side`` sampled once from a box-reduced source level."""
+def _preview(source: SourceImage, plan: ScanPlan, long_side: int) -> NDArray[np.uint8]:
+    """The plan's image at ``long_side`` sampled once from a box-reduced source level, with
+    the plan's fill color and quantization."""
     size = preview_size(plan.output.size, long_side)
     backward = _dense(plan, size)
     shrink = math.sqrt(plan.output.height * plan.output.width / (size[0] * size[1]))
     density = (plan.output.density_median or 1.0) * shrink  # source pixels per preview pixel
     factor = max(f for f in (1, 2, 4, 8) if f == 1 or f <= density)
     level = source.level(factor)
-    return sample_rgb(level, backward, source_inside(backward), fill, "round")
+    return sample_rgb(level, backward, source_inside(backward), plan.fill_rgb, plan.quantize)
 
 
 def _with_border(
@@ -572,23 +639,20 @@ def _with_border(
 
 
 def _gate_record(gate: LoadedContextSegmenter) -> dict[str, Any]:
+    """The page gate's model record; ``scan.shippable.gate_verdict`` decides whether it
+    ships (release track, a scratch-rooted release lineage, release data)."""
     provenance = gate.metadata.get("provenance") or {}
-    lineage = provenance.get("lineage")
-    scratch = (
-        isinstance(lineage, list)
-        and bool(lineage)
-        and isinstance(lineage[0], dict)
-        and lineage[0].get("kind") == "scratch"
-    )
-    ok = provenance.get("track") == "release" and scratch
+    verdict = gate_verdict(provenance, sha256=gate.model_sha256)
     return {
         "role": "gate",
         "sha256": gate.model_sha256,
         "model_version": gate.metadata.get("model_version"),
         "parameters": gate.metadata.get("parameter_count"),
         "track": provenance.get("track"),
-        "initialization": provenance.get("initialization"),
-        "shippable": bool(ok),
+        "initialization": verdict.initialization,
+        "shippable": verdict.shippable,
+        "category": verdict.category,
+        "gate_reasons": list(verdict.reasons),
     }
 
 
@@ -758,8 +822,10 @@ class Scanner:
                 raise FlattenerError(
                     Status.MODEL_ERROR,
                     "not_shippable",
-                    f"{gate}: the page gate is not release-track scratch-trained; "
+                    f"{gate}: the page gate fails the ship gate "
+                    f"({', '.join(record['gate_reasons'])}); "
                     "load it with research=True for comparisons",
+                    metadata={"ship_gate": record},
                 )
         orienter = None
         if orient is not None:
@@ -779,16 +845,50 @@ class Scanner:
         return read_source(path)
 
     def pipeline_record(self, options: ScanOptions | None = None) -> dict[str, Any]:
-        """The ``predictions.json`` pipeline identity of scans with ``options``."""
+        """The ``predictions.json`` pipeline identity of scans with ``options``. Its
+        ``protocol`` holds the quantization, inset and passes that ``rectify_batch``
+        records as the labels of the folder."""
         options = options or ScanOptions()
         settings = options.record()
         for name in ("on_error", "preview"):
             settings.pop(name, None)
+        passes = options.rerun
+        protocol = {
+            "quantize": options.quantize,
+            "inset": inset_record(options.inset),
+            "rerun": {
+                "passes": passes,
+                "deskew": options.deskew,
+                "margin": RERUN_MARGIN if passes else None,
+                "max_angle_deg": None,  # the quarter turn is in the view, so no limit
+                "min_agreement": DESKEW_MIN_AGREEMENT if options.deskew and passes else None,
+            },
+        }
         return {
             "name": PIPELINE_NAME,
             "version": PIPELINE_VERSION,
             "options": settings,
+            "protocol": protocol,
             "models": [{"role": m["role"], "sha256": m["sha256"]} for m in self.models],
+        }
+
+    def batch_kwargs(
+        self, options: ScanOptions | None = None, *, force_render: bool = False
+    ) -> dict[str, Any]:
+        """``rectify_batch`` keyword arguments for this scanner:
+        ``rectify_batch(scanner.dewarper, inputs, out, **scanner.batch_kwargs(options))``.
+        The recorded quantization, inset and passes are those of ``options``."""
+        options = options or ScanOptions()
+        record = self.pipeline_record(options)
+        rerun = record["protocol"]["rerun"]
+        return {
+            "rectifier": self.rectifier(options, force_render=force_render),
+            "pipeline": record,
+            "force_render": force_render,
+            "quantize": options.quantize,
+            "inset": options.inset,
+            "rerun": rerun["passes"],
+            "deskew": rerun["deskew"],
         }
 
     # -- public stages
@@ -814,8 +914,9 @@ class Scanner:
         options: ScanOptions | None = None,
     ) -> ScanResult:
         """The result of a plan: the checked render of ``Scanner.plan`` when it is at
-        hand, else one ``flattener.render`` of the plan (a ``ScanPlan`` read back from
-        JSON must belong to this source)."""
+        hand, else one ``flattener.render`` of the plan. A ``ScanPlan`` read back from
+        JSON must belong to this source (a plan made from a file renders from that file),
+        and the result carries the plan's model records, ship verdict and evidence."""
         if isinstance(planned, ScanPlan):
             options = options or ScanOptions()
             clock = StageClock(cuda_sync=self.dewarper.device.type == "cuda")
@@ -862,7 +963,7 @@ class Scanner:
                 elif planned.rejected:
                     plan = planned.rejected[0]
                     rendered.image = render_unchecked(
-                        planned.source.image, _dense(plan), options.fill_rgb, options.quantize
+                        planned.source.image, _dense(plan), plan.fill_rgb, plan.quantize
                     )
                 rendered.metadata["forced_render"] = rendered.image is not None
             views = [] if result.plan is None else list(result.plan.views)
@@ -1015,7 +1116,7 @@ class Scanner:
         if other is not None:
             box, theta, method = other
             yield _Candidate("C3", box, theta, options.deskew, True, method, rerun)
-        yield _Candidate("C4", None, 0.0, False, False, "rectify", 0)
+        yield _Candidate("C4", None, 0.0, False, True, "rectify", 0, turn="nodes")
 
     def _view(
         self,
@@ -1047,13 +1148,18 @@ class Scanner:
         candidate: _Candidate,
         quarter: int,
         options: ScanOptions,
+        clock: StageClock,
     ) -> list[tuple[NDArray[np.float64], dict[str, Any]]]:
-        """Pass A and the crop passes of one candidate, each placed in the source."""
+        """Pass A and the crop passes of one candidate, each placed in the source. A
+        ``nodes`` candidate runs on the unturned view and re-indexes every grid by the
+        quarter turn (``quarter_turn_grid``)."""
         size = src.info.size
         theta = candidate.theta if candidate.deskew else 0.0
-        angle = theta + 90.0 * quarter if candidate.orient else theta
+        in_view = candidate.orient and candidate.turn == "view"
+        angle = theta + 90.0 * quarter if in_view else theta
         placement, box = self._view(src, candidate.box, angle, options, first=True)
-        grid, record = self._pass(src, memo, placement, box, options)
+        with clock.stage("infer_pass_A"):
+            grid, record = self._pass(src, memo, placement, box, options)
         passes = [(grid, {"pass": "A", **record})]
         for number in range(1, candidate.rerun + 1):
             previous = passes[-1][0]
@@ -1067,21 +1173,28 @@ class Scanner:
             if candidate.deskew and crop["deskew_skipped"] is None:
                 if _angle_difference(estimate, view_angle) > 45.0:
                     crop["deskew_skipped"] = "angle_disagrees_with_view"
-                    estimate = 90.0 * split_angle(view_angle)[1] if candidate.orient else 0.0
+                    estimate = 90.0 * split_angle(view_angle)[1] if in_view else 0.0
             else:
-                estimate = 90.0 * split_angle(view_angle)[1] if candidate.orient else 0.0
+                estimate = 90.0 * split_angle(view_angle)[1] if in_view else 0.0
             outline = outline_points(previous, size)
             placement, crop_box = self._view(src, next_box, estimate, options, outline)
-            grid, record = self._pass(src, memo, placement, crop_box, options)
+            with clock.stage(f"infer_pass_{number}"):
+                grid, record = self._pass(src, memo, placement, crop_box, options)
             crop["rotated"] = placement.angle_deg != 0.0
             crop["canvas_size"] = [float(v) for v in placement.view_size]
             passes.append((grid, {"pass": number, **crop, **record}))
+        turns = quarter % 4 if candidate.orient and candidate.turn == "nodes" else 0
+        if turns:
+            passes = [
+                (quarter_turn_grid(grid, turns), {**record, "quarter_turn": turns})
+                for grid, record in passes
+            ]
         return passes
 
     def _flat_preview(self, src: SourceImage, grid: NDArray) -> NDArray[np.uint8]:
         size = src.info.size
         output = plan_output(grid, size, output=VERIFY["post_preview_long_side"])
-        backward = dense_map(grid, output.size)
+        backward = dense_map(grid, output.size, nodes=self.dewarper.config.grid_convention)
         density = output.density_median or 1.0
         factor = max(f for f in (1, 2, 4, 8) if f == 1 or f <= density)
         level = src.level(factor)
@@ -1144,6 +1257,8 @@ class Scanner:
             inset=inset,
             border=float(options.border),
             quantize=options.quantize,
+            nodes=self.dewarper.config.grid_convention,
+            fill_rgb=tuple(options.fill_rgb),
             models=tuple(self.models),
             thresholds={"locate": locating.THRESHOLDS, "verify": VERIFY},
             provenance=self._provenance(located, orientation, overrides),
@@ -1163,10 +1278,19 @@ class Scanner:
             "dewarp": "manual" if overrides.skip_dewarp else "auto",
         }
 
-    def _check(self, src: SourceImage, plan: ScanPlan, options: ScanOptions) -> _Checked:
+    def _check(
+        self,
+        src: SourceImage,
+        plan: ScanPlan,
+        options: ScanOptions,
+        clock: StageClock | None = None,
+    ) -> _Checked:
         """``flattener.render`` of the plan's map, once (the renderer's checks); with
-        ``fast_check`` a dewarp plan gets ``scan.fast_check`` and no image yet."""
-        config = RenderConfig(on_error="return", fill_rgb=tuple(options.fill_rgb))
+        ``fast_check`` a dewarp plan gets ``scan.fast_check`` and no image yet. The map,
+        the checks and the sampling are timed as ``render_map``, ``render_check`` and
+        ``render_sample`` (the last two from the renderer's own timings)."""
+        clock = clock or StageClock()
+        config = RenderConfig(on_error="return", fill_rgb=tuple(plan.fill_rgb))
         if options.fast_check and plan.kind == "dewarp":
             fast = fast_check(
                 src.image,
@@ -1176,14 +1300,23 @@ class Scanner:
                 border=plan.border,
                 config=config,
                 levels=src.level,
+                nodes=plan.nodes,
             )
+            clock.add("render_check", fast.metadata["timings"]["total"])
             return _Checked(plan, fast.result(), fast)
-        backward = _dense(plan)
+        with clock.stage("render_map"):
+            backward = _dense(plan)
         result = flattener_render(src.image, backward, config=config)
+        timings = result.metadata.get("timings") or {}
+        checks = [timings.get(name) for name in ("prepare_input", "process_coordinates")]
+        clock.add("render_check", sum(value for value in checks if value is not None))
+        if timings.get("render") is not None:
+            clock.add("render_sample", timings["render"])
         if result.status == Status.SUCCESS and plan.quantize != "round":
-            result.image = sample_rgb(
-                src.image, backward, result.valid_mask, config.fill_rgb, plan.quantize
-            )
+            with clock.stage("render_sample"):
+                result.image = sample_rgb(
+                    src.image, backward, result.valid_mask, config.fill_rgb, plan.quantize
+                )
         return _Checked(plan, result)
 
     def _perspective_plan(
@@ -1212,6 +1345,7 @@ class Scanner:
             angle_deg=locating.quad_angle(quad),
             quarter=0 if orientation is None else orientation.quarter,
             quantize=options.quantize,
+            fill_rgb=tuple(options.fill_rgb),
             models=tuple(self.models),
             thresholds={"locate": locating.THRESHOLDS, "verify": VERIFY},
             provenance=self._provenance(located, orientation, overrides),
@@ -1321,7 +1455,13 @@ class Scanner:
         seen: set[tuple] = set()
         first_grid = None
         first_failure: Reason | None = None
-        for candidate in self._chain(src, memo, located, options):
+        failed: list[str] = []
+        chain = self._chain(src, memo, located, options)
+        while True:
+            with clock.stage("detect"):  # C3's other box may need pass 0
+                candidate = next(chain, None)
+            if candidate is None:
+                break
             quarter = orientation.quarter if candidate.orient else 0
             key = candidate.key(quarter, size)
             if key in seen:
@@ -1335,9 +1475,22 @@ class Scanner:
             if first_grid is None:
                 first_grid = outcome.get("first_grid")
             if outcome.get("checked") is not None:
+                if first_failure is not None:
+                    reasons.append(
+                        reason(
+                            "candidate_fallback",
+                            candidate=candidate.name,
+                            failed=failed,
+                            failure=first_failure.to_dict(),
+                        )
+                    )
                 return self._accept(planned, outcome, reasons, outcome["orientation"])
+            failed.append(candidate.name)
             if first_failure is None:
                 first_failure = outcome["failure"]
+            if outcome["orientation"].settled_by is not None:
+                # A quarter turn settled on a flat preview holds for the later candidates.
+                orientation = outcome["orientation"]
         failure = first_failure or reason("unstable_geometry", why="no_candidate")
         quad = self._certain_quad(located, first_grid, size, overrides.quarter)
         return self._fallback(planned, memo, reasons, failure, located, orientation, quad)
@@ -1354,15 +1507,16 @@ class Scanner:
         reasons: list[Reason],
     ) -> dict[str, Any]:
         """Infer, verify, plan and check one candidate. Returns ``checked`` when a grid
-        passes (the last pass, else pass A: L1), otherwise ``failure`` (the first one)."""
+        passes (the last pass, else pass A: L1), otherwise ``failure`` (the first one). A
+        ``FlattenerError`` from the plan or the check is that grid's failure."""
         src, clock = planned.source, planned.clock
         size = src.info.size
         quarter = orientation.quarter if candidate.orient else 0
         entry: dict[str, Any] = {**candidate.record(), "quarter": quarter}
         with clock.stage("infer"):
-            passes = self._infer(src, memo, candidate, quarter, options)
+            passes = self._infer(src, memo, candidate, quarter, options, clock)
         if candidate.orient:
-            with clock.stage("verify"):
+            with clock.stage("orient_post"):
                 k_post, post = self._orient_post(src, passes[-1][0], orientation, options)
             if k_post == 2:
                 passes = [(flip_grid(grid), {**rec, "flipped": True}) for grid, rec in passes]
@@ -1371,10 +1525,12 @@ class Scanner:
             elif k_post in (1, 3):
                 quarter = (quarter + k_post) % 4
                 with clock.stage("infer"):
-                    passes = self._infer(src, memo, candidate, quarter, options)
-                post["action"] = f"reinfer_quarter_{quarter}"
+                    passes = self._infer(src, memo, candidate, quarter, options, clock)
+                verb = "reindex" if candidate.turn == "nodes" else "reinfer"
+                post["action"] = f"{verb}_quarter_{quarter}"
             if post is not None:
-                orientation = replace(orientation, quarter=quarter, post=post)
+                settled = candidate.name if _post_accepted(post) else orientation.settled_by
+                orientation = replace(orientation, quarter=quarter, post=post, settled_by=settled)
             entry["orientation_post"] = post
         entry["passes"] = [record for _, record in passes]
         grids = [("final", passes[-1][0], len(passes))]
@@ -1401,12 +1557,21 @@ class Scanner:
                 failures.append((bad, {"grid": label, "checks": checks}))
                 continue
             views = [record for _, record in passes[:count]]
-            with clock.stage("plan"):
-                plan = self._plan_for(
-                    src, grid, views, located, orientation, candidate, options, overrides
+            try:
+                with clock.stage("plan"):
+                    plan = self._plan_for(
+                        src, grid, views, located, orientation, candidate, options, overrides
+                    )
+                with clock.stage("render"):
+                    checked = self._check(src, plan, options, clock)
+            except FlattenerError as error:
+                bad = reason(
+                    error.reason_code or "invalid_transform",
+                    status=error.status,
+                    message=error.message,
                 )
-            with clock.stage("render"):
-                checked = self._check(src, plan, options)
+                failures.append((bad, {"grid": label, "checks": checks}))
+                continue
             if not checked.ok:
                 planned.rejected.append(plan)
                 validation = checked.result.metadata.get("validation")
@@ -1450,9 +1615,8 @@ class Scanner:
         record = planned.record
         if outcome["rerun_discarded"]:
             reasons.append(reason("rerun_discarded", failures=outcome["failures"]))
-        post = orientation.post or {}
-        if (post.get("result") or {}).get("accepted"):
-            # OrientNet decided on the flat preview; the pre-dewarp doubt is settled.
+        if orientation.settled_by is not None:
+            # OrientNet decided on a flat preview; the pre-dewarp doubt is settled.
             reasons[:] = [item for item in reasons if item.code != "orientation_uncertain"]
         density_min = plan.output.density_min
         if density_min is not None and density_min < VERIFY["low_resolution_density"]:
@@ -1477,11 +1641,13 @@ class Scanner:
         record.metadata["orientation"] = orientation.record()
         planned.plan = plan
         planned.checked = checked
-        if planned.options.preview is not None:
-            planned.preview = _preview(
-                planned.source, plan, planned.options.preview, planned.options.fill_rgb
-            )
+        self._make_preview(planned, plan)
         return planned
+
+    def _make_preview(self, planned: PlannedScan, plan: ScanPlan) -> None:
+        if planned.options.preview is not None:
+            with planned.clock.stage("preview"):
+                planned.preview = _preview(planned.source, plan, planned.options.preview)
 
     def _skip_dewarp(
         self,
@@ -1492,11 +1658,15 @@ class Scanner:
         options: ScanOptions,
         overrides: ScanOverrides,
     ) -> PlannedScan:
-        """A requested homography-only plan from the quad, the region or the page box."""
+        """A requested homography-only plan from the quad, the region or the page box. The
+        quarter turn comes from the overrides or the quad, else from OrientNet as on the
+        dewarp path (``orientation_uncertain`` when it is unsure or missing)."""
         src, clock = planned.source, planned.clock
-        quarter = overrides.quarter
+        with clock.stage("orient"):
+            orientation = self._orient_pre(src, memo, located, options, overrides)
+        reasons.extend(orientation.reasons)
         if located.quad is not None:
-            quad = self._certain_quad(located, None, src.info.size, quarter)
+            quad = self._certain_quad(located, None, src.info.size, overrides.quarter)
         else:
             if overrides.region is not None:
                 left, top, right, bottom = locating.region_bounds(overrides.region, src.info.size)
@@ -1507,21 +1677,16 @@ class Scanner:
             else:
                 height, width = src.info.size
                 quad = np.array([[0, 0], [width, 0], [width, height], [0, height]], float)
-            quad = turn_quad(quad, quarter or 0)
-        if quarter is not None:
-            orientation = _Orientation(quarter, "manual", "manual")
-        elif located.quarter is not None:
-            orientation = _Orientation(located.quarter, "quad", "manual")
-        else:
-            orientation = _Orientation(0, "none", "auto")
+            quad = turn_quad(quad, orientation.quarter)
         with clock.stage("plan"):
             plan = self._perspective_plan(
                 src, quad, located, orientation, options, overrides, "skip_dewarp"
             )
         with clock.stage("render"):
-            checked = self._check(src, plan, options)
+            checked = self._check(src, plan, options, clock)
         record = planned.record
         record.metadata["chain"] = [{"name": "skip_dewarp", "status": str(checked.result.status)}]
+        record.metadata["orientation"] = orientation.record()
         if not checked.ok:
             failure = reason(
                 checked.result.reason_code or "invalid_transform", status=checked.result.status
@@ -1534,12 +1699,12 @@ class Scanner:
         record.plan = plan
         record.qa = {
             "candidate": "skip_dewarp",
+            "orientation": orientation.record(),
             "density_min": plan.output.density_min,
             "density_median": plan.output.density_median,
         }
         planned.plan, planned.checked = plan, checked
-        if options.preview is not None:
-            planned.preview = _preview(src, plan, options.preview, options.fill_rgb)
+        self._make_preview(planned, plan)
         return planned
 
     def _fallback(
@@ -1567,7 +1732,7 @@ class Scanner:
                     "perspective_fallback",
                 )
             with planned.clock.stage("render"):
-                checked = self._check(src, plan, options)
+                checked = self._check(src, plan, options, planned.clock)
             record.metadata.setdefault("chain", []).append(
                 {
                     "name": "L2",
@@ -1586,8 +1751,7 @@ class Scanner:
                 record.outcome = Outcome.PERSPECTIVE
                 record.plan = plan
                 planned.plan, planned.checked = plan, checked
-                if options.preview is not None:
-                    planned.preview = _preview(src, plan, options.preview, options.fill_rgb)
+                self._make_preview(planned, plan)
                 return planned
             planned.rejected.append(plan)
         record.reasons = reasons
@@ -1599,38 +1763,73 @@ class Scanner:
         planned.plan = None
         return planned
 
-    def _planned_from_plan(
-        self, src: SourceImage, plan: ScanPlan, options: ScanOptions, clock: StageClock
-    ) -> PlannedScan:
-        for name in ("file_sha256", "pixels_sha256"):
-            mine, theirs = getattr(src.info, name), getattr(plan.source, name)
-            if mine is not None and theirs is not None and mine != theirs:
-                raise FlattenerError(
-                    Status.INPUT_ERROR,
-                    "source_mismatch",
-                    f"the plan belongs to another source ({name})",
-                )
+    def _check_source(self, src: SourceImage, plan: ScanPlan) -> None:
+        """Refuse a plan made from another source: same size, and a file or pixel sha256
+        that both sides can give. A plan made from a file names no pixel sha256, so it
+        renders only from that file."""
         if tuple(src.info.size) != tuple(plan.source.size):
             raise FlattenerError(
                 Status.INPUT_ERROR,
                 "source_mismatch",
                 "the plan belongs to a source of another size",
             )
+        compared = False
+        mine, theirs = src.info.file_sha256, plan.source.file_sha256
+        if mine is not None and theirs is not None:
+            if mine != theirs:
+                raise FlattenerError(
+                    Status.INPUT_ERROR,
+                    "source_mismatch",
+                    "the plan belongs to another source (file_sha256)",
+                )
+            compared = True
+        theirs = plan.source.pixels_sha256
+        if theirs is not None:
+            mine = src.info.pixels_sha256
+            if mine is None:
+                mine = hashlib.sha256(np.ascontiguousarray(src.image).tobytes()).hexdigest()
+            if mine != theirs:
+                raise FlattenerError(
+                    Status.INPUT_ERROR,
+                    "source_mismatch",
+                    "the plan belongs to another source (pixels_sha256)",
+                )
+            compared = True
+        if not compared:
+            raise FlattenerError(
+                Status.INPUT_ERROR,
+                "source_mismatch",
+                "the plan was made from a file; render it from that file",
+            )
+
+    def _planned_from_plan(
+        self, src: SourceImage, plan: ScanPlan, options: ScanOptions, clock: StageClock
+    ) -> PlannedScan:
+        """A ``PlannedScan`` of a stored plan. The result carries the plan's own model
+        records (the weights that made its geometry), their ship verdict and evidence."""
+        self._check_source(src, plan)
+        models = [dict(model) for model in plan.models]
+        shippable_plan = bool(models) and all(model.get("shippable") for model in models)
+        dewarp = next((model for model in models if model.get("role") == "dewarp"), None)
+        if dewarp is not None and dewarp.get("sha256") == self.dewarper.info.get("sha256"):
+            proof = evidence("predictions", self.dewarper.info)
+        else:
+            proof = evidence("predictions", dewarp)
         record = ScanResult(
             status=Status.SUCCESS,
             outcome=decide_outcome(plan.kind),
             source=src.info,
-            models=list(self.models),
-            shippable=self.shippable,
-            research=self.research,
-            evidence=evidence("predictions", self.dewarper.info),
+            models=models,
+            shippable=shippable_plan,
+            research=not shippable_plan,
+            evidence=proof,
             input=src.path,
             plan=plan,
             metadata={"pipeline": self.pipeline_record(options), "options": options.record()},
         )
         planned = PlannedScan(plan, None, src, record, options, clock=clock)
         with clock.stage("render"):
-            checked = self._check(src, plan, options)
+            checked = self._check(src, plan, options, clock)
         if checked.ok:
             planned.checked = checked
             return planned
@@ -1656,8 +1855,9 @@ class Scanner:
             result = planned.checked.result
             fast = planned.checked.fast
             if fast is not None and result.image is None:
-                with clock.stage("render"):
-                    result.image = fast.sample(src.image, options.fill_rgb, planned.plan.quantize)
+                plan = planned.plan
+                with clock.stage("render"), clock.stage("render_sample"):
+                    result.image = fast.sample(src.image, plan.fill_rgb, plan.quantize)
             record.image = result.image
             record.valid_mask = result.valid_mask
             record.plan = planned.plan
@@ -1669,7 +1869,7 @@ class Scanner:
                 record.image = src.image.copy()
                 record.used_fallback = True
             elif options.on_error == "raise":
-                record.timings = _timings(clock)
+                _stamp_timings(record, clock)
                 raise FlattenerError(
                     record.status,
                     record.reason_code or "scan_failed",
@@ -1678,7 +1878,7 @@ class Scanner:
                 )
             else:
                 record.outcome = Outcome.FAILED
-        record.timings = _timings(clock)
+        _stamp_timings(record, clock)
         return record
 
 
@@ -1686,3 +1886,10 @@ def _timings(clock: StageClock | None) -> dict[str, float]:
     if clock is None:
         return {}
     return {**clock.seconds(), "total": clock.elapsed()}
+
+
+def _stamp_timings(record: ScanResult, clock: StageClock | None) -> None:
+    """Per-stage seconds in ``timings`` and every stage record in the metadata."""
+    record.timings = _timings(clock)
+    if clock is not None:
+        record.metadata["timing_stages"] = clock.to_dict()["stages"]

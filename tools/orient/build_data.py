@@ -361,7 +361,7 @@ def code_record() -> dict[str, str]:
 
 
 def build(
-    spec_path: str | Path, output: str | Path, *, workers: int = 4, limit: int | None = None
+    spec_path: str | Path, output: str | Path, *, workers: int = 2, limit: int | None = None
 ) -> dict[str, Any]:
     spec = load_build_spec(spec_path)
     output = Path(output)
@@ -503,7 +503,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--spec", required=True, help="build spec JSON (flattener-orient-build-1)")
     parser.add_argument("--output", required=True, help="output directory (${VAR}s expand)")
-    parser.add_argument("--workers", type=int, default=4)
+    parser.add_argument("--workers", type=int, default=2, help="build processes (default 2)")
     parser.add_argument("--limit", type=int, default=None, help="cap every split (smoke builds)")
     args = parser.parse_args(argv)
     summary = build(

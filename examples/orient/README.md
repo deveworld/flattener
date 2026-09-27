@@ -84,7 +84,9 @@ Checkpoints and their `.pt.json` sidecars use the dewarp record layout, so
 - `orient_data`: the build summary; `calibration`: temperature and threshold.
 
 `Orienter.load` and `export` refuse weights outside the release lineage unless
-`research=True` (`orient.release_problems`, the same rules as the ship gate).
+`research=True` (`orient.release_problems`, which ends with the scanner's ship gate
+`scan.shippable`). A fine-tuned model also needs the data spec of every parent training
+step; the lineage entry of its parent carries it.
 
 Validation fits a temperature and the lowest threshold with at most 0.5% silent errors on
 the synthetic val split (`calibration.source = "synthetic_val"`). The design sets the

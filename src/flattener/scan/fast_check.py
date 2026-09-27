@@ -32,6 +32,9 @@ decisions for a map that densifies a grid (``scan.placement.dense_map``) with le
   ``dewarp.predict.sample_rgb``, ``flattener.render``'s sampling (the same image for
   ``round``).
 
+``nodes`` places the grid nodes in the output as ``dense_map`` does (``flattener`` or
+``uvdoc``).
+
 Failure reasons and their order are the renderer's: ``non_finite_grid``,
 ``excessive_out_of_bounds``, ``fold_or_degenerate``, ``empty_valid_region``, each with
 ``Status.INVALID_TRANSFORM``. ``metadata["validation"]`` has the renderer's keys; its
@@ -55,6 +58,7 @@ from ..dewarp.coords import center_positions
 from ..dewarp.predict import Inset, resolve_inset, sample_rgb, source_inside
 from ..renderer import render
 from ..validation import validate_config, validate_image, validate_size
+from .placement import CONVENTIONS as NODE_CONVENTIONS
 from .placement import dense_map
 
 PROXY_PIXELS = 2_000_000
@@ -63,9 +67,20 @@ LEVEL_FACTORS = (1, 2, 4, 8)
 Levels = Callable[[int], NDArray[np.uint8]]
 
 
-def _positions(count: int, nodes: int, shrink: float) -> NDArray[np.float64]:
+def _positions(count: int, nodes: int, shrink: float, convention: str) -> NDArray[np.float64]:
     """Fractional node index of each output pixel center on one axis (``dense_map``)."""
-    return (shrink * center_positions(count) + 1.0) / 2.0 * (nodes - 1)
+    if convention == "uvdoc":
+        base = np.linspace(-1.0, 1.0, count, dtype=np.float64)
+    else:
+        base = center_positions(count)
+    return (shrink * base + 1.0) / 2.0 * (nodes - 1)
+
+
+def _pixel_span(count: int, convention: str) -> float:
+    """``count`` times the node-index step between neighbouring output pixels, over
+    ``shrink * (nodes - 1)``: 1 for edge-aligned nodes, ``count / (count - 1)`` for
+    ``uvdoc`` nodes."""
+    return count / (count - 1) if convention == "uvdoc" else 1.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,8 +97,8 @@ class _Axis:
     straddling: NDArray[np.int64]
 
 
-def _axis(count: int, nodes: int, shrink: float) -> _Axis:
-    index = _positions(count, nodes, shrink)
+def _axis(count: int, nodes: int, shrink: float, convention: str) -> _Axis:
+    index = _positions(count, nodes, shrink, convention)
     low, high = float(index[0]), float(index[-1])
     inner = np.arange(1, nodes - 1, dtype=np.float64)
     breaks = inner[(inner > low) & (inner < high)]
@@ -173,9 +188,10 @@ def grid_jacobian(
     border: float = 0.0,
     minimum: float = RenderConfig().min_jacobian_ratio,
     backward_map: NDArray[np.float32] | None = None,
+    nodes: str = "flattener",
 ) -> dict[str, Any]:
-    """The renderer's fold check of ``dense_map(grid, output_size, inset, border)`` from
-    the grid (see the module docstring).
+    """The renderer's fold check of ``dense_map(grid, output_size, inset, border, nodes)``
+    from the grid (see the module docstring).
 
     ``backward_map`` is that dense map, needed for the cells that straddle a grid node
     (computed when not given). Returns ``min_jacobian_ratio`` (renderer units; ``None``
@@ -199,11 +215,16 @@ def grid_jacobian(
     }
     if height < 2 or width < 2:
         return stats
+    if nodes not in NODE_CONVENTIONS:
+        raise FlattenerError(
+            Status.INPUT_ERROR, "invalid_grid", f"nodes must be one of {NODE_CONVENTIONS}"
+        )
     ex, ey = resolve_inset(inset)
     gh, gw = array.shape[:2]
     shrink_x, shrink_y = 1.0 - ex + border, 1.0 - ey + border
-    xs, ys = _axis(width, gw, shrink_x), _axis(height, gh, shrink_y)
-    scale = shrink_x * (gw - 1) * shrink_y * (gh - 1) / 4.0
+    xs, ys = _axis(width, gw, shrink_x, nodes), _axis(height, gh, shrink_y, nodes)
+    span = _pixel_span(width, nodes) * _pixel_span(height, nodes)
+    scale = shrink_x * (gw - 1) * shrink_y * (gh - 1) * span / 4.0
     continuous = _piece_minimum(
         array,
         xs,
@@ -231,7 +252,9 @@ def grid_jacobian(
         values.append((_piece_minimum(array, px, py, sx, sy) * scale).ravel())
     if xs.straddling.size or ys.straddling.size:
         if backward_map is None:
-            backward_map = dense_map(array, (height, width), inset=inset, border=border)
+            backward_map = dense_map(
+                array, (height, width), inset=inset, border=border, nodes=nodes
+            )
         straddle, count = _straddle_minimum(backward_map, xs, ys)
         values.append(straddle)
         stats["straddling_cells"] = count
@@ -321,10 +344,11 @@ def fast_check(
     config: RenderConfig | None = None,
     proxy_pixels: int | None = PROXY_PIXELS,
     levels: Levels | None = None,
+    nodes: str = "flattener",
 ) -> FastCheck:
-    """Check ``dense_map(grid, output_size, inset, border)`` for ``image`` (see the module
-    docstring). ``levels(f)`` gives the source reduced by f for the proxy render of at
-    most ``proxy_pixels`` (``None``: no proxy)."""
+    """Check ``dense_map(grid, output_size, inset, border, nodes)`` for ``image`` (see the
+    module docstring). ``levels(f)`` gives the source reduced by f for the proxy render of
+    at most ``proxy_pixels`` (``None``: no proxy)."""
     started = time.perf_counter()
     config = validate_config(config)
     validate_image(image, config)
@@ -360,7 +384,7 @@ def fast_check(
     if not np.isfinite(array).all():
         return fail("non_finite_grid", "backward_map contains non-finite target coordinates")
     step = time.perf_counter()
-    backward = dense_map(array, (height, width), inset=inset, border=border)
+    backward = dense_map(array, (height, width), inset=inset, border=border, nodes=nodes)
     if not np.isfinite(backward).all():
         return fail("non_finite_grid", "backward_map contains non-finite target coordinates")
     valid = source_inside(backward)
@@ -382,6 +406,7 @@ def fast_check(
         border=border,
         minimum=config.min_jacobian_ratio,
         backward_map=backward,
+        nodes=nodes,
     )
     timings["jacobian"] = time.perf_counter() - step
     validation.update(jacobian)
@@ -395,7 +420,7 @@ def fast_check(
         small = proxy_size((height, width), proxy_pixels)
         source_height, source_width = image.shape[:2]
         density = math.sqrt(source_height * source_width / (small[0] * small[1]))
-        proxy_map = dense_map(array, small, inset=inset, border=border)
+        proxy_map = dense_map(array, small, inset=inset, border=border, nodes=nodes)
         level = _level(image, levels, density / 1.5)
         proxy = render(level, proxy_map, config=replace(config, on_error="return"))
         timings["proxy"] = time.perf_counter() - step

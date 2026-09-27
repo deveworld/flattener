@@ -444,7 +444,7 @@ class TrainConfig:
     aux_weight: float = 0.3
     grad_clip: float = 2.0
     amp: bool = True
-    num_workers: int = 6
+    num_workers: int = 2  # local default; remote configs set their own
     prefetch_factor: int = 4
     pin_memory: bool = True
     device: str = "auto"
@@ -657,6 +657,7 @@ def _initialize(model: OrientNet, config: TrainConfig) -> dict[str, Any]:
         "step": parent["step"],
         "track": parent["track"],
         "data_spec_sha256": parent.get("data_spec_sha256"),
+        "data_spec": parent.get("data_spec"),
         "code_sha256": (parent.get("code") or {}).get("sha256"),
         "lineage": parent["lineage"],
     }

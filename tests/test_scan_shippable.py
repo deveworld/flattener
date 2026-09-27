@@ -23,6 +23,7 @@ from flattener.scan.shippable import (
     MAX_DEPTH,
     REASONS,
     gate_file,
+    gate_verdict,
     load_weights,
     main,
     shippable,
@@ -362,6 +363,71 @@ def test_release_finetune_of_r4_needs_the_parent_data_spec():
         assert verdict.shippable, parent_spec
         assert verdict.initialization == "scratch"
         assert [node["kind"] for node in verdict.chain] == ["checkpoint", "checkpoint", "scratch"]
+
+
+def test_a_parent_start_may_carry_its_own_data_spec():
+    carried = {**_parent(R4, "/workspace/init/R4.pt"), "data_spec": SPEC_V3}
+    child = _sidecar("c" * 64, SPEC_V2, V2, [carried, _train(V2)], step=1000)
+    assert shippable(child).shippable
+    wrong = {**carried, "data_spec": SPEC_V2}  # hashes to another step's spec
+    child = _sidecar("c" * 64, SPEC_V2, V2, [wrong, _train(V2)], step=1000)
+    assert shippable(child).reasons == ("unverified_data_spec",)
+
+
+GATE_DATA = [
+    {"kind": "authored", "license": "Apache-2.0 AND OFL-1.1"},
+    {"kind": "simulated", "license": "CC-BY-4.0"},
+    {"kind": "capture", "license": "CC-BY-4.0"},
+]
+GATE_V0 = {"track": "release", "lineage": [{"kind": "scratch"}], "data": GATE_DATA}
+
+
+@pytest.mark.parametrize(
+    "edit, reasons",
+    [
+        ({}, ()),
+        ({"track": "research"}, ("not_release_track",)),
+        ({"data": None}, ("unverified_data_spec",)),
+        (
+            {"data": [*GATE_DATA, {"kind": "doc3d", "license": "CC BY-NC-ND 3.0"}]},
+            ("data_license_not_release",),
+        ),
+        ({"data": [{**GATE_DATA[0], "track": "research"}]}, ("data_license_not_release",)),
+        ({"data_spec": SPEC_RESEARCH}, ("research_data",)),
+        ({"data_spec": SPEC_V3, "data": None}, ()),
+        (
+            {"lineage": [{"kind": "scratch"}, {"kind": "train", "track": "research"}]},
+            ("not_release_track",),
+        ),
+        ({"lineage": [UVDOC_START, {"kind": "train", "track": "release"}]}, ("external_init",)),
+        ({"lineage": None}, ("unknown_init",)),
+        ({"lineage": [{"kind": "scratch"}, {"kind": "distill"}]}, ("unknown_lineage_entry",)),
+    ],
+)
+def test_page_gates_go_through_the_same_rules(edit, reasons):
+    record = {key: value for key, value in {**GATE_V0, **edit}.items() if value is not None}
+    verdict = gate_verdict(record, sha256="g" * 64)
+    assert verdict.reasons == reasons and verdict.shippable == (not reasons)
+    if not reasons:
+        assert verdict.category == "release" and verdict.initialization == "scratch"
+
+
+def test_a_fine_tuned_page_gate_needs_its_parents_data():
+    parent = {"kind": "checkpoint", "track": "release", "sha256": "p" * 64, **GATE_V0}
+    child = {
+        "track": "release",
+        "lineage": [parent, {"kind": "train", "track": "release"}],
+        "data": GATE_DATA,
+    }
+    verdict = gate_verdict(child)
+    assert verdict.shippable and verdict.initialization == "scratch"
+    assert [node["kind"] for node in verdict.chain] == ["page_gate", "checkpoint", "scratch"]
+    bare = {key: value for key, value in parent.items() if key != "data"}
+    child["lineage"] = [bare, {"kind": "train", "track": "release"}]
+    assert gate_verdict(child).reasons == ("unverified_data_spec",)
+    child["lineage"] = [{**parent, "track": "research"}, {"kind": "train", "track": "release"}]
+    assert gate_verdict(child).reasons == ("not_release_track",)
+    assert gate_verdict(None).category == "external"
 
 
 def test_research_parents_fail_a_release_child():

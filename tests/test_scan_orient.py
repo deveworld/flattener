@@ -260,6 +260,24 @@ def test_release_problems_follow_the_whole_lineage():
     assert release_problems(_record(data_sources=None))
 
 
+def test_a_fine_tuned_model_needs_every_parent_data_spec(tmp_path):
+    parent_spec = {**_data_spec(), "name": "orient-parent"}
+    digest = DataSpec.from_dict(parent_spec).sha256
+    parent = {"kind": "checkpoint", "track": "release", "lineage": _lineage(digest=digest)}
+    child = _record(lineage=_lineage(parent))
+    problems = release_problems(child)
+    assert problems == ["ship gate: unverified_data_spec"]
+    shippable = pytest.importorskip("flattener.scan.shippable")
+    assert shippable.shippable(child).reasons == ("unverified_data_spec",)  # same verdict
+    carried = _record(lineage=_lineage({**parent, "data_spec": parent_spec}))
+    assert release_problems(carried) == [] and shippable.shippable(carried).shippable
+    assert release_problems(child, specs=[parent_spec]) == []
+    sidecar = tmp_path / "parent.pt.json"  # the parent's sidecar at its recorded path
+    sidecar.write_text(json.dumps({"data_spec": parent_spec}), encoding="utf-8")
+    found = _record(lineage=_lineage({**parent, "path": str(tmp_path / "parent.pt")}))
+    assert release_problems(found) == []
+
+
 def test_records_pass_the_scanner_ship_gate():
     shippable = pytest.importorskip("flattener.scan.shippable")
     assert shippable.shippable({**_record(), "sha256": "a" * 64}).shippable

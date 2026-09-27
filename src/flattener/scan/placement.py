@@ -33,7 +33,9 @@ by ``flip_grid(G)`` (``G[::-1, ::-1]``). Both only re-index nodes.
 The conventions stay apart. A legacy ``LoadedPredictor`` map is expanded in view values
 first (``coordinates.resize_backward_map``) and composed after; ``Placement.from_box`` is
 ``regions.geometry.region_map_to_source`` bit for bit. A UVDoc-convention grid is converted
-to flattener values with the view size (``view_values``), as ``crop_pass`` does.
+to flattener values with the view size (``view_values``), as ``crop_pass`` does, and is
+densified with its nodes on the outer pixel centers (``dense_map(..., nodes="uvdoc")``), as
+``rectify`` densifies it.
 """
 
 from __future__ import annotations
@@ -400,25 +402,26 @@ def dense_map(
     *,
     inset: Inset = None,
     border: float | tuple[float, float] = 0.0,
+    nodes: str = "flattener",
 ) -> NDArray[np.float32]:
-    """Dense backward map (float32) at ``output_size`` of a grid of source values on
-    edge-aligned nodes (a composed grid).
+    """Dense backward map (float32) at ``output_size`` of a grid of source values (a
+    composed grid).
 
     Output coordinate u in [-1, 1] shows grid position (1 - e + b) u on each axis.
     ``inset`` e (``resolve_inset``) moves each side in by e / 2 of the page extent;
     ``border`` b (one value or (bx, by), each in [0, 1)) moves each side out by b / 2,
-    extending the edge cells linearly. Without a border it equals
-    ``dense_backward_map(grid, "flattener", output_size, source_size, inset,
+    extending the edge cells linearly. ``nodes`` places the grid nodes in the output:
+    ``flattener`` puts the outer nodes on the outer pixel edges, ``uvdoc`` on the outer
+    pixel centers (align_corners=True, the upstream UVDoc weights). Without a border it
+    equals ``dense_backward_map(grid, nodes, output_size, source_size, inset,
     flattener_values=True)`` bit for bit."""
+    if nodes not in CONVENTIONS:
+        raise _error(f"nodes must be one of {CONVENTIONS}, got {nodes!r}")
     array = _grid(grid, "grid")
     height, width = _size(output_size, "output_size")
     ex, ey = resolve_inset(inset)
     bx, by = _border(border)
     gh, gw = array.shape[:2]
-    rows = interpolation_matrix(
-        _grid_index(height, gh, ey - by, "flattener"), gh, extrapolate=by > 0
-    )
-    cols = interpolation_matrix(
-        _grid_index(width, gw, ex - bx, "flattener"), gw, extrapolate=bx > 0
-    )
+    rows = interpolation_matrix(_grid_index(height, gh, ey - by, nodes), gh, extrapolate=by > 0)
+    cols = interpolation_matrix(_grid_index(width, gw, ex - bx, nodes), gw, extrapolate=bx > 0)
     return _apply(rows, array, cols)

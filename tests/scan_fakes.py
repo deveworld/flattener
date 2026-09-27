@@ -188,7 +188,11 @@ class FakeGate:
         default_factory=lambda: {
             "model_version": "fake",
             "parameter_count": 1,
-            "provenance": {"track": "release", "lineage": [{"kind": "scratch"}]},
+            "provenance": {
+                "track": "release",
+                "lineage": [{"kind": "scratch"}],
+                "data": [{"kind": "authored", "license": "Apache-2.0 AND OFL-1.1"}],
+            },
         }
     )
 

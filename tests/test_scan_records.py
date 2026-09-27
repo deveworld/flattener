@@ -27,6 +27,7 @@ SECTION_1_5 = {
     "source_downscaled",
     "low_resolution",
     "rerun_discarded",  # L1: a candidate keeps pass A when only its crop passes fail
+    "candidate_fallback",  # a later candidate passed after C1 failed
 }
 KOREAN = {  # design section 1.5, verbatim
     "page_not_found": "페이지 전체가 화면에 들어오게 찍어 주세요",
@@ -187,6 +188,10 @@ def test_plan_json_round_trip_is_exact():
     assert data["plan_sha256"] == plan.plan_sha256
     body = rec.canonical_json(plan.body())
     assert plan.plan_sha256 == __import__("hashlib").sha256(body).hexdigest()
+    assert (plan.nodes, plan.fill_rgb) == ("flattener", (255, 255, 255))
+    uvdoc = make_plan(nodes="uvdoc", fill_rgb=[10, 20, 30])
+    again = rec.ScanPlan.from_dict(json_round_trip(uvdoc.to_dict()))
+    assert again == uvdoc and (again.nodes, again.fill_rgb) == ("uvdoc", (10, 20, 30))
 
 
 def test_plan_sha256_tracks_every_value():
@@ -196,6 +201,8 @@ def test_plan_sha256_tracks_every_value():
     assert make_plan(grid=grid).plan_sha256 != plan.plan_sha256
     assert make_plan(quarter=2).plan_sha256 != plan.plan_sha256
     assert make_plan(quantize="truncate").plan_sha256 != plan.plan_sha256
+    assert make_plan(nodes="uvdoc").plan_sha256 != plan.plan_sha256
+    assert make_plan(fill_rgb=(0, 0, 0)).plan_sha256 != plan.plan_sha256
     reordered = {"drift": 0.04, "coverage": 0.95, "version": "m1-0"}
     assert make_plan(thresholds=reordered).plan_sha256 == plan.plan_sha256
     assert hash(make_plan()) == hash(plan)
@@ -234,6 +241,9 @@ def test_tampered_plan_is_refused():
         {"provenance": {"region": "guessed"}},
         {"region": {"box": object()}},
         {"quantize": "floor"},
+        {"nodes": "center"},
+        {"fill_rgb": (0, 0)},
+        {"fill_rgb": (0, 0, 256)},
     ],
 )
 def test_invalid_plans_are_input_errors(changes):

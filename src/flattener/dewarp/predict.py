@@ -53,8 +53,9 @@ kept by a run with another.
 
 ``rectify_batch`` also takes another pipeline (``rectifier``, for example the scanner
 of ``flattener.scan``) with its identity record (``pipeline``, recorded in
-``predictions.json`` and the evidence block). A directory that holds predictions of
-another pipeline is refused, as one of other weights is.
+``predictions.json`` and the evidence block). A pipeline record with a ``protocol``
+(``quantize``, ``inset``, ``rerun`` records) sets those labels of the folder. A directory
+that holds predictions of another pipeline is refused, as one of other weights is.
 """
 
 from __future__ import annotations
@@ -936,13 +937,53 @@ def prediction_evidence(
 ) -> dict[str, Any]:
     """The evidence block of a prediction record, with its output quantization, inset,
     rerun settings and pipeline."""
+    return _evidence_block(
+        dewarper, quantize, inset_record(inset), rerun_record(rerun, deskew), pipeline
+    )
+
+
+def _evidence_block(
+    dewarper: Dewarper,
+    quantize: str,
+    inset_info: dict[str, Any],
+    rerun_info: dict[str, Any],
+    pipeline: dict[str, Any] | None,
+) -> dict[str, Any]:
     return {
         **evidence("predictions", dewarper.info),
         "quantize": quantize,
-        "inset": inset_record(inset),
-        "rerun": rerun_record(rerun, deskew),
+        "inset": inset_info,
+        "rerun": rerun_info,
         "pipeline": pipeline_record(pipeline),
     }
+
+
+def _protocol_settings(
+    protocol: Any, quantize: str, inset: Inset, rerun: int, deskew: bool
+) -> tuple[str, dict[str, Any], dict[str, Any]]:
+    """``(quantize, inset record, rerun record)`` of a pipeline that states its
+    ``protocol``. Arguments left at their defaults take the protocol's values; others must
+    agree with it."""
+    if (
+        not isinstance(protocol, dict)
+        or protocol.get("quantize") not in QUANTIZE_MODES
+        or not isinstance(protocol.get("inset"), dict)
+        or not isinstance(protocol.get("rerun"), dict)
+    ):
+        raise _rerun_error("a pipeline protocol needs quantize, inset and rerun records")
+    stated = protocol["rerun"]
+    disagree = []
+    if quantize != "round" and quantize != protocol["quantize"]:
+        disagree.append(f"quantize {quantize!r}")
+    if resolve_inset(inset) not in (NO_INSET, recorded_inset(protocol["inset"])):
+        disagree.append(f"inset {resolve_inset(inset)}")
+    if (rerun, deskew) not in ((0, False), (stated.get("passes"), stated.get("deskew"))):
+        disagree.append(f"rerun {rerun} (deskew {deskew})")
+    if disagree:
+        raise _rerun_error(
+            f"{', '.join(disagree)} disagree with the pipeline's protocol {protocol}"
+        )
+    return protocol["quantize"], dict(protocol["inset"]), dict(stated)
 
 
 def pipeline_record(pipeline: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1006,16 +1047,23 @@ def rectify_batch(
     follows the batch rules itself: no image for a failed check unless it forces one
     (``metadata["forced_render"]``). ``metadata["dewarp"]`` may give ``output_size``,
     ``crops`` and ``seconds``, and ``metadata["batch_item"]`` extra item fields. The
-    settings arguments are then only recorded and should describe that pipeline.
+    settings arguments are then only recorded. When the pipeline record has a
+    ``protocol``, the recorded quantization, inset and rerun settings are its own;
+    arguments that are not the defaults must agree with it.
     """
     check_quantize(quantize)
-    inset_info = inset_record(inset)
-    rerun_info = rerun_record(rerun, deskew)
     if rectifier is not None and pipeline is None:
         raise _rerun_error("a rectifier needs a pipeline record")
     if rectifier is None and pipeline is not None and pipeline_record(pipeline) != DEFAULT_PIPELINE:
         raise _rerun_error("a pipeline other than rectify needs its rectifier")
     pipeline_info = pipeline_record(pipeline)
+    if rectifier is not None and "protocol" in pipeline_info:
+        quantize, inset_info, rerun_info = _protocol_settings(
+            pipeline_info["protocol"], quantize, inset, rerun, deskew
+        )
+    else:
+        inset_info = inset_record(inset)
+        rerun_info = rerun_record(rerun, deskew)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     report_path = output_dir / "predictions.json"
@@ -1042,7 +1090,7 @@ def rectify_batch(
                 f"({recorded_pipeline(previous).get('name')!r}); use --overwrite",
             )
         same_quantize = previous.get("quantize", "round") == quantize
-        same_inset = recorded_inset(previous.get("inset")) == resolve_inset(inset)
+        same_inset = recorded_inset(previous.get("inset")) == recorded_inset(inset_info)
         same_rerun = recorded_rerun(previous.get("rerun")) == rerun_info
         same_render = previous.get("render_config") == _plain(asdict(config))
         if same_render and same_quantize and same_inset and same_rerun:
@@ -1072,7 +1120,7 @@ def rectify_batch(
         "schema": PREDICTIONS_SCHEMA,
         "created_utc": utc_now(),
         "model": dewarper.info,
-        "evidence": prediction_evidence(dewarper, quantize, inset, rerun, deskew, pipeline),
+        "evidence": _evidence_block(dewarper, quantize, inset_info, rerun_info, pipeline),
         **(fields or {}),
         "force_render": force_render,
         "quantize": quantize,

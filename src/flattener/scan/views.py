@@ -85,18 +85,25 @@ def source_footprint(placement: Placement, pad: int = 2) -> Box:
 
 
 def on_source(placement: Placement, size: tuple[int, int]) -> Placement:
-    """The same view on a source of another resolution (flattener values are shared)."""
+    """The same view on a source of another resolution (flattener values are shared). A
+    box placement's edges are source pixels, so they are scaled to the new size."""
     if tuple(size) == tuple(placement.source_size):
         return placement
+    height, width = int(size[0]), int(size[1])
+    edges = placement.edges
+    if edges is not None:
+        sx, sy = width / placement.source_size[1], height / placement.source_size[0]
+        left, top, right, bottom = edges
+        edges = (left * sx, top * sy, right * sx, bottom * sy)
     return Placement(
         placement.kind,
-        (int(size[0]), int(size[1])),
+        (height, width),
         placement.view_size,
         placement.theta_deg,
         placement.base_matrix,
         placement.offset,
         placement.quarter,
-        placement.edges,
+        edges,
     )
 
 

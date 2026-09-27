@@ -13,8 +13,9 @@ start holds the parent's own lineage) and requires:
   UVDoc weights, so the track alone does not settle it;
 * the data spec of every training step passes ``require_track(spec, "release")``. Specs
   are matched by their content sha256 (``DataSpec.sha256``): the record's own spec comes
-  from the record, and ``specs`` supplies those of parent checkpoints. A step whose spec
-  is not at hand fails the gate (``unverified_data_spec``);
+  from the record, a parent checkpoint start may carry its own (``data_spec``), and
+  ``specs`` supplies the others. A step whose spec is not at hand fails the gate
+  (``unverified_data_spec``);
 * the license manifest (``data_sources``, when the record has one) lists release sources
   whose license classes are all on ``RELEASE_LICENSE_KEYS``.
 
@@ -30,6 +31,11 @@ SyntheticDoc checkpoints and any other weights without a lineage record). ``reas
 holds reason codes from ``REASONS``; ``initialization`` names the chain's start as
 ``evidence.initialization`` does. A file is gated before it is deserialized.
 
+``gate_verdict`` applies the same rules to the provenance record of a page gate
+(``regions.context``, ``region-context-1``), whose data is a list of sources with SPDX
+licenses rather than a data spec. OrientNet records go through ``shippable`` itself
+(``scan.orient.release_problems``).
+
 ``load_weights`` refuses weights that fail the gate unless ``research=True``. With it,
 the weights load and ``info["ship_gate"]`` carries ``research: true``, so every result
 made with them is stamped.
@@ -44,6 +50,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
@@ -52,7 +59,7 @@ from typing import Any
 
 from ..contracts import FlattenerError, Status
 from ..dewarp.checkpoint import sidecar_path
-from ..dewarp.data import SPEC_SCHEMA, DataSpec, release_license_ok, require_track
+from ..dewarp.data import SPEC_SCHEMA, DataSpec, license_key, release_license_ok, require_track
 from ..dewarp.model import UVDOC_WEIGHTS_SHA256, sha256_file
 from ..dewarp.predict import Dewarper, load_dewarper
 
@@ -62,6 +69,10 @@ CATEGORIES = ("release", "research", "external")
 EXTERNAL_KINDS = frozenset({"uvdoc", "syntheticdoc", "external", "external_pretrained"})
 OWN_PROVENANCES = frozenset({"own_checkpoint", "own_previous_model"})
 MAX_DEPTH = 64  # parent checkpoints followed before the gate gives up
+# License terms a page gate's data may carry besides RELEASE_LICENSE_KEYS: the OFL-1.1
+# fonts that Flattener's own scene generators draw (design section 0: own generated data
+# under Apache or OFL).
+GATE_EXTRA_LICENSE_KEYS = frozenset({"ofl"})
 # Known outside weights files by sha256: UVDoc best_model.pkl (MIT) and the SyntheticDoc
 # checkpoints original_31x45.ckpt and highres_121x177.ckpt.
 EXTERNAL_WEIGHTS_SHA256 = {
@@ -145,6 +156,18 @@ def _spec_content(item: Any) -> Any:
         if isinstance(item.get(key), Mapping):
             return item[key]
     return None
+
+
+def _embedded_specs(lineage: Any, depth: int = 0) -> Iterator[Any]:
+    """Data specs carried by parent checkpoint starts (``data_spec``). A spec counts for a
+    training step only when its content hashes to that step's ``data_spec_sha256``."""
+    if not isinstance(lineage, list) or depth > MAX_DEPTH:
+        return
+    for entry in lineage:
+        if isinstance(entry, Mapping) and entry.get("kind") == "checkpoint":
+            if isinstance(entry.get("data_spec"), Mapping):
+                yield entry["data_spec"]
+            yield from _embedded_specs(entry.get("lineage"), depth + 1)
 
 
 def _spec_index(items: Iterable[Any]) -> dict[str, str]:
@@ -349,7 +372,7 @@ def shippable(record: Mapping[str, Any], *, specs: Iterable[Any] = ()) -> ShipVe
         category = "research" if mine else "external"
         return ShipVerdict(False, category, ("no_lineage_record",), digest, None, None, (node,))
     reasons = own.reasons
-    walk = _Walk(_spec_index([own.spec, *specs]), reasons)
+    walk = _Walk(_spec_index([own.spec, *_embedded_specs(own.lineage), *specs]), reasons)
     if own.track != "release":
         walk.fail("not_release_track")
     if own.spec is not None:
@@ -375,6 +398,102 @@ def shippable(record: Mapping[str, Any], *, specs: Iterable[Any] = ()) -> ShipVe
     )
 
 
+def _license_release(text: Any) -> bool:
+    """True when every term of an SPDX license expression is release data."""
+    if not isinstance(text, str) or not text.strip():
+        return False
+    terms = re.split(r"\s+(?:AND|OR|WITH)\s+", text.replace("(", " ").replace(")", " ").strip())
+    return all(
+        release_license_ok(term) or license_key(term) in GATE_EXTRA_LICENSE_KEYS for term in terms
+    )
+
+
+def _gate_data_reason(record: Mapping[str, Any]) -> str | None:
+    """Why a page gate record's data is not release data (``None`` when it is): a
+    ``data_spec`` (dewarp schema) must pass ``require_track``; a ``data`` list needs every
+    entry release-track (when it says) with a release license."""
+    spec = record.get("data_spec")
+    if isinstance(spec, Mapping):
+        return None if _spec_verdict(spec)[1] == "release" else "research_data"
+    data = record.get("data")
+    if not isinstance(data, list) or not data:
+        return "unverified_data_spec"
+    for entry in data:
+        if not isinstance(entry, Mapping):
+            return "data_license_not_release"
+        if entry.get("track", "release") != "release" or not _license_release(entry.get("license")):
+            return "data_license_not_release"
+    return None
+
+
+def gate_verdict(provenance: Mapping[str, Any], *, sha256: str | None = None) -> ShipVerdict:
+    """The ship gate verdict of a page gate from its ``provenance`` record.
+
+    Shippable when ``track`` is release, ``lineage`` starts from scratch (through parent
+    checkpoints that are release-track and carry their own release data record), every
+    training step in it is release-track, and the data (``_gate_data_reason``) is release
+    data: SmartDoc CC BY and the own generators (Apache-2.0, OFL-1.1) pass."""
+    if not isinstance(provenance, Mapping):
+        return ShipVerdict(False, "external", ("no_lineage_record",), sha256)
+    reasons: list[str] = []
+
+    def fail(reason: str | None) -> None:
+        if reason is not None and reason not in reasons:
+            reasons.append(reason)
+
+    track = provenance.get("track")
+    if track != "release":
+        fail("not_release_track")
+    fail(_gate_data_reason(provenance))
+    chain: list[dict[str, Any]] = [{"depth": 0, "kind": "page_gate", "sha256": sha256}]
+    lineage, start_kind = provenance.get("lineage"), None
+    for depth in range(MAX_DEPTH + 2):
+        if depth > MAX_DEPTH:
+            fail("lineage_too_deep")
+            break
+        if not isinstance(lineage, list) or not lineage or not isinstance(lineage[0], Mapping):
+            fail("unknown_init")
+            break
+        for step in lineage[1:]:
+            if not isinstance(step, Mapping) or step.get("kind") != "train":
+                fail("unknown_lineage_entry")
+            elif step.get("track") != "release":
+                fail("not_release_track")
+        start = lineage[0]
+        kind = start.get("kind")
+        if kind != "checkpoint":
+            start_kind = kind if isinstance(kind, str) else None
+            if start_kind in EXTERNAL_KINDS:
+                fail("external_init")
+            elif kind != "scratch":
+                fail("unknown_init")
+            chain.append({"depth": depth + 1, "kind": start_kind})
+            break
+        if start.get("track") != "release":
+            fail("not_release_track")
+        fail(_gate_data_reason(start))
+        chain.append(
+            {
+                "depth": depth + 1,
+                "kind": kind,
+                "sha256": start.get("sha256"),
+                "track": start.get("track"),
+            }
+        )
+        lineage = start.get("lineage")
+    ok = not reasons
+    category = "release" if ok else ("external" if "external_init" in reasons else "research")
+    return ShipVerdict(
+        ok,
+        category,
+        tuple(reasons),
+        sha256,
+        track if isinstance(track, str) else None,
+        _initialization(start_kind),
+        tuple(chain),
+    )
+
+
 def _read_json(path: Path) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -385,7 +504,7 @@ def _read_json(path: Path) -> dict[str, Any]:
     return value
 
 
-def _parent_sidecars(lineage: Any, depth: int = 0) -> Iterator[dict[str, Any]]:
+def parent_sidecars(lineage: Any, depth: int = 0) -> Iterator[dict[str, Any]]:
     """Sidecars of parent checkpoints whose recorded path exists on this machine."""
     if not isinstance(lineage, list) or depth > MAX_DEPTH:
         return
@@ -398,7 +517,7 @@ def _parent_sidecars(lineage: Any, depth: int = 0) -> Iterator[dict[str, Any]]:
                 yield _read_json(sidecar_path(Path(path)))
             except FlattenerError:
                 pass
-        yield from _parent_sidecars(entry.get("lineage"), depth + 1)
+        yield from parent_sidecars(entry.get("lineage"), depth + 1)
 
 
 def gate_file(path: str | Path, *, specs: Iterable[Any] = ()) -> ShipVerdict:
@@ -418,7 +537,7 @@ def gate_file(path: str | Path, *, specs: Iterable[Any] = ()) -> ShipVerdict:
         node = {"depth": 0, "kind": "checkpoint", "sha256": digest}
         track = record.get("track") if isinstance(record.get("track"), str) else None
         return ShipVerdict(False, "research", ("sidecar_mismatch",), digest, track, None, (node,))
-    return shippable(record, specs=[*specs, *_parent_sidecars(record.get("lineage"))])
+    return shippable(record, specs=[*specs, *parent_sidecars(record.get("lineage"))])
 
 
 def load_weights(

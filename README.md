@@ -168,7 +168,7 @@ python -m flattener.learning.evaluation --dataset outputs/dataset \
 `outputs/coordinate-fold/locator.zip`의 `best.pt`(region-context-unet-2.0, 파라미터 140,545개, 입력 192×144)를 페이지 게이트 v0로 씁니다. 처음부터 8 epoch 학습했고, 학습 자료는 자체 합성 장면 3,840장, SmartDoc 템플릿 휨 합성 1,584장, SmartDoc 촬영 528장입니다. 모델 코드는 `flattener.regions.context`에 있습니다.
 
 ```bash
-python tools/locator_v0.py install     # ~/.cache/flattener-sota-20260926/scan-weights/
+python tools/locator_v0.py install     # $FLATTENER_CACHE_DIR/scan-weights (기본 ~/.cache/flattener)
 python tools/locator_v0.py reproduce   # 기록된 검증 IoU 재현
 python tools/locator_v0.py exposure    # SmartDoc 노출 목록
 ```
@@ -201,13 +201,13 @@ result = scanner.render(source, planned)
 - 번들(`flattener-scan-bundle-1`)에는 `dewarp`와, 있으면 `gate`, `orient` 가중치 경로를 적습니다. 가중치는 `scan.shippable` 판정을 통과해야 불러옵니다. 통과하지 못한 가중치는 `--research`(`research=True`)일 때만 불러오고, 결과 기록에 `research: true`가 남습니다. backend는 지금 `torch`만 있습니다.
 - 단계는 read(EXIF 1회, 16MP 초과 JPEG는 draft decode) → detect(페이지 게이트, 필요할 때만 사진 전체 pass 0과 합의 규칙) → orient(OrientNet) → infer(pass A와 크롭 pass 1회, deskew) → verify(평면 미리보기 방향 확인, coverage ≥ 0.95, 패스 사이 노드 이동 ≤ 페이지 대각선의 4%) → plan(출력 크기 auto) → render(`flattener.render` 1회) → save입니다.
 - OrientNet 가중치가 없으면 사진 방향(EXIF 적용)을 그대로 쓰고 `orientation_uncertain` 경고를 남깁니다. `--quarter`로 방향을 지정할 수 있습니다.
-- 후보는 C1 기본, C2 deskew 없음, C3 다른 위치 추정기, C4 지금의 `rectify`(사진 전체 1패스) 순서로 시도하고 먼저 통과한 것을 씁니다. 크롭 pass만 실패하면 pass A를 씁니다(`rerun_discarded`). 모두 실패하면 원본과 사유, 안내(한/영)를 돌려줍니다. `--fallback perspective`이고 페이지 꼭짓점이 확실하면 원근만 보정합니다(`curvature_not_corrected`). 실패 상태와 사유 코드는 기록에 그대로 남습니다.
-- 수동 수정은 `--region L,T,R,B`, `--quad x1,y1,…,x4,y4`(읽기 순서), `--quarter 0..3`, `--no-dewarp`, `--long-side N`, `--output-size H,W`, `--aspect`입니다. 자동 경로와 같은 단계를 거치고 기록에 `manual`로 남습니다. 모델 출력은 입력 sha256별로 캐시하므로 바뀐 단계 뒤만 다시 계산합니다.
-- 출력은 JPEG q95 4:4:4(`--format png`도 됨)와 `<stem>.scan.json`입니다. `--timing F.jsonl`은 사진마다 단계별 시간을 한 줄씩 쓰고, `--debug`는 페이지 윤곽을 그린 사진을 씁니다.
+- 후보는 C1 기본, C2 deskew 없음, C3 다른 위치 추정기, C4 지금의 `rectify`(사진 전체 1패스) 순서로 시도하고 먼저 통과한 것을 씁니다. C4도 방향 k만큼 격자 노드를 재색인해 페이지를 바로 세웁니다. C1이 실패하고 뒤 후보가 통과하면 `candidate_fallback` 경고가 남습니다. 크롭 pass만 실패하면 pass A를 씁니다(`rerun_discarded`). 모두 실패하면 원본과 사유, 안내(한/영)를 돌려줍니다. `--fallback perspective`이고 페이지 꼭짓점이 확실하면 원근만 보정합니다(`curvature_not_corrected`). 실패 상태와 사유 코드는 기록에 그대로 남습니다.
+- 수동 수정은 `--region L,T,R,B`, `--quad x1,y1,…,x4,y4`(읽기 순서), `--quarter 0..3`, `--no-dewarp`, `--long-side N`, `--output-size H,W`, `--aspect`입니다. 자동 경로와 같은 단계를 거치고 기록에 `manual`로 남습니다. `--no-dewarp`도 방향을 지정하지 않으면 OrientNet에 묻습니다. 모델 출력은 입력 sha256별로 캐시하므로 바뀐 단계 뒤만 다시 계산합니다.
+- 출력은 JPEG q95 4:4:4(`--format png`도 됨)와 `<stem>.scan.json`입니다. `--timing F.jsonl`은 사진마다 단계별 시간(디코드 포함, 패스별 `infer_pass_*`, `render_map`/`render_check`/`render_sample`, `preview`), 저장까지의 `end_to_end`, 캐시 적중을 한 줄씩 쓰고, 첫 줄에 모델 로드 시간을 남깁니다. 같은 사진을 반복해 잴 때는 `--no-cache`를 씁니다. `--debug`는 페이지 윤곽을 그린 사진을 씁니다.
 - 종료 코드는 모두 스캔되면 0, 대체 결과나 실패가 있으면 1, 사용 오류면 2입니다. `--no-dewarp`로 요청한 원근 보정 결과는 스캔된 것으로 셉니다.
-- `--fast-check`(`ScanOptions(fast_check=True)`)는 전체 해상도 맵의 셀 검사를 격자에서 계산합니다. 격자 칸 안에서 맵은 쌍선형이라 렌더러가 보는 셀 행렬식이 그 칸 안 픽셀 중심의 정확한 야코비안이고, 한 칸 안의 최솟값은 맨 끝 픽셀 중심에서 나옵니다. 격자 노드를 걸치는 셀(12MP에서 약 2%)만 렌더러와 같은 식으로 맵에서 계산합니다. 범위 이탈 비율은 전체 해상도 맵에서 그대로 셉니다. `flattener.render`는 출력 픽셀의 1/16 이하(최대 2MP)인 proxy에서 한 번 돌아 기록을 남기고, 저장 이미지는 `render`에서 전체 해상도로 한 번 샘플링합니다(`flattener.render`와 같은 이미지). `tools/fast_check_agreement.py`는 격자 맵 약 500개(R4 격자와 합성 격자)에서 두 검사의 판정을 비교하고 다른 판정을 모두 나열합니다. 픽셀 간격보다 좁은 접힘은 두 검사 모두 통과시키며, `continuous_min_jacobian_ratio`에 남습니다.
+- `--fast-check`(`ScanOptions(fast_check=True)`)는 렌더러의 맵 검사 판정을 격자에서 계산하고, 작은 proxy에서만 `flattener.render`를 돌립니다. 저장 이미지는 같습니다. 방법은 `scan/fast_check.py`에, 판정 비교는 `tools/fast_check_agreement.py`에 있습니다.
 - 판정 임계값(`scan.locate.THRESHOLDS`, `scan.pipeline.VERIFY`)은 설계의 시작값이고 스캔 기록에 남습니다. SmartDoc train 분할과 합성 val로 정하는 일은 남아 있습니다.
-- `rectify_batch(..., rectifier=scanner.rectifier(options), pipeline=scanner.pipeline_record(options))`는 벤치마크 예측 폴더를 스캐너로 만듭니다. `predictions.json`에 pipeline이 남고, 다른 pipeline의 예측이 있는 폴더는 거부합니다.
+- `rectify_batch(scanner.dewarper, inputs, out, **scanner.batch_kwargs(options))`는 벤치마크 예측 폴더를 스캐너로 만듭니다. `predictions.json`에 pipeline과 스캐너의 양자화·inset·pass 설정이 남고, 다른 pipeline의 예측이 있는 폴더나 스캐너 설정과 다른 인자는 거부합니다.
 
 ## 라이선스
 

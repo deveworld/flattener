@@ -66,6 +66,7 @@ from ..dewarp.checkpoint import (
 )
 from ..dewarp.data import DataSpec, release_license_ok, require_track
 from ..dewarp.model import sha256_file
+from .shippable import parent_sidecars, shippable
 
 MODEL_ID = "orientnet-1"
 CHECKPOINT_SCHEMA = "flattener-orient-checkpoint-1"
@@ -800,13 +801,16 @@ def data_sources_problems(sources: Any) -> list[str]:
     return problems
 
 
-def release_problems(record: dict[str, Any]) -> list[str]:
+def release_problems(record: dict[str, Any], *, specs: Any = ()) -> list[str]:
     """Why a checkpoint or export record is not shippable (empty when it is).
 
-    The rules match the scanner's ship gate (``flattener.scan.shippable``): release track,
-    a scratch-rooted lineage of release training steps, a release ``data_spec`` whose
-    sha256 is ``data_spec_sha256`` and the last training step's, and a release license
-    manifest (``data_sources``).
+    Release track, a scratch-rooted lineage of release training steps, a release
+    ``data_spec`` whose sha256 is ``data_spec_sha256`` and the last training step's, and a
+    release license manifest (``data_sources``). The record then goes through the
+    scanner's ship gate (``flattener.scan.shippable.shippable``), which also needs the
+    data spec of every parent training step: carried by the parent's lineage entry
+    (``data_spec``), found in the parent's sidecar at its recorded path, or given in
+    ``specs``. Its reason codes come back as ``ship gate: <code>``.
     """
     problems = []
     if record.get("track") != "release":
@@ -826,6 +830,10 @@ def release_problems(record: dict[str, Any]) -> list[str]:
         elif not steps or steps[-1].get("data_spec_sha256") != digest:
             problems.append("the last training step names another data spec")
     problems.extend(data_sources_problems(record.get("data_sources")))
+    if not problems:
+        parents = list(parent_sidecars(lineage))
+        verdict = shippable(record, specs=[*parents, *specs])
+        problems.extend(f"ship gate: {reason}" for reason in verdict.reasons)
     return problems
 
 

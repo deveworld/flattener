@@ -134,6 +134,9 @@ def test_summary_by_bucket_and_jsonl(tmp_path):
     summary = timing.summarize_by_bucket(rows)
     assert list(summary) == ["<=2", "6-12", ">16"]
     assert summary["6-12"]["total"]["median"] == pytest.approx(0.9)
+    cached = [*rows, {"image": "c", "bucket": "6-12", "timings": {"total": 0.1}, "cached": True}]
+    assert timing.summarize_by_bucket(cached) == summary
+    assert timing.summarize_by_bucket(cached, include_cached=True)["6-12"]["total"]["count"] == 3
     path = tmp_path / "timing.jsonl"
     for row in rows:
         timing.append_jsonl(path, row)

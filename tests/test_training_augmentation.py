@@ -234,7 +234,9 @@ def test_rotation_can_omit_source_mask_but_background_cannot():
 
 
 def test_procedural_texture_is_bounded_varied_and_asset_free():
-    texture = aug._texture(torch.zeros((8, 3, 48, 36)))
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(0)  # the bounds are statistical; earlier tests move the global RNG
+        texture = aug._texture(torch.zeros((8, 3, 48, 36)))
     assert torch.isfinite(texture).all() and texture.min() >= 0 and texture.max() <= 1
     assert texture.flatten(1).std(1).min() > 0.015
     assert texture.mean((2, 3)).std(0).min() > 0.025

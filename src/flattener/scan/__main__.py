@@ -10,9 +10,18 @@ Weights: ``--bundle B`` (a ``flattener-scan-bundle-1`` JSON file) or ``--weights
 optional ``--gate G`` and ``--orient-weights O``. Weights that fail the ship gate load only
 with ``--research``, and every record then says ``research: true``.
 
+``--long-side``, ``--output-size`` and ``--aspect`` are manual corrections
+(``ScanOverrides``), recorded as ``manual`` provenance.
+
+``--timing F.jsonl`` appends one row per photo: the stage seconds of the scan (decoding
+included), ``end_to_end`` (the scan plus saving), the stage cache hits and misses
+(``cached`` is true when a model output came from the cache; ``--no-cache`` turns the
+cache off for repeated timing runs) and, on the first row, the model load.
+
 Exit status: 0 when every photo was scanned (rectified, with or without warnings; a
 ``--no-dewarp`` perspective result counts as scanned), 1 when any photo fell back or
-failed, 2 on a usage error (bad options, unreadable weights).
+failed, 2 on a usage error (bad options, unreadable weights). A photo that raises an
+unexpected error gets a ``failed`` line and the batch goes on.
 """
 
 from __future__ import annotations
@@ -30,10 +39,11 @@ from PIL import Image, ImageDraw
 
 from ..contracts import FlattenerError, Status
 from ..dewarp.predict import parse_inset
-from .io import FORMATS, image_format, read_source, save_scan
+from .io import FORMATS, image_format, save_scan
 from .locate import outline_polygon
 from .output_policy import PAPER_NAMES
 from .pipeline import (
+    CACHE_SIZE,
     PASS_CHOICES,
     Scanner,
     ScanOptions,
@@ -172,24 +182,21 @@ def parser() -> argparse.ArgumentParser:
     records = parser.add_argument_group("records")
     records.add_argument("--timing", type=Path, help="append one JSON line of timings per photo")
     records.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="keep no model outputs between photos (repeated timing runs of one photo)",
+    )
+    records.add_argument(
         "--debug", action="store_true", help="also write <stem>.debug.jpg with the page outline"
     )
     return parser
 
 
 def _options(args: argparse.Namespace) -> ScanOptions:
-    if args.output_size is not None:
-        output: Any = args.output_size
-    elif args.long_side is not None:
-        output = args.long_side
-    else:
-        output = "auto"
     return ScanOptions(
         passes=args.passes,
         deskew=not args.no_deskew,
         orient="none" if args.no_orient else "model",
-        output=output,
-        aspect=args.aspect,
         inset=args.inset,
         border=args.border,
         fallback=args.fallback,
@@ -200,11 +207,20 @@ def _options(args: argparse.Namespace) -> ScanOptions:
 
 
 def _overrides(args: argparse.Namespace) -> ScanOverrides:
+    """The manual corrections, output size and aspect included."""
+    if args.output_size is not None:
+        output: Any = args.output_size
+    elif args.long_side is not None:
+        output = args.long_side
+    else:
+        output = None
     return ScanOverrides(
         region=args.region,
         quad=args.quad,
         quarter=args.quarter,
         skip_dewarp=args.no_dewarp,
+        output_size=output,
+        aspect=args.aspect,
     )
 
 
@@ -213,18 +229,22 @@ def _load(args: argparse.Namespace) -> Scanner:
         raise FlattenerError(
             Status.INPUT_ERROR, "usage", "give exactly one of --bundle or --weights"
         )
+    if args.bundle is not None and (args.gate is not None or args.orient_weights is not None):
+        raise FlattenerError(
+            Status.INPUT_ERROR, "usage", "--gate and --orient-weights go with --weights"
+        )
+    cache_size = 0 if args.no_cache else CACHE_SIZE
     if args.bundle is not None:
-        if args.gate is not None or args.orient_weights is not None:
-            raise FlattenerError(
-                Status.INPUT_ERROR, "usage", "--gate and --orient-weights go with --weights"
-            )
-        return Scanner.load(args.bundle, device=args.device, research=args.research)
+        return Scanner.load(
+            args.bundle, device=args.device, research=args.research, cache_size=cache_size
+        )
     return Scanner.from_files(
         args.weights,
         gate=args.gate,
         orient=args.orient_weights,
         device=args.device,
         research=args.research,
+        cache_size=cache_size,
     )
 
 
@@ -286,11 +306,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(json.dumps({**failure, "message": error.message}), file=sys.stderr)
         return EXIT_USAGE
     scanned = True
+    load_written = False
     for path, stem in zip(args.images, _stems(args.images), strict=True):
         line: dict[str, Any] = {"input": str(path)}
         try:
-            source = read_source(path)
-            result = scanner.scan(source, options, overrides)
+            planned = scanner.plan(path, options, overrides)  # decoding is the read stage
+            source = planned.source
+            result = scanner.render(source, planned)
             result.input = str(path)
             written = save_scan(
                 result,
@@ -306,10 +328,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                     raise FlattenerError(Status.IO_ERROR, "output_exists", f"{debug} exists")
                 Image.fromarray(_debug_image(source.image, result)).save(debug, quality=90)
                 written["debug"] = str(debug)
-        except FlattenerError as error:
+        except Exception as error:  # one photo's failure never stops the batch
             scanned = False
-            line.update(status=str(error.status), reason_code=error.reason_code)
-            line.update(outcome=Outcome.FAILED.value, message=error.message)
+            if isinstance(error, FlattenerError):
+                status, code, message = error.status, error.reason_code, error.message
+            else:
+                io = isinstance(error, OSError)
+                status = Status.IO_ERROR if io else Status.MODEL_ERROR
+                code = "unexpected_io_error" if io else "unexpected_error"
+                message = f"{type(error).__name__}: {error}"
+            line.update(status=str(status), reason_code=code)
+            line.update(outcome=Outcome.FAILED.value, message=message)
             print(json.dumps(line, ensure_ascii=False))
             continue
         ok = _scanned(result, args.no_dewarp)
@@ -326,20 +355,26 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(json.dumps(line, ensure_ascii=False))
         if args.timing is not None:
             full = source.info.full_size
-            append_jsonl(
-                args.timing,
-                {
-                    "input": str(path),
-                    "bucket": megapixel_bucket(*full),
-                    "full_size": list(full),
-                    "size": list(source.info.size),
-                    "timings": result.timings,
-                    "outcome": result.outcome.value,
-                    "device": args.device,
-                    "threads": torch.get_num_threads(),
-                    "fast_check": options.fast_check,
-                },
-            )
+            cache = result.metadata.get("cache") or {"hits": {}, "misses": {}}
+            timings = result.timings
+            row = {
+                "input": str(path),
+                "bucket": megapixel_bucket(*full),
+                "full_size": list(full),
+                "size": list(source.info.size),
+                "timings": timings,
+                "end_to_end": timings.get("total", 0.0) + timings.get("save", 0.0),
+                "cache": cache,
+                "cached": any(cache["hits"].values()),
+                "outcome": result.outcome.value,
+                "device": args.device,
+                "threads": torch.get_num_threads(),
+                "fast_check": options.fast_check,
+            }
+            if not load_written:
+                row["model_load"] = scanner.info.get("load")
+                load_written = True
+            append_jsonl(args.timing, row)
     return EXIT_SCANNED if scanned else EXIT_FALLBACK
 
 
