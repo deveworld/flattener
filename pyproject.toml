@@ -24,7 +24,7 @@ packages = ["src/flattener"]
 
 [tool.hatch.build.targets.sdist]
 include = [
-    "/src", "/tests", "/examples", "/docs", "/benchmarks",
+    "/src", "/tests", "/tools", "/examples", "/docs", "/benchmarks",
     "/README.md", "/LICENSE", "/THIRD_PARTY.md",
     "/pyproject.toml", "/uv.lock", "/.python-version",
 ]
