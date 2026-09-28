@@ -1047,7 +1047,10 @@ def export_onnx(
         os.replace(temporary, output)
     finally:
         temporary.unlink(missing_ok=True)
-    parity = _onnx_parity(output, module, inputs)
+    # Random gray views: a constant input would hide a spatial layout error in the export.
+    generator = torch.Generator().manual_seed(0)
+    probe = tuple(torch.randint(0, 256, x.shape, generator=generator).float() for x in inputs)
+    parity = _onnx_parity(output, module, probe)
     payload = load_checkpoint(checkpoint)
     record = {
         "schema": EXPORT_SCHEMA,
@@ -1114,7 +1117,10 @@ def _onnx_parity(path: Path, module: nn.Module, inputs) -> dict[str, Any] | None
     got = session.run(["logits"], feed)[0]
     with torch.no_grad():
         want = module(*inputs)[0].numpy()
-    return {"max_abs_logit_difference": float(np.abs(got - want).max())}
+    return {
+        "max_abs_logit_difference": float(np.abs(got - want).max()),
+        "inputs": "uniform random gray values 0-255, seed 0",
+    }
 
 
 # ----------------------------------------------------------------------------- CLI
