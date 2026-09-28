@@ -57,10 +57,10 @@ def test_a_scanned_photo_writes_a_jpeg_and_its_record(tmp_path, photo, capsys, m
     loaded = _install(monkeypatch)
     out = tmp_path / "out"
     timing = tmp_path / "timing.jsonl"
-    code = cli.main(
-        [str(photo), "--out", str(out), "--weights", "w.pt", "--timing", str(timing), "--debug"]
-    )
+    args = [str(photo), "--out", str(out), "--weights", "w.pt", "--orient-weights", "o.pt"]
+    code = cli.main([*args, "--orient-threshold", "0.95", "--timing", str(timing), "--debug"])
     assert code == 0 and loaded[0][1]["research"] is False
+    assert loaded[0][1]["orient_threshold"] == 0.95
     [line] = _lines(capsys)
     assert line["outcome"] == "rectified_with_warnings" and line["status"] == "success"
     assert set(line["files"]) == {"image", "record", "debug"}
@@ -77,14 +77,34 @@ def test_a_scanned_photo_writes_a_jpeg_and_its_record(tmp_path, photo, capsys, m
     assert cli.main([str(photo), "--out", str(out), "--weights", "w.pt"]) == 1
     assert _lines(capsys)[0]["reason_code"] == "output_exists"
     args = [str(photo), "--out", str(out), "--weights", "w.pt", "--overwrite", "--format", "png"]
-    assert cli.main(args) == 0
-    assert (out / "photo.png").is_file()
+    assert cli.main(args) == 0 and (out / "photo.png").is_file()
+    capsys.readouterr()
+    # A leftover debug image fails the photo before its scan is saved.
+    fresh = tmp_path / "fresh"
+    fresh.mkdir()
+    (fresh / "photo.debug.jpg").write_bytes(b"left over")
+    args = [str(photo), "--out", str(fresh), "--weights", "w", "--debug"]
+    assert cli.main(args) == 1
+    (line,) = _lines(capsys)
+    assert (line["outcome"], line["reason_code"]) == ("failed", "output_exists")
+    assert sorted(path.name for path in fresh.iterdir()) == ["photo.debug.jpg"]
+
+    # A debug image that cannot be written leaves the scan and its outcome.
+    def no_debug(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(cli, "save_image", no_debug)
+    assert cli.main([*args, "--overwrite"]) == 0
+    (line,) = _lines(capsys)
+    assert line["outcome"] == "rectified_with_warnings" and "disk full" in line["debug_error"]
+    assert "debug" not in line["files"] and (fresh / "photo.jpg").is_file()
 
 
 def test_a_fallback_exits_1_and_keeps_the_failure(tmp_path, photo, capsys, monkeypatch):
-    _install(monkeypatch, always=twist)
+    loaded = _install(monkeypatch, always=twist)
     out = tmp_path / "out"
-    assert cli.main([str(photo), "--out", str(out), "--bundle", "b.json"]) == 1
+    args = [str(photo), "--out", str(out), "--bundle", "b.json", "--orient-threshold", "0.9"]
+    assert cli.main(args) == 1 and loaded[0][1]["orient_threshold"] == 0.9
     [line] = _lines(capsys)
     assert line["outcome"] == "original_returned" and line["status"] == "invalid_transform"
     assert line["reason_code"] == "fold_or_degenerate"
@@ -109,25 +129,9 @@ def test_manual_corrections_and_a_requested_perspective(tmp_path, photo, capsys,
     assert record["plan"]["kind"] == "perspective"
     assert record["plan"]["provenance"]["dewarp"] == "manual"
     _install(monkeypatch)
-    args = [
-        str(photo),
-        "--out",
-        str(tmp_path / "region"),
-        "--weights",
-        "w",
-        "--region",
-        "80,20,262,232",
-        "--quarter",
-        "0",
-        "--long-side",
-        "300",
-        "--aspect",
-        "a4",
-        "--passes",
-        "0",
-        "--no-deskew",
-    ]
-    assert cli.main(args) == 0
+    corrections = "--region 80,20,262,232 --quarter 0 --long-side 300 --aspect a4 --passes 0"
+    args = [str(photo), "--out", str(tmp_path / "region"), "--weights", "w", "--no-deskew"]
+    assert cli.main([*args, *corrections.split()]) == 0
     record = json.loads((tmp_path / "region" / "photo.scan.json").read_text())
     assert max(record["plan"]["output"]["height"], record["plan"]["output"]["width"]) == 300
     assert record["plan"]["provenance"]["region"] == "manual"
@@ -142,15 +146,18 @@ def test_manual_corrections_and_a_requested_perspective(tmp_path, photo, capsys,
     assert record["plan"]["provenance"]["aspect"] == "auto"
 
 
-def test_usage_errors_exit_2(tmp_path, photo, monkeypatch, capsys):
+def test_same_stems_get_numbered_and_failing_photos_leave_the_batch(
+    tmp_path, photo, capsys, monkeypatch
+):
     _install(monkeypatch)
-    extra = ["--weights", "w", "--output-size", "9000,9000"]  # above the renderer limits
-    assert cli.main([str(photo), "--out", str(tmp_path / "out"), *extra]) == 2
-    assert not (tmp_path / "out").exists()
+    original = Scanner.plan
 
+    def plan(self, source, *args, **kwargs):
+        if str(source).endswith("boom.png"):
+            raise RuntimeError("the model broke")
+        return original(self, source, *args, **kwargs)
 
-def test_same_stems_get_numbered_and_unreadable_photos_fail(tmp_path, photo, capsys, monkeypatch):
-    _install(monkeypatch)
+    monkeypatch.setattr(Scanner, "plan", plan)
     other = tmp_path / "again"
     other.mkdir()
     Image.fromarray(ramp_scene(SIZE, PAGE)).save(other / "photo.png")
@@ -158,23 +165,27 @@ def test_same_stems_get_numbered_and_unreadable_photos_fail(tmp_path, photo, cap
     numbered.write_bytes(photo.read_bytes())
     broken = tmp_path / "broken.jpg"
     broken.write_bytes(b"not an image")
+    boom = tmp_path / "boom.png"
+    boom.write_bytes(photo.read_bytes())
     out = tmp_path / "out"
-    inputs = [photo, other / "photo.png", numbered, broken]
+    inputs = [photo, other / "photo.png", boom, numbered, broken]
     args = [*map(str, inputs), "--out", str(out), "--weights", "w", "--overwrite"]
     assert cli.main(args) == 1
     lines = _lines(capsys)
     assert [line["outcome"] for line in lines] == [
         "rectified_with_warnings",
         "rectified_with_warnings",
+        "failed",
         "rectified_with_warnings",
         "failed",
     ]
-    assert lines[-1]["status"] == "input_error"
+    assert lines[2]["status"] == "model_error" and lines[2]["reason_code"] == "unexpected_error"
+    assert "RuntimeError" in lines[2]["message"] and lines[-1]["status"] == "input_error"
     assert (out / "photo.jpg").is_file() and (out / "photo-2.jpg").is_file()
     assert np.asarray(Image.open(out / "photo-2.jpg")).shape == (190, 150, 3)
     assert len(list(out.glob("*.jpg"))) == 3
-    records = [read_scan_record(line["files"]["record"]).input for line in lines[:-1]]
-    assert records == list(map(str, inputs[:-1]))
+    records = [read_scan_record(lines[i]["files"]["record"]).input for i in (0, 1, 3)]
+    assert records == [str(inputs[i]) for i in (0, 1, 3)]
 
 
 def test_timing_rows_cover_decoding_and_flag_cached_repeats(tmp_path, photo, capsys, monkeypatch):
@@ -198,39 +209,7 @@ def test_timing_rows_cover_decoding_and_flag_cached_repeats(tmp_path, photo, cap
     assert [row["cached"] for row in read_jsonl(fresh)] == [False, False, False]
 
 
-def test_an_unexpected_error_fails_one_photo_and_the_batch_goes_on(
-    tmp_path, photo, capsys, monkeypatch
-):
-    _install(monkeypatch)
-    calls = []
-    original = Scanner.plan
-
-    def plan(self, source, *args, **kwargs):
-        calls.append(source)
-        if len(calls) == 1:
-            raise RuntimeError("the model broke")
-        return original(self, source, *args, **kwargs)
-
-    monkeypatch.setattr(Scanner, "plan", plan)
-    args = [str(photo), str(photo), "--out", str(tmp_path / "out"), "--weights", "w"]
-    assert cli.main([*args, "--overwrite"]) == 1
-    first, second = _lines(capsys)
-    assert first["outcome"] == "failed" and first["status"] == "model_error"
-    assert first["reason_code"] == "unexpected_error" and "RuntimeError" in first["message"]
-    assert second["outcome"] == "rectified_with_warnings"
-
-
-def test_an_output_that_is_an_input_photo_is_a_usage_error(tmp_path, photo, capsys, monkeypatch):
-    _install(monkeypatch)
-    before = photo.read_bytes()
-    args = [str(photo), "--out", str(tmp_path), "--weights", "w", "--format", "png"]
-    assert cli.main([*args, "--overwrite"]) == 2
-    assert photo.read_bytes() == before
-    assert "is an input photo" in json.loads(capsys.readouterr().err)["message"]
-    assert sorted(path.name for path in tmp_path.iterdir()) == ["photo.png"]
-
-
-def test_weights_and_devices_that_cannot_load_exit_2(tmp_path, photo, capsys, monkeypatch):
+def test_setup_errors_exit_2_before_anything_is_written(tmp_path, photo, capsys, monkeypatch):
     def broken(*args, **kwargs):
         raise RuntimeError("invalid load key")
 
@@ -240,41 +219,18 @@ def test_weights_and_devices_that_cannot_load_exit_2(tmp_path, photo, capsys, mo
     error = json.loads(capsys.readouterr().err)
     assert error["reason_code"] == "load_failed" and "invalid load key" in error["message"]
     _install(monkeypatch)
+    assert cli.main([*args, "--output-size", "9000,9000"]) == 2  # above the renderer limits
+    assert cli.main([*args, "--timing", str(tmp_path / "missing" / "t.jsonl")]) == 2
+    capsys.readouterr()
     assert cli.main([*args, "--device", "toaster"]) == 2
     assert json.loads(capsys.readouterr().err)["reason_code"] == "usage"
     if not torch.cuda.is_available():
         assert cli.main([*args, "--device", "cuda"]) == 2
         assert "no cuda device" in json.loads(capsys.readouterr().err)["message"]
-    assert not (tmp_path / "out").exists()
-
-
-def test_timing_debug_and_their_errors(tmp_path, photo, capsys, monkeypatch):
-    _install(monkeypatch)
-    out = tmp_path / "out"
-    args = [str(photo), "--out", str(out), "--weights", "w"]
-    assert cli.main([*args, "--timing", str(tmp_path / "missing" / "t.jsonl")]) == 2
-    assert not out.exists()
-
-    out.mkdir()
-    (out / "photo.debug.jpg").write_bytes(b"left over")
-    assert cli.main([*args, "--debug"]) == 1
-    (line,) = _lines(capsys)
-    assert (line["outcome"], line["reason_code"]) == ("failed", "output_exists")
-    assert sorted(path.name for path in out.iterdir()) == ["photo.debug.jpg"]
-
-    def no_debug(*args, **kwargs):
-        raise OSError("disk full")
-
-    monkeypatch.setattr(cli, "save_image", no_debug)
-    assert cli.main([*args, "--debug", "--overwrite"]) == 0
-    (line,) = _lines(capsys)
-    assert line["outcome"] == "rectified_with_warnings" and "disk full" in line["debug_error"]
-    assert "debug" not in line["files"] and (out / "photo.jpg").is_file()
-
-
-def test_an_orient_threshold_reaches_the_loader(tmp_path, photo, monkeypatch):
-    loaded = _install(monkeypatch)
-    args = [str(photo), "--out", str(tmp_path / "out"), "--orient-threshold", "0.95"]
-    assert cli.main([*args, "--weights", "w", "--orient-weights", "o"]) == 0
-    assert cli.main([*args, "--bundle", "b.json", "--overwrite"]) == 0
-    assert [kwargs["orient_threshold"] for _, kwargs in loaded] == [0.95, 0.95]
+    # An output name that is an input photo would replace the photo with its scan.
+    before = photo.read_bytes()
+    here = [str(photo), "--out", str(tmp_path), "--weights", "w", "--format", "png"]
+    assert cli.main([*here, "--overwrite"]) == 2
+    assert photo.read_bytes() == before
+    assert "is an input photo" in json.loads(capsys.readouterr().err)["message"]
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["photo.png"]

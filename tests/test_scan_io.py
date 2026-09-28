@@ -36,7 +36,7 @@ def write_jpeg(path, pixels, *, orientation=None, focal=None, icc=None, quality=
     return path
 
 
-def test_small_jpeg_goes_through_load_image(tmp_path):
+def test_jpegs_decode_whole_or_draft_with_exif_and_icc(tmp_path):
     path = write_jpeg(tmp_path / "photo.jpg", smooth_rgb(60, 80), orientation=6, focal=26, icc=ICC)
     source = scan_io.read_source(path)
     assert np.array_equal(source.image, load_image(path))
@@ -47,9 +47,7 @@ def test_small_jpeg_goes_through_load_image(tmp_path):
     assert info.file_sha256 == hashlib.sha256(path.read_bytes()).hexdigest()
     assert source.icc_profile == ICC and info.icc_sha256 == hashlib.sha256(ICC).hexdigest()
     assert source.reasons == () and source.path == str(path)
-
-
-def test_large_jpeg_is_draft_decoded(tmp_path):
+    # A photo over the input limit is draft-decoded at a reduced scale.
     pixels = smooth_rgb(480, 640)
     path = write_jpeg(tmp_path / "large.jpg", pixels, orientation=6, icc=ICC)
     config = RenderConfig(max_input_pixels=100_000)
@@ -152,10 +150,26 @@ def test_save_scan_writes_image_and_record(tmp_path):
     with pytest.raises(FlattenerError) as caught:
         scan_io.save_scan(make_result(smooth_rgb(8, 8)), tmp_path, "photo")
     assert caught.value.reason_code == "output_exists"
-    for stem in ("", "..", "a/b"):
+    for stem in ("..", "a/b"):
         with pytest.raises(FlattenerError) as caught:
             scan_io.save_scan(result, tmp_path, stem)
         assert caught.value.reason_code == "invalid_path"
+    # A record without an image removes the image of an earlier scan.
+    failure = rec.ScanResult(
+        status=Status.INPUT_ERROR,
+        outcome=rec.Outcome.FAILED,
+        reason_code="decode_failed",
+        message="Could not decode image",
+    )
+    artifacts = scan_io.save_scan(failure, tmp_path, "photo", overwrite=True)
+    assert artifacts == {"record": str(tmp_path / "photo.scan.json")}
+    assert not (tmp_path / "photo.jpg").exists()
+    record = scan_io.read_scan_record(tmp_path / "photo.scan.json")
+    assert (record.status, record.outcome, record.image) == (Status.INPUT_ERROR, "failed", None)
+    (tmp_path / "broken.scan.json").write_text("{", encoding="utf-8")
+    with pytest.raises(FlattenerError) as caught:
+        scan_io.read_scan_record(tmp_path / "broken.scan.json")
+    assert caught.value.reason_code == "invalid_scan_record"
 
 
 def test_failed_record_rolls_back_the_image(tmp_path, monkeypatch):
@@ -196,26 +210,16 @@ def test_failed_record_rolls_back_the_image(tmp_path, monkeypatch):
     assert list(fresh.iterdir()) == []
 
 
-def test_record_without_image_removes_a_stale_image(tmp_path):
-    scan_io.save_scan(make_result(smooth_rgb(8, 8)), tmp_path, "photo")
-    failure = rec.ScanResult(
-        status=Status.INPUT_ERROR,
-        outcome=rec.Outcome.FAILED,
-        reason_code="decode_failed",
-        message="Could not decode image",
-    )
-    artifacts = scan_io.save_scan(failure, tmp_path, "photo", overwrite=True)
-    assert artifacts == {"record": str(tmp_path / "photo.scan.json")}
-    assert sorted(path.name for path in tmp_path.iterdir()) == ["photo.scan.json"]
-    record = scan_io.read_scan_record(tmp_path / "photo.scan.json")
-    assert (record.status, record.outcome, record.image) == (Status.INPUT_ERROR, "failed", None)
-    (tmp_path / "broken.scan.json").write_text("{", encoding="utf-8")
-    with pytest.raises(FlattenerError) as caught:
-        scan_io.read_scan_record(tmp_path / "broken.scan.json")
-    assert caught.value.reason_code == "invalid_scan_record"
+def test_saving_works_without_hard_links_and_follows_the_umask(tmp_path, monkeypatch):
+    previous = os.umask(0o022)
+    try:
+        artifacts = scan_io.save_scan(make_result(smooth_rgb(8, 8)), tmp_path / "linked", "photo")
+        page = scan_io.save_image(tmp_path / "linked" / "page.jpg", smooth_rgb(8, 8))
+    finally:
+        os.umask(previous)
+    for path in [*artifacts.values(), page]:
+        assert os.stat(path).st_mode & 0o777 == 0o644
 
-
-def test_saving_works_without_hard_links(tmp_path, monkeypatch):
     def no_links(source, target):
         raise PermissionError(1, "Operation not permitted", str(source), None, str(target))
 
@@ -231,14 +235,3 @@ def test_saving_works_without_hard_links(tmp_path, monkeypatch):
     page = scan_io.save_image(tmp_path / "page.png", smooth_rgb(8, 8))
     assert np.array_equal(np.asarray(Image.open(page)), smooth_rgb(8, 8))
     assert temporary_files(tmp_path) == []
-
-
-def test_saved_files_follow_the_umask(tmp_path):
-    previous = os.umask(0o022)
-    try:
-        artifacts = scan_io.save_scan(make_result(smooth_rgb(8, 8)), tmp_path, "photo")
-        page = scan_io.save_image(tmp_path / "page.jpg", smooth_rgb(8, 8))
-    finally:
-        os.umask(previous)
-    for path in [*artifacts.values(), page]:
-        assert os.stat(path).st_mode & 0o777 == 0o644

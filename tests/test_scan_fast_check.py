@@ -2,14 +2,12 @@
 
 import numpy as np
 import pytest
-from scan_fakes import Page, oracle_dewarper, ramp_scene, twist
+from scan_fakes import twist
 
 from flattener.contracts import RenderConfig, Status
 from flattener.dewarp.coords import edge_positions
 from flattener.renderer import render
-from flattener.scan import locate
 from flattener.scan.fast_check import fast_check, grid_jacobian
-from flattener.scan.pipeline import Scanner, ScanOptions
 from flattener.scan.placement import dense_map
 
 CONFIG = RenderConfig(on_error="return")
@@ -24,13 +22,12 @@ def _image(seed=0, size=(240, 320)):
     return np.random.default_rng(seed).integers(0, 256, (*size, 3), dtype=np.uint8)
 
 
-@pytest.mark.parametrize("nodes", ["flattener", "uvdoc"])
-def test_the_grid_gives_the_renderers_fold_decision_and_minimum(nodes):
+def test_the_grid_gives_the_renderers_fold_decision_and_minimum():
     rng = np.random.default_rng(11)
     image = _image()
     loose = RenderConfig(on_error="return", max_out_of_bounds_fraction=1.0)
     folds = 0
-    for _ in range(80):
+    for nodes in ["flattener", "uvdoc"] * 40:
         rows, cols = int(rng.integers(3, 12)), int(rng.integers(3, 10))
         grid = _grid(rng, rows, cols, rng.choice([0.01, 0.06]))
         size = (int(rng.choice([2, 3, 6, 17, 90, 240])), int(rng.choice([2, 5, 13, 64, 200])))
@@ -80,22 +77,3 @@ def test_decisions_and_reasons_match_render_in_order():
         assert (expected.status, expected.reason_code) == (status, reason)
         result = found.result()
         assert result.image is None and (result.valid_mask is None) == (status != Status.SUCCESS)
-
-
-def test_the_scanner_with_fast_check_saves_the_same_image(monkeypatch):
-    monkeypatch.setitem(locate.THRESHOLDS, "min_page_long_side_px", 50)
-    size = (240, 320)
-    page = Page((170, 125), (150, 190), 7.0)
-    image = ramp_scene(size, page)
-    scanner = Scanner(oracle_dewarper(page, size))
-    default = scanner.scan(image, ScanOptions(orient="none"))
-    planned = scanner.plan(image, ScanOptions(orient="none", fast_check=True))
-    assert planned.checked.fast is not None and planned.checked.result.image is None
-    fast = scanner.render(image, planned)
-    assert fast.image.tobytes() == default.image.tobytes()
-    assert fast.plan.plan_sha256 == default.plan.plan_sha256
-    assert fast.metadata["renderer"]["check"] == "fast_check"
-    assert fast.metadata["renderer"]["validation"]["fold_check"] == "passed"
-    proxy = fast.metadata["renderer"]["check_resolution"]["proxy"]
-    assert proxy[0] * proxy[1] <= fast.plan.output.height * fast.plan.output.width / 16
-    assert scanner.pipeline_record(ScanOptions(fast_check=True)) != scanner.pipeline_record()

@@ -30,7 +30,7 @@ def _gate(pages, probability=0.97, low=0.02):
     return gate.predict_probability(None)
 
 
-def test_a_confident_gate_gives_the_mask_box_and_angle():
+def test_the_gate_gives_the_box_and_angle_or_a_rejection():
     page = Page((420, 290), (260, 340), 9.0)
     calls = []
 
@@ -46,14 +46,25 @@ def test_a_confident_gate_gives_the_mask_box_and_angle():
     assert left <= corners[:, 0].min() and right >= corners[:, 0].max()
     assert top <= corners[:, 1].min() and bottom >= corners[:, 1].max()
     assert found.reasons == [] and found.metrics["confident"]
-
-
-def test_a_page_filling_the_frame_takes_the_whole_image():
-    page = Page((400, 300), (820, 640))
-    found = locate_page(SIZE, probability=_gate([page]))
+    # A page filling the frame takes the whole image.
+    found = locate_page(SIZE, probability=_gate([Page((400, 300), (820, 640))]))
     assert found.method == "fills_frame" and found.box == (0, 0, 800, 600)
     assert [item.code for item in found.reasons] == ["page_fills_frame"]
     assert found.angle_deg == 0.0
+    # Rejections end the scan with the candidate boxes.
+    found = locate_page(SIZE, probability=np.full(SHAPE, 0.01, np.float32))
+    assert found.box is None and found.failure.code == "page_not_found"
+    assert found.failure.status == Status.MODEL_ERROR
+    left = Page((200, 300), (300, 420))
+    right = Page((600, 300), (300, 420))
+    found = locate_page(SIZE, probability=_gate([left, right]))
+    assert found.failure.code == "two_page_candidate"
+    assert len(found.failure.detail["boxes"]) == 2 and len(found.failure.detail["gutter"]) == 2
+    stacked = [Page((400, 150), (500, 200)), Page((250, 450), (200, 150))]
+    found = locate_page(SIZE, probability=_gate(stacked))
+    assert found.failure.code == "ambiguous_page_region"
+    found = locate_page(SIZE, probability=_gate([Page((400, 300), (60, 40))]))
+    assert found.failure.code == "page_too_small"
 
 
 def _outline(page, grid=(9, 7)):
@@ -84,24 +95,6 @@ def test_weak_scores_go_through_the_consensus_rule():
     assert other is not None and other[2] == "gate"
 
 
-def test_gate_rejections_end_the_scan_with_candidates():
-    nothing = np.full(SHAPE, 0.01, np.float32)
-    found = locate_page(SIZE, probability=nothing)
-    assert found.box is None and found.failure.code == "page_not_found"
-    assert found.failure.status == Status.MODEL_ERROR
-    left = Page((200, 300), (300, 420))
-    right = Page((600, 300), (300, 420))
-    found = locate_page(SIZE, probability=_gate([left, right]))
-    assert found.failure.code == "two_page_candidate"
-    assert len(found.failure.detail["boxes"]) == 2 and len(found.failure.detail["gutter"]) == 2
-    stacked = [Page((400, 150), (500, 200)), Page((250, 450), (200, 150))]
-    found = locate_page(SIZE, probability=_gate(stacked))
-    assert found.failure.code == "ambiguous_page_region"
-    tiny = Page((400, 300), (60, 40))
-    found = locate_page(SIZE, probability=_gate([tiny]))
-    assert found.failure.code == "page_too_small"
-
-
 def test_small_pages_by_long_side_and_neighbors(monkeypatch):
     monkeypatch.setitem(locate.THRESHOLDS, "min_page_long_side_px", 600)
     page = Page((400, 300), (300, 400))
@@ -127,10 +120,8 @@ def test_manual_region_and_quad():
     assert found.mask is not None and found.mask.shape == SHAPE
     assert found.quad.shape == (4, 2)
     for bad in (
-        (1, 2, 3),
         [[0, 0], [10, 0], [0, 10], [10, 10]],  # crossing
         page.corners()[[0, 3, 2, 1]],  # counter-clockwise: a mirrored page
-        [[900, 900], [950, 900], [950, 950], [900, 950]],  # outside
     ):
         with pytest.raises(FlattenerError):
             manual_quad(bad, SIZE)

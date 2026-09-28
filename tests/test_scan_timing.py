@@ -19,7 +19,7 @@ class FakeClock:
         self.now += ns
 
 
-def test_stage_clock_records_each_stage():
+def test_stage_clock_records_each_stage_and_syncs_the_device():
     clock = FakeClock()
     stages = timing.StageClock(clock=clock)
     clock.advance(5)
@@ -43,9 +43,7 @@ def test_stage_clock_records_each_stage():
     json.dumps(stages.to_dict(), allow_nan=False)
     with pytest.raises(ValueError):
         stages.add("model_load", -1.0)
-
-
-def test_sync_runs_at_stage_start_and_end():
+    # A device sync runs at the start and end of a stage, when asked for.
     calls = []
     clock = FakeClock()
     stages = timing.StageClock(
@@ -63,7 +61,7 @@ def test_sync_runs_at_stage_start_and_end():
     assert calls[-2:] == [-1, -1]
 
 
-def test_percentiles_and_summaries():
+def test_percentiles_summaries_and_jsonl_rows(tmp_path):
     values = list(range(1, 21))
     assert timing.percentile(values, 50) == 10.5
     assert timing.percentile(values, 95) == pytest.approx(19.05)
@@ -87,9 +85,7 @@ def test_percentiles_and_summaries():
     stages = timing.summarize_stages([{"read": 0.1, "total": 1.0}, {"read": 0.3, "total": 1.4}])
     assert stages["read"]["median"] == pytest.approx(0.2)
     assert stages["total"]["p95"] == pytest.approx(1.38)
-
-
-def test_summary_by_bucket_and_jsonl(tmp_path):
+    # Rows grouped by megapixel bucket; cached repeats count only when asked for.
     rows = [
         {"image": "a", "bucket": ">16", "timings": {"total": 1.2}},
         {"image": "b", "bucket": "6-12", "timings": {"total": 0.8}},

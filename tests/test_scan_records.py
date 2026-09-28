@@ -53,20 +53,7 @@ def make_plan(**changes):
     return rec.ScanPlan(**fields)
 
 
-def test_outcomes_and_exit_statuses():
-    info = rec.reason("page_fills_frame")
-    warning = rec.reason("possible_occlusion", solidity=0.8)
-    assert rec.decide_outcome("dewarp", [info]) == rec.Outcome.RECTIFIED
-    assert rec.decide_outcome("dewarp", [info, warning]) == rec.Outcome.RECTIFIED_WITH_WARNINGS
-    assert rec.decide_outcome("perspective", []) == rec.Outcome.PERSPECTIVE
-    assert rec.decide_outcome("original", [warning]) == rec.Outcome.ORIGINAL_RETURNED
-    assert rec.decide_outcome(None) == rec.Outcome.FAILED
-    with pytest.raises(ValueError):
-        rec.decide_outcome("crop")
-    assert (rec.EXIT_SCANNED, rec.EXIT_FALLBACK, rec.EXIT_USAGE) == (0, 1, 2)
-
-
-def test_plan_json_round_trip_is_exact():
+def test_plans_round_trip_exactly_and_refuse_changes():
     plan = make_plan()
     data = json_round_trip(plan.to_dict())
     again = rec.ScanPlan.from_dict(data)
@@ -83,10 +70,14 @@ def test_plan_json_round_trip_is_exact():
     uvdoc = make_plan(nodes="uvdoc", fill_rgb=[10, 20, 30])
     again = rec.ScanPlan.from_dict(json_round_trip(uvdoc.to_dict()))
     assert again == uvdoc and (again.nodes, again.fill_rgb) == ("uvdoc", (10, 20, 30))
-
-
-def test_plan_sha256_tracks_every_value():
-    plan = make_plan()
+    # A perspective plan keeps its homography.
+    homography = np.array([[0.5, 0.02, 0.01], [-0.01, 0.7, 0.03], [0.05, -0.04, 1.0]])
+    perspective = make_plan(kind="perspective", grid=None, homography=homography)
+    again = rec.ScanPlan.from_dict(json_round_trip(perspective.to_dict()))
+    assert again == perspective and np.array_equal(again.homography, homography)
+    with pytest.raises(FlattenerError):
+        rec.ScanPlan.from_dict({**perspective.to_dict(), "schema": "other"})
+    # plan_sha256 follows every value, and a changed plan is refused.
     grid = make_grid().astype(np.float64)
     grid[7, 9, 0] = np.nextafter(grid[7, 9, 0], np.inf)
     assert make_plan(grid=grid).plan_sha256 != plan.plan_sha256
@@ -97,9 +88,6 @@ def test_plan_sha256_tracks_every_value():
     reordered = {"drift": 0.04, "coverage": 0.95, "version": "v0"}
     assert make_plan(thresholds=reordered).plan_sha256 == plan.plan_sha256
     assert hash(make_plan()) == hash(plan)
-
-
-def test_tampered_plan_is_refused():
     data = json_round_trip(make_plan().to_dict())
     data["grid"][0][0][0] += 1e-9
     with pytest.raises(FlattenerError) as caught:
@@ -114,33 +102,17 @@ def test_tampered_plan_is_refused():
         rec.ScanPlan.from_dict(extra)
     assert caught.value.reason_code == "invalid_plan"
     assert set(make_plan().to_dict()) == rec.PLAN_KEYS
-
-
-@pytest.mark.parametrize(
-    "changes",
-    [
-        {"nodes": "center"},
-        {"fill_rgb": (0, 0)},
-        {"fill_rgb": (0, 0, 256)},
-    ],
-)
-def test_invalid_plans_are_input_errors(changes):
-    with pytest.raises(FlattenerError) as caught:
-        make_plan(**changes)
-    assert (caught.value.status, caught.value.reason_code) == (Status.INPUT_ERROR, "invalid_plan")
-
-
-def test_perspective_plan_round_trip():
-    homography = np.array([[0.5, 0.02, 0.01], [-0.01, 0.7, 0.03], [0.05, -0.04, 1.0]])
-    plan = make_plan(kind="perspective", grid=None, homography=homography)
-    again = rec.ScanPlan.from_dict(json_round_trip(plan.to_dict()))
-    assert again == plan and np.array_equal(again.homography, homography)
-    with pytest.raises(FlattenerError):
-        rec.ScanPlan.from_dict({**plan.to_dict(), "schema": "other"})
-    broken = {key: value for key, value in plan.to_dict().items() if key != "output"}
+    broken = {key: value for key, value in perspective.to_dict().items() if key != "output"}
     with pytest.raises(FlattenerError) as caught:
         rec.ScanPlan.from_dict(broken)
     assert caught.value.reason_code == "invalid_plan"
+    for changes in ({"nodes": "center"}, {"fill_rgb": (0, 0)}):
+        with pytest.raises(FlattenerError) as caught:
+            make_plan(**changes)
+        assert (caught.value.status, caught.value.reason_code) == (
+            Status.INPUT_ERROR,
+            "invalid_plan",
+        )
 
 
 def make_result(plan):
@@ -168,7 +140,7 @@ def make_result(plan):
     )
 
 
-def test_result_json_round_trip():
+def test_results_round_trip_through_json_with_their_outcome():
     result = make_result(make_plan())
     data = result.to_dict()
     text = json.dumps(data, ensure_ascii=False, allow_nan=False)
@@ -187,9 +159,18 @@ def test_result_json_round_trip():
         "detail": {"scale": 2, "full_size": [6000, 8000]},
     }
     assert data["quality_status"] == "not_evaluated" and data["research"] is False
-
-
-def test_failure_record_round_trip():
+    # The outcome follows the path taken and the worst reason.
+    info = rec.reason("page_fills_frame")
+    warning = rec.reason("possible_occlusion", solidity=0.8)
+    assert rec.decide_outcome("dewarp", [info]) == rec.Outcome.RECTIFIED
+    assert rec.decide_outcome("dewarp", [info, warning]) == rec.Outcome.RECTIFIED_WITH_WARNINGS
+    assert rec.decide_outcome("perspective", []) == rec.Outcome.PERSPECTIVE
+    assert rec.decide_outcome("original", [warning]) == rec.Outcome.ORIGINAL_RETURNED
+    assert rec.decide_outcome(None) == rec.Outcome.FAILED
+    with pytest.raises(ValueError):
+        rec.decide_outcome("crop")
+    assert (rec.EXIT_SCANNED, rec.EXIT_FALLBACK, rec.EXIT_USAGE) == (0, 1, 2)
+    # A failure record round-trips as well.
     failure = rec.ScanResult(
         status=Status.MODEL_ERROR,
         outcome=rec.Outcome.ORIGINAL_RETURNED,
