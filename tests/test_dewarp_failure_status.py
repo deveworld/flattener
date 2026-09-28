@@ -135,6 +135,19 @@ def test_checked_rectify_follows_the_failure_policy():
     assert "forced_render" not in original.metadata
 
 
+def test_rectify_checks_output_limits_before_prediction(monkeypatch):
+    image = np.zeros((40, 30, 3), np.uint8)
+    dewarper = Dewarper(_FoldGrid(), TINY, torch.device("cpu"))
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("oversized output reached prediction")
+
+    monkeypatch.setattr(predict, "predict_grid", unexpected)
+    with pytest.raises(FlattenerError) as error:
+        rectify(dewarper, image, (20, 20), render_config=RenderConfig(max_output_pixels=100))
+    assert error.value.reason_code == "size_limit_exceeded"
+
+
 def _folds_dark_inputs(dewarper, image):
     """Identity grid for a bright input, the middle columns swapped for a dark one."""
     columns = edge_positions(4)

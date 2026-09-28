@@ -80,7 +80,8 @@ from torch.nn import functional as F
 
 from ..contracts import FlattenerError, RenderConfig, RenderResult, Status
 from ..evidence import evidence
-from ..renderer import render
+from ..renderer import _handle_failure, _new_metadata, render
+from ..validation import validate_config, validate_size
 from .checkpoint import CHECKPOINT_SCHEMA, atomic_write, read_checkpoint, utc_now, write_json
 from .coords import (
     _apply,
@@ -760,24 +761,47 @@ def rectify(
     """
     started = time.perf_counter()
     config = RenderConfig() if render_config is None else render_config
-    if not isinstance(config, RenderConfig):
+    if not isinstance(config, RenderConfig) or config.on_error not in (
+        "raise",
+        "return",
+        "original",
+    ):
         raise FlattenerError(
             Status.INPUT_ERROR, "invalid_config", "render_config must be RenderConfig"
         )
     check_quantize(quantize)
     inset_info = inset_record(inset)
     rerun_info = rerun_record(rerun, deskew)
+    _check_image(image)
     size = tuple(image.shape[:2]) if output_size is None else tuple(output_size)
     convention = dewarper.config.grid_convention
-    if rerun == 0:
-        grid, crops = predict_grid(dewarper, image), []
-        backward_map = dense_backward_map(grid, convention, size, image.shape[:2], inset)
-    else:
-        grid, crops = rerun_grid(dewarper, image, rerun, deskew)
-        backward_map = dense_backward_map(
-            grid, convention, size, image.shape[:2], inset, flattener_values=True
+    grid, crops = None, []
+    checked_config = replace(config, on_error="return")
+    try:
+        validate_config(config)
+        size = validate_size(
+            size, max_pixels=config.max_output_pixels, max_side=config.max_side, name="output size"
         )
-    result = render(image, backward_map, config=replace(config, on_error="return"))
+    except FlattenerError as error:
+        metadata = _new_metadata(checked_config)
+        metadata.update(
+            source_size=list(image.shape[:2]),
+            requested_output_size=list(size),
+            failure_stage="prepare_input",
+        )
+        metadata["timings"]["prepare_input"] = time.perf_counter() - started
+        metadata["timings"]["total"] = time.perf_counter() - started
+        result = _handle_failure(error, checked_config, image=None, metadata=metadata)
+    else:
+        if rerun == 0:
+            grid = predict_grid(dewarper, image)
+            backward_map = dense_backward_map(grid, convention, size, image.shape[:2], inset)
+        else:
+            grid, crops = rerun_grid(dewarper, image, rerun, deskew)
+            backward_map = dense_backward_map(
+                grid, convention, size, image.shape[:2], inset, flattener_values=True
+            )
+        result = render(image, backward_map, config=checked_config)
     if result.status != Status.SUCCESS:
         if allow_unchecked and result.status == Status.INVALID_TRANSFORM:
             result.image = render_unchecked(image, backward_map, config.fill_rgb, quantize)
@@ -794,7 +818,7 @@ def rectify(
     result.metadata["dewarp"] = {
         "model_sha256": dewarper.info.get("sha256"),
         "grid_convention": dewarper.config.grid_convention,
-        "grid_size": list(grid.shape[:2]),
+        "grid_size": None if grid is None else list(grid.shape[:2]),
         "output_size": list(size),
         "quantize": quantize,
         "inset": inset_info,
