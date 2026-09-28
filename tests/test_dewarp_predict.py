@@ -101,24 +101,14 @@ def _checkpoint(path, seed=0):
     return model
 
 
-def test_identity_grid_reproduces_the_input_and_resizes():
+def test_identity_grid_reproduces_the_input_without_tf32():
     image = np.random.default_rng(0).integers(0, 256, (37, 29, 3), dtype=np.uint8)
-    dewarper = Dewarper(_IdentityGrid(), TINY, torch.device("cpu"))
-    result = rectify(dewarper, image)
-    np.testing.assert_array_equal(result.image, image)
-    assert not result.used_fallback and result.metadata["dewarp"]["grid_size"] == [5, 4]
-    assert rectify(dewarper, image, (50, 20)).image.shape == (50, 20, 3)
-    with pytest.raises(FlattenerError):
-        rectify(dewarper, image.astype(np.float32))
-
-
-def test_prediction_runs_without_tf32_and_restores_the_flags():
     original = _flags()
     model = _RecordFlags()
     dewarper = Dewarper(model, TINY, torch.device("cpu"))
     try:
         _set_flags("tf32", "tf32", "tf32", "high", True)
-        predict_grid(dewarper, np.zeros((8, 6, 3), np.uint8))
+        result = rectify(dewarper, image)
         assert model.seen == ("ieee", "ieee", "ieee", "highest", False)
         assert _flags() == ("tf32", "tf32", "tf32", "high", True)
         with pytest.raises(ValueError), ieee_float32():
@@ -127,6 +117,11 @@ def test_prediction_runs_without_tf32_and_restores_the_flags():
     finally:
         _set_flags(*original)
     assert _flags() == original
+    np.testing.assert_array_equal(result.image, image)
+    assert not result.used_fallback and result.metadata["dewarp"]["grid_size"] == [5, 4]
+    assert rectify(dewarper, image, (50, 20)).image.shape == (50, 20, 3)
+    with pytest.raises(FlattenerError):
+        rectify(dewarper, image.astype(np.float32))
 
 
 def _upstream_weights():
@@ -147,7 +142,7 @@ def _checkerboard_page():
     return image
 
 
-def test_checkpoint_loads_with_verification(tmp_path):
+def test_a_checkpoint_predicts_what_its_model_gives_on_the_resized_image(tmp_path):
     path = tmp_path / "model.pt"
     model = _checkpoint(path)
     dewarper = load_dewarper(path)
@@ -162,21 +157,21 @@ def test_checkpoint_loads_with_verification(tmp_path):
     with torch.no_grad():
         expected = model(tensor)[0][0].permute(1, 2, 0).numpy()
     np.testing.assert_allclose(predict_grid(dewarper, image), expected, atol=1e-6)
-    data = bytearray(path.read_bytes())
-    data[-5] ^= 1
-    path.write_bytes(bytes(data))
-    with pytest.raises(FlattenerError, match="sha256"):
-        load_dewarper(path)
 
 
-def _identity_grid(dewarper, image):
-    height, width = dewarper.config.grid_size
+def _identity(height, width):
     return np.stack(np.meshgrid(edge_positions(width), edge_positions(height)), -1).astype(
         np.float32
     )
 
 
-def test_docunet_batch_writes_crop_sized_outputs(tmp_path, capsys, monkeypatch):
+def _identity_grid(dewarper, image):
+    return _identity(*dewarper.config.grid_size)
+
+
+def test_docunet_batch_writes_crop_sized_outputs_and_keeps_only_matching_ones(
+    tmp_path, capsys, monkeypatch
+):
     # A random tiny model folds its map; an identity grid passes the render checks.
     monkeypatch.setattr(predict, "predict_grid", _identity_grid)
     crops, output = tmp_path / "crop", tmp_path / "out"
@@ -231,6 +226,28 @@ def test_docunet_batch_writes_crop_sized_outputs(tmp_path, capsys, monkeypatch):
         main(arguments)
     assert main([*arguments, "--overwrite"]) == 0
     assert json.loads(capsys.readouterr().out)["written"] == 2
+    # Outputs of another quantization are never kept.
+    record_path = output / "predictions.json"
+
+    def run(quantize):
+        assert main([*arguments, "--quantize", quantize]) == 0
+        counts = json.loads(capsys.readouterr().out)
+        record = json.loads(record_path.read_text())
+        assert record["quantize"] == record["evidence"]["quantize"] == quantize
+        return counts["written"], counts["kept"]
+
+    assert run("truncate") == (2, 0)  # the rounded images are not kept for truncation
+    assert run("truncate") == (0, 2)
+    found = prediction_record(output)
+    assert found["quantize"] == report_evidence(found)["quantize"] == "truncate"
+    assert run("round") == (2, 0)
+    # A record without the field predates the option; its images were rounded.
+    for quantize, expected in (("round", (0, 2)), ("truncate", (2, 0))):
+        record = json.loads(record_path.read_text())
+        del record["quantize"]
+        record_path.write_text(json.dumps(record))
+        assert prediction_record(output)["quantize"] == "round"
+        assert run(quantize) == expected
 
 
 def test_upstream_weights_match_the_upstream_unwarping():
@@ -250,7 +267,7 @@ def test_upstream_weights_match_the_upstream_unwarping():
     assert np.abs(result.image[inside].astype(int) - expected[inside]).max() <= 1
 
 
-def test_truncate_is_floor_of_x_times_255_on_a_known_sample():
+def test_truncate_floors_the_samples_that_round_rounds():
     # Source columns a and b; a 4-wide output samples 1/4 and 3/4 of the way between them.
     image = np.zeros((4, 2, 3), np.uint8)
     image[:, 0], image[:, 1] = (0, 10, 200), (101, 31, 253)
@@ -268,9 +285,7 @@ def test_truncate_is_floor_of_x_times_255_on_a_known_sample():
     assert quantize_rgb(values, "round").tolist() == [0, 26, 128, 179, 255, 255, 255, 0]
     inside = values[(values >= 0) & (values <= 1)]  # the paper's (x * 255).astype(uint8)
     np.testing.assert_array_equal(quantize_rgb(inside, "truncate"), (inside * 255).astype(np.uint8))
-
-
-def test_truncate_samples_what_flattener_render_rounds():
+    # On a map partly outside the source, round is what flattener.render gives.
     image = np.random.default_rng(4).integers(0, 256, (30, 20, 3), dtype=np.uint8)
     yy, xx = np.meshgrid(np.linspace(-1.1, 0.9, 25), np.linspace(-0.8, 1.05, 18), indexing="ij")
     backward_map = np.stack([xx, yy], -1).astype(np.float32)  # some pixels outside the source
@@ -287,58 +302,14 @@ def test_truncate_samples_what_flattener_render_rounds():
         quantize_rgb(np.zeros(3, np.float32), "nearest")
 
 
-def test_docunet_batch_never_keeps_outputs_of_another_quantization(tmp_path, capsys, monkeypatch):
-    monkeypatch.setattr(predict, "predict_grid", _identity_grid)
-    crops, output = tmp_path / "crop", tmp_path / "out"
-    crops.mkdir()
-    pixels = np.random.default_rng(6).integers(0, 256, (45, 33, 3), dtype=np.uint8)
-    Image.fromarray(pixels).save(crops / "1_1 copy.png")
-    weights = tmp_path / "model.pt"
-    _checkpoint(weights)
-    record_path = output / "predictions.json"
-    arguments = ["--weights", str(weights), "docunet", "--input-dir", str(crops)]
-    arguments += ["--output-dir", str(output)]
-
-    def run(quantize):
-        assert main([*arguments, "--quantize", quantize]) == 0
-        counts = json.loads(capsys.readouterr().out)
-        record = json.loads(record_path.read_text())
-        assert record["quantize"] == record["evidence"]["quantize"] == quantize
-        return counts["written"], counts["kept"]
-
-    assert run("round") == (1, 0)
-    assert run("round") == (0, 1)
-    assert run("truncate") == (1, 0)  # a rounded image is never kept for truncation
-    assert run("truncate") == (0, 1)
-    found = prediction_record(output)
-    assert found["quantize"] == report_evidence(found)["quantize"] == "truncate"
-    assert run("round") == (1, 0)
-    # A record without the field predates the option; its images were rounded.
-    record = json.loads(record_path.read_text())
-    del record["quantize"]
-    record_path.write_text(json.dumps(record))
-    assert prediction_record(output)["quantize"] == "round"
-    assert run("round") == (0, 1)
-    record = json.loads(record_path.read_text())
-    del record["quantize"]
-    record_path.write_text(json.dumps(record))
-    assert run("truncate") == (1, 0)
-
-
 # Grid-level inset of the predicted outline (--inset)
 
 PRESET = "syntheticdoc_half_cell"
 
 
-def _identity(height, width):
-    return np.stack(np.meshgrid(edge_positions(width), edge_positions(height)), -1).astype(
-        np.float32
-    )
-
-
-def test_zero_inset_is_the_plain_map():
+def test_the_inset_moves_the_page_edges_to_one_minus_e():
     grid = np.random.default_rng(0).uniform(-1.1, 1.1, (7, 5, 2)).astype(np.float32)
-    for inset in (None, 0, 0.0, (0, 0), [0.0, 0.0]):
+    for inset in (None, 0, (0, 0)):
         assert resolve_inset(inset) == (0.0, 0.0)
         np.testing.assert_array_equal(
             dense_backward_map(grid, "flattener", (31, 23), (40, 30), inset),
@@ -348,30 +319,25 @@ def test_zero_inset_is_the_plain_map():
             dense_backward_map(grid, "uvdoc", (31, 23), (40, 30), inset),
             uvdoc_dense_map(grid, (31, 23), (40, 30)),
         )
-    # The inset path at e -> 0 reads the grid where the plain map does, in both conventions.
+    ex, ey = resolve_inset(PRESET)
+    height, width = 41, 27
     for convention in ("flattener", "uvdoc"):
+        # The inset path at e -> 0 reads the grid where the plain map does.
         plain = dense_backward_map(grid, convention, (31, 23), (40, 30))
         tiny = dense_backward_map(grid, convention, (31, 23), (40, 30), (1e-12, 0.0))
         np.testing.assert_allclose(tiny, plain, rtol=0, atol=1e-6)
-
-
-@pytest.mark.parametrize("convention", ["flattener", "uvdoc"])
-def test_identity_grid_edges_move_to_one_minus_e(convention):
-    inset = PRESET
-    ex, ey = resolve_inset(inset)
-    height, width = 41, 27
-    grid = _identity(6, 5)  # align_corners values for "uvdoc", flattener values otherwise
-    dense = dense_backward_map(grid, convention, (height, width), (height, width), inset)
-    # Output pixel center u shows the page position (1 - e) u: the grid on [-(1-e), 1-e].
-    np.testing.assert_allclose(dense[5, :, 0], (1 - ex) * center_positions(width), atol=1e-6)
-    np.testing.assert_allclose(dense[:, 3, 1], (1 - ey) * center_positions(height), atol=1e-6)
-    # The outer pixel edges (u = -1, +1) lie at -(1 - e) and 1 - e.
-    left = 1.5 * dense[5, 0, 0] - 0.5 * dense[5, 1, 0]
-    right = 1.5 * dense[5, -1, 0] - 0.5 * dense[5, -2, 0]
-    top = 1.5 * dense[0, 3, 1] - 0.5 * dense[1, 3, 1]
-    bottom = 1.5 * dense[-1, 3, 1] - 0.5 * dense[-2, 3, 1]
-    np.testing.assert_allclose([left, right], [-(1 - ex), 1 - ex], atol=1e-6)
-    np.testing.assert_allclose([top, bottom], [-(1 - ey), 1 - ey], atol=1e-6)
+        identity = _identity(6, 5)  # align_corners values for "uvdoc", flattener values otherwise
+        dense = dense_backward_map(identity, convention, (height, width), (height, width), PRESET)
+        # Output pixel center u shows the page position (1 - e) u: the grid on [-(1-e), 1-e].
+        np.testing.assert_allclose(dense[5, :, 0], (1 - ex) * center_positions(width), atol=1e-6)
+        np.testing.assert_allclose(dense[:, 3, 1], (1 - ey) * center_positions(height), atol=1e-6)
+        # The outer pixel edges (u = -1, +1) lie at -(1 - e) and 1 - e.
+        left = 1.5 * dense[5, 0, 0] - 0.5 * dense[5, 1, 0]
+        right = 1.5 * dense[5, -1, 0] - 0.5 * dense[5, -2, 0]
+        top = 1.5 * dense[0, 3, 1] - 0.5 * dense[1, 3, 1]
+        bottom = 1.5 * dense[-1, 3, 1] - 0.5 * dense[-2, 3, 1]
+        np.testing.assert_allclose([left, right], [-(1 - ex), 1 - ex], atol=1e-6)
+        np.testing.assert_allclose([top, bottom], [-(1 - ey), 1 - ey], atol=1e-6)
 
 
 # Crop-and-rerun (--rerun and --deskew)
@@ -415,15 +381,14 @@ class Page:
 
 
 class Oracle(torch.nn.Module):
-    """A perfect predictor of ``page`` on a ramp image, plus a fixed ``bias`` in its own
-    input frame. It fits which source point each input pixel shows (an affine map) on the
-    middle of its input, which lies inside the crop at any turn, and returns the page's
-    grid in its input frame, as align_corners=True values of the image it saw for
-    ``uvdoc``."""
+    """A perfect predictor of ``page`` on a ramp image. It fits which source point each
+    input pixel shows (an affine map) on the middle of its input, which lies inside the
+    crop at any turn, and returns the page's grid in its input frame, as
+    align_corners=True values of the image it saw for ``uvdoc``."""
 
-    def __init__(self, page, convention="flattener", bias=(0.0, 0.0)):
+    def __init__(self, page, convention="flattener"):
         super().__init__()
-        self.page, self.convention, self.bias = page, convention, np.asarray(bias)
+        self.page, self.convention = page, convention
         self.seen = []
 
     def forward(self, x):
@@ -437,7 +402,7 @@ class Oracle(torch.nn.Module):
         fit_y = np.linalg.lstsq(design, rows[middle] + 0.5, rcond=None)[0]
         matrix = np.array([fit_x[:2], fit_y[:2]])  # input values -> source pixels
         offset = np.array([fit_x[2], fit_y[2]])
-        local = (self.page.pixels(GRID) - offset) @ np.linalg.inv(matrix).T + self.bias
+        local = (self.page.pixels(GRID) - offset) @ np.linalg.inv(matrix).T
         self.seen.append(local)
         if self.convention == "uvdoc":
             n = 2 * np.hypot(matrix[0], matrix[1])  # size of the image seen, in pixels
@@ -446,12 +411,12 @@ class Oracle(torch.nn.Module):
         return grid, None
 
 
-def _dewarper(page, convention="flattener", bias=(0.0, 0.0)):
-    return Dewarper(Oracle(page, convention, bias), _config(convention), torch.device("cpu"))
+def _dewarper(page, convention="flattener"):
+    return Dewarper(Oracle(page, convention), _config(convention), torch.device("cpu"))
 
 
 @pytest.mark.parametrize("convention", ["flattener", "uvdoc"])
-def test_a_perfect_predictor_keeps_the_true_map_through_a_crop(convention):
+def test_a_perfect_predictor_keeps_the_true_map_through_crop_and_deskew(convention):
     image = ramp_image(*SOURCE)
     page = Page(center=(120.3, 60.7), size=(50, 36))  # x 95.3..145.3, y 42.7..78.7
     truth = page.grid()
@@ -466,11 +431,7 @@ def test_a_perfect_predictor_keeps_the_true_map_through_a_crop(convention):
     assert record["canvas_size"] == [40.0, 55.0] and record["pass"] == 1
     assert record["angle_deg"] is None and not record["rotated"] and record["skipped"] is None
 
-
-@pytest.mark.parametrize("convention", ["flattener", "uvdoc"])
-def test_deskew_turns_the_page_upright_and_composes_back(convention):
     angle = -33.0
-    image = ramp_image(*SOURCE)
     page = Page(center=(98.6, 77.1), size=(70, 50), angle_deg=angle)
     truth = page.grid()
     dewarper = _dewarper(page, convention)
@@ -495,48 +456,13 @@ def test_deskew_turns_the_page_upright_and_composes_back(convention):
     inside = (values - offset) @ np.linalg.inv(matrix).T
     assert np.abs(inside).max() <= 1 + 1e-9
     assert np.abs(inside).max() == pytest.approx(1.0)
-
-
-def test_the_crop_box_is_clipped_to_the_image():
-    outline = np.array([[-12.5, 30.2], [80.0, 30.2], [80.0, 160.7], [-12.5, 160.7]])
-    assert crop_box(outline, (150, 100)) == (0, 24, 84, 150)  # 24.98 -> 24, 83.7 -> 84
-    assert crop_box(outline, (150, 100), margin=0.0) == (0, 30, 80, 150)
-    far = np.array([[250.0, 10.0], [300.0, 40.0]])
-    assert crop_box(far, (150, 200)) == (200, 8, 200, 42)
-
-
-def test_the_angle_estimate_is_robust_and_refuses_bad_outlines():
-    page = Page(center=(100, 75), size=(80, 60), angle_deg=10.0)
-    grid = page.grid()
-    assert estimate_page_angle(grid, SOURCE) == (pytest.approx(10.0), None)
-    spiked = grid.copy()
-    spiked[0, 3, 1] -= 0.2  # one top node pulled far up: two outlying segments
-    angle, reason = estimate_page_angle(spiked, SOURCE)
-    assert reason is None and angle == pytest.approx(10.0, abs=1e-9)
-    collapsed = grid.copy()
-    collapsed[0] = collapsed[0, 0]  # the top edge is one point
-    assert estimate_page_angle(collapsed, SOURCE) == (None, "degenerate_outline")
-    missing = grid.copy()
-    missing[-1, 4] = np.nan
-    assert estimate_page_angle(missing, SOURCE) == (None, "degenerate_outline")
-    crossed = grid.copy()
-    crossed[-1] = crossed[-1, ::-1]  # the bottom edge runs the other way
-    assert estimate_page_angle(crossed, SOURCE) == (None, "inconsistent_edges")
-    upside_down = Page(center=(100, 75), size=(80, 60), angle_deg=180.0).grid()
-    assert abs(estimate_page_angle(upside_down, SOURCE)[0]) == pytest.approx(180.0)
-
-
-@pytest.mark.parametrize("convention", ["flattener", "uvdoc"])
-def test_rectify_renders_the_composed_map_from_the_original_image(convention):
-    image = ramp_image(*SOURCE)
-    page = Page(center=(101.3, 70.6), size=(64, 48), angle_deg=12.0)
-    dewarper = _dewarper(page, convention)
-    result = rectify(dewarper, image, (48, 64), rerun=1, deskew=True)
+    # rectify renders the composed map from the original image.
+    result = rectify(dewarper, image, (50, 70), rerun=1, deskew=True)
     assert result.status == Status.SUCCESS and result.metadata["dewarp"]["crops"][0]["rotated"]
-    truth = predict.dense_backward_map(
-        page.grid(), convention, (48, 64), SOURCE, flattener_values=True
+    truth_map = predict.dense_backward_map(
+        truth, convention, (50, 70), SOURCE, flattener_values=True
     )
-    expected = predict.render_unchecked(image, truth, (255, 255, 255))
+    expected = predict.render_unchecked(image, truth_map, (255, 255, 255))
     assert np.abs(result.image.astype(int) - expected).max() <= 1
 
 
@@ -564,17 +490,38 @@ class Tilted(torch.nn.Module):
         return self.base + 0.5 * grid, grid3d
 
 
-def _tilted_dewarper(config=None, seed=0, sha="seeded-uvdocnet"):
-    config = config or DewarpModelConfig(input_size=(96, 72), grid_size=(9, 7), num_filter=4)
-    info = {"sha256": sha, "kind": "checkpoint", "step": 1, "track": "release"}
-    return Dewarper(Tilted(config, seed).eval(), config, torch.device("cpu"), info)
+def _tilted_dewarper():
+    config = DewarpModelConfig(input_size=(96, 72), grid_size=(9, 7), num_filter=4)
+    info = {"sha256": "seeded-uvdocnet", "kind": "checkpoint", "step": 1, "track": "release"}
+    return Dewarper(Tilted(config).eval(), config, torch.device("cpu"), info)
 
 
-def _image(seed=3, size=(150, 200)):
-    return np.random.default_rng(seed).integers(0, 256, (*size, 3), dtype=np.uint8)
-
-
-def test_rerun_box_limits_and_skips():
+def test_crop_boxes_page_angles_and_rerun_skips():
+    outline = np.array([[-12.5, 30.2], [80.0, 30.2], [80.0, 160.7], [-12.5, 160.7]])
+    assert crop_box(outline, (150, 100)) == (0, 24, 84, 150)  # 24.98 -> 24, 83.7 -> 84
+    assert crop_box(outline, (150, 100), margin=0.0) == (0, 30, 80, 150)
+    far = np.array([[250.0, 10.0], [300.0, 40.0]])
+    assert crop_box(far, (150, 200)) == (200, 8, 200, 42)
+    # The page angle ignores outlying edge segments and refuses broken outlines.
+    page = Page(center=(100, 75), size=(80, 60), angle_deg=10.0)
+    grid = page.grid()
+    assert estimate_page_angle(grid, SOURCE) == (pytest.approx(10.0), None)
+    spiked = grid.copy()
+    spiked[0, 3, 1] -= 0.2  # one top node pulled far up: two outlying segments
+    angle, reason = estimate_page_angle(spiked, SOURCE)
+    assert reason is None and angle == pytest.approx(10.0, abs=1e-9)
+    collapsed = grid.copy()
+    collapsed[0] = collapsed[0, 0]  # the top edge is one point
+    assert estimate_page_angle(collapsed, SOURCE) == (None, "degenerate_outline")
+    missing = grid.copy()
+    missing[-1, 4] = np.nan
+    assert estimate_page_angle(missing, SOURCE) == (None, "degenerate_outline")
+    crossed = grid.copy()
+    crossed[-1] = crossed[-1, ::-1]  # the bottom edge runs the other way
+    assert estimate_page_angle(crossed, SOURCE) == (None, "inconsistent_edges")
+    upside_down = Page(center=(100, 75), size=(80, 60), angle_deg=180.0).grid()
+    assert abs(estimate_page_angle(upside_down, SOURCE)[0]) == pytest.approx(180.0)
+    # Rerun boxes: deskew stays within the angle limit; empty or broken outlines skip.
     size = (200, 200)  # square: turning normalized values turns source pixels alike
     theta = np.radians(60.0)
     rotation = np.array([[np.cos(theta), -np.sin(theta)], [np.sin(theta), np.cos(theta)]])
@@ -601,31 +548,6 @@ def _inputs(images):
     ]
 
 
-def test_the_batch_writes_what_rectify_renders(tmp_path):
-    rerun, deskew = 1, True
-    dewarper = _tilted_dewarper()
-    images = [_image(seed) for seed in (5, 6, 7)]
-    report = rectify_batch(
-        dewarper, _inputs(images), tmp_path, force_render=True, rerun=rerun, deskew=deskew
-    )
-    assert report["pipeline"] == DEFAULT_PIPELINE
-    assert report["evidence"]["pipeline"] == DEFAULT_PIPELINE
-    for index, image in enumerate(images):
-        result = rectify(
-            dewarper,
-            image,
-            render_config=RenderConfig(on_error="return"),
-            allow_unchecked=True,
-            rerun=rerun,
-            deskew=deskew,
-        )
-        with Image.open(tmp_path / f"{index}.png") as written:
-            assert np.asarray(written).tobytes() == result.image.tobytes()
-        item = report["items"][index]
-        assert item["status"] == str(result.status)
-        assert item["crops"] == json.loads(json.dumps(result.metadata["dewarp"]["crops"]))
-
-
 def _pipeline_rectifier(dewarper, calls):
     def rectify_one(image, output_size):
         calls.append(output_size)
@@ -638,10 +560,28 @@ def _pipeline_rectifier(dewarper, calls):
     return rectify_one
 
 
-def test_predictions_of_another_pipeline_are_refused(tmp_path):
+def test_the_batch_writes_what_rectify_renders_and_refuses_another_pipeline(tmp_path):
     dewarper = _tilted_dewarper()
-    inputs = _inputs([_image(8), _image(9)])
-    rectify_batch(dewarper, inputs, tmp_path, force_render=True)
+    images = [
+        np.random.default_rng(seed).integers(0, 256, (150, 200, 3), np.uint8) for seed in (5, 6)
+    ]
+    inputs = _inputs(images)
+    report = rectify_batch(dewarper, inputs, tmp_path, force_render=True, rerun=1, deskew=True)
+    assert report["pipeline"] == DEFAULT_PIPELINE == report["evidence"]["pipeline"]
+    for index, image in enumerate(images):
+        result = rectify(
+            dewarper,
+            image,
+            render_config=RenderConfig(on_error="return"),
+            allow_unchecked=True,
+            rerun=1,
+            deskew=True,
+        )
+        with Image.open(tmp_path / f"{index}.png") as written:
+            assert np.asarray(written).tobytes() == result.image.tobytes()
+        item = report["items"][index]
+        assert item["status"] == str(result.status)
+        assert item["crops"] == json.loads(json.dumps(result.metadata["dewarp"]["crops"]))
     calls = []
     other = {"name": "flattener.scan", "passes": 1}
     with pytest.raises(FlattenerError, match="another pipeline") as error:

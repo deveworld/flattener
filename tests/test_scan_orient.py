@@ -24,6 +24,7 @@ from flattener.scan.orient import (
     release_problems,
     save_checkpoint,
 )
+from flattener.scan.shippable import shippable
 
 
 def _textured_page(height=300, width=210, seed=0):
@@ -103,19 +104,17 @@ def test_forward_pools_global_and_patch_views():
         assert torch.allclose(model(global_view, patches), both)
 
 
-@pytest.mark.parametrize("quarter", [1, 3])
-def test_turned_geometry_is_a_clockwise_quarter_turn(quarter):
-    image = np.random.default_rng(quarter).integers(0, 256, size=(7, 5), dtype=np.uint8)
-    geometry = ViewGeometry.turned((2.5, 3.5), (7, 5), quarter)
-    height, width = (int(v) for v in geometry.size)
-    points = np.stack(np.meshgrid(np.arange(width) + 0.5, np.arange(height) + 0.5), -1)
-    view = quantize(SourceSampler(image, geometry)(points, 1.0))
-    # Content turned clockwise by k quarter turns; rot90(view, k) restores it.
-    np.testing.assert_array_equal(view, np.rot90(image, -quarter))
-    np.testing.assert_array_equal(np.rot90(view, quarter), image)
-
-
-def test_patch_selection_turns_with_the_page():
+def test_views_turn_clockwise_with_the_page_and_follow_the_photo_geometry():
+    for quarter in (1, 3):
+        image = np.random.default_rng(quarter).integers(0, 256, size=(7, 5), dtype=np.uint8)
+        geometry = ViewGeometry.turned((2.5, 3.5), (7, 5), quarter)
+        height, width = (int(v) for v in geometry.size)
+        points = np.stack(np.meshgrid(np.arange(width) + 0.5, np.arange(height) + 0.5), -1)
+        view = quantize(SourceSampler(image, geometry)(points, 1.0))
+        # Content turned clockwise by k quarter turns; rot90(view, k) restores it.
+        np.testing.assert_array_equal(view, np.rot90(image, -quarter))
+        np.testing.assert_array_equal(np.rot90(view, quarter), image)
+    # The global view and the selected patch cells turn with the page.
     config = OrientConfig()
     page = _textured_page()
     upright = prepare_views(page, config)
@@ -129,9 +128,7 @@ def test_patch_selection_turns_with_the_page():
     # The selected cells hold the text lines, never the outer ring.
     assert all(1 <= r <= grid - 2 and 1 <= c <= grid - 2 for r, c in upright.cells)
     assert all(r < grid // 2 + 1 for r, _ in upright.cells)
-
-
-def test_view_geometry_in_a_photo_matches_the_cut_crop():
+    # A view geometry inside a photo reads what the cut crop shows.
     photo = np.random.default_rng(3).integers(0, 256, size=(400, 300), dtype=np.uint8)
     photo[100:340, 60:230] = _textured_page(240, 170)
     geometry = ViewGeometry.turned((145.0, 220.0), (240, 170))
@@ -147,7 +144,7 @@ def test_view_geometry_in_a_photo_matches_the_cut_crop():
     assert np.abs(sampled.patches.astype(int) - cut.patches).max() <= 1
 
 
-def test_decide_accepts_only_above_the_threshold():
+def test_the_threshold_is_chosen_within_the_bound_and_decides_acceptance():
     sure = decide(np.array([0.0, 6.0, 0.0, 0.0]), 1.0, 0.9)
     assert sure.k == 1 and sure.accepted and sure.reason_code is None
     assert sum(sure.probabilities) == pytest.approx(1.0)
@@ -157,8 +154,6 @@ def test_decide_accepts_only_above_the_threshold():
     # A higher temperature flattens the same logits below the threshold.
     assert not decide(np.array([0.0, 6.0, 0.0, 0.0]), 4.0, 0.9).accepted
 
-
-def test_choose_threshold_keeps_silent_errors_within_the_bound():
     rng = np.random.default_rng(1)
     count = 2000
     labels = rng.integers(0, 4, size=count)
@@ -180,7 +175,7 @@ def test_choose_threshold_keeps_silent_errors_within_the_bound():
     assert not none["feasible"] and none["threshold"] == 1.0
 
 
-def test_release_problems_follow_the_whole_lineage():
+def test_release_problems_follow_the_whole_lineage(tmp_path):
     assert release_problems(_record()) == []
     assert release_problems(_record(track="research"))
     uvdoc = {"kind": "uvdoc", "sha256_matches_upstream": True}
@@ -205,18 +200,15 @@ def test_release_problems_follow_the_whole_lineage():
     assert release_problems(_record(data_sources=_sources(track="research")))
     assert release_problems(_record(data_sources=None))
 
-
-def test_a_fine_tuned_model_needs_every_parent_data_spec(tmp_path):
+    # A fine-tune needs the data spec of every parent training step.
     parent_spec = {**_data_spec(), "name": "orient-parent"}
     digest = DataSpec.from_dict(parent_spec).sha256
     parent = {"kind": "checkpoint", "track": "release", "lineage": _lineage(digest=digest)}
     child = _record(lineage=_lineage(parent))
-    problems = release_problems(child)
-    assert problems == ["ship gate: unverified_data_spec"]
-    shippable = pytest.importorskip("flattener.scan.shippable")
-    assert shippable.shippable(child).reasons == ("unverified_data_spec",)  # same verdict
+    assert release_problems(child) == ["ship gate: unverified_data_spec"]
+    assert shippable(child).reasons == ("unverified_data_spec",)  # the scanner's verdict
     carried = _record(lineage=_lineage({**parent, "data_spec": parent_spec}))
-    assert release_problems(carried) == [] and shippable.shippable(carried).shippable
+    assert release_problems(carried) == [] and shippable(carried).shippable
     assert release_problems(child, specs=[parent_spec]) == []
     sidecar = tmp_path / "parent.pt.json"  # the parent's sidecar at its recorded path
     sidecar.write_text(json.dumps({"data_spec": parent_spec}), encoding="utf-8")

@@ -25,6 +25,7 @@ from flattener.scan.orient_train import (
     soft_targets,
     train,
 )
+from flattener.scan.shippable import gate_file
 
 TOOLS = Path(__file__).resolve().parents[1] / "tools" / "orient"
 sys.path.insert(0, str(TOOLS))
@@ -171,48 +172,21 @@ def built(tmp_path_factory):
     return directory, summary
 
 
-def test_release_build_refuses_research_samples(tmp_path):
-    _write_syntheticdoc(tmp_path / "sd", track="research")
-    with pytest.raises(FlattenerError) as caught:
-        build_data.build(_build_spec(tmp_path), tmp_path / "out", workers=1)
-    assert caught.value.reason_code == "track_violation"
-    pages_root = tmp_path / "templates"
-    pages_root.mkdir()
-    row = {"path": "a.png", "split": "train", "track": "release", "license_class": "CC BY-NC 4.0"}
-    (pages_root / "manifest.jsonl").write_text(json.dumps(row) + "\n")
-    spec = json.loads(_build_spec(tmp_path).read_text())
-    spec["sources"] = [
-        {
-            "name": "templates",
-            "kind": "pages",
-            "track": "release",
-            "license": "x",
-            "root": "templates",
-        }
-    ]
-    (tmp_path / "pages.json").write_text(json.dumps(spec))
-    with pytest.raises(SystemExit):
-        build_data.build(tmp_path / "pages.json", tmp_path / "out2", workers=1)
-
-
-def test_crop_turns_the_page_upright():
-    angle = 90.0
-    page = _asymmetric_page()
-    rgb, values = _render(page, angle)
+def test_crops_and_training_views_follow_the_label_convention():
     from flattener.dewarp.coords import map_to_grid
 
+    page = _asymmetric_page()
+    # A SyntheticDoc photo turned 90 degrees clockwise is cut out upright.
+    rgb, values = _render(page, 90.0)
     crop, box, found = pages.crop_syntheticdoc(rgb, map_to_grid(values, (40, 28)), 1024, 0.1)
-    assert abs((found - angle + 180) % 360 - 180) < 0.5
+    assert abs((found - 90.0 + 180) % 360 - 180) < 0.5
     height, width = crop.shape
     x0, y0, x1, y1 = ((np.array(box) + 1) / 2 * [width, height, width, height]).round().astype(int)
     region = np.asarray(Image.fromarray(crop[y0:y1, x0:x1]).resize(PAGE[::-1]), dtype=float)
     upright = np.corrcoef(region.ravel(), page.astype(float).ravel())[0, 1]
     flipped = np.corrcoef(region.ravel(), np.rot90(page, 2).astype(float).ravel())[0, 1]
     assert upright > 0.8 and upright > flipped + 0.3
-
-
-def test_training_views_follow_the_label_convention():
-    page = _asymmetric_page()
+    # Label k shows the page turned clockwise by k quarter turns.
     record = {"kind": "documents", "box": [-1.0, -1.0, 1.0, 1.0], "uniform": False}
     config = orient.OrientConfig()
     upright = augmented_views(record, page, 0, np.random.default_rng(0), QUIET, config)
@@ -277,12 +251,7 @@ def test_training_smoke_records_a_release_lineage(built, tmp_path, monkeypatch):
     assert sidecar["lineage"][1]["kind"] == "train" and sidecar["lineage"][1]["track"] == "release"
     assert orient.release_problems(sidecar) == []
     assert sidecar["data_spec_sha256"] == sidecar["lineage"][1]["data_spec_sha256"]
-    try:
-        from flattener.scan import shippable
-    except ImportError:
-        pass
-    else:
-        assert shippable.gate_file(checkpoints / best["file"]).shippable
+    assert gate_file(checkpoints / best["file"]).shippable
     assert sidecar["calibration"]["source"] == "synthetic_val"
     assert sidecar["metrics"]["samples"] == 8 and sidecar["metrics"]["text_free_samples"] == 1
     orienter = orient.Orienter.load(checkpoints / best["file"])
@@ -365,11 +334,11 @@ def test_a_fine_tune_start_carries_the_parent_data_spec(tmp_path):
     ]
 
 
-def _pages_source(tmp_path, rows):
+def _pages_source(tmp_path, rows, license_class="own"):
     root = tmp_path / "templates"
     root.mkdir(exist_ok=True)
     lines = [
-        {"path": name, "split": "train", "track": "release", "license_class": "own"}
+        {"path": name, "split": "train", "track": "release", "license_class": license_class}
         for name in rows
     ]
     (root / "manifest.jsonl").write_text("".join(json.dumps(line) + "\n" for line in lines))
@@ -380,7 +349,15 @@ def _pages_source(tmp_path, rows):
     return root, tmp_path / "pages.json"
 
 
-def test_page_images_are_read_upright_and_a_changed_source_stops_a_resume(tmp_path):
+def test_the_data_build_reads_pages_upright_and_refuses_research_and_changed_sources(tmp_path):
+    _write_syntheticdoc(tmp_path / "sd", track="research")
+    with pytest.raises(FlattenerError) as caught:
+        build_data.build(_build_spec(tmp_path), tmp_path / "out", workers=1)
+    assert caught.value.reason_code == "track_violation"
+    root, spec = _pages_source(tmp_path, ["a.jpg"], license_class="CC BY-NC 4.0")
+    with pytest.raises(SystemExit, match="release source"):
+        build_data.build(spec, tmp_path / "out", workers=1)
+
     upright = np.full((80, 60), 230, np.uint8)
     upright[:20] = 20  # a dark band at the top of the page
     root, spec = _pages_source(tmp_path, ["a.jpg"])
@@ -397,8 +374,8 @@ def test_page_images_are_read_upright_and_a_changed_source_stops_a_resume(tmp_pa
     assert gray[: gray.shape[0] // 4].mean() < gray[-gray.shape[0] // 4 :].mean()
 
     Image.fromarray(upright).save(root / "b.png")
-    build_data.build(spec, tmp_path / "out", workers=1)
-    build_data.build(spec, tmp_path / "out", workers=1)  # an unchanged source resumes
+    build_data.build(spec, tmp_path / "pages", workers=1)
+    build_data.build(spec, tmp_path / "pages", workers=1)  # an unchanged source resumes
     _pages_source(tmp_path, ["a.jpg", "b.png"])
     with pytest.raises(SystemExit, match="other input data"):
-        build_data.build(spec, tmp_path / "out", workers=1)
+        build_data.build(spec, tmp_path / "pages", workers=1)

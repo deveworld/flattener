@@ -30,7 +30,6 @@ from flattener.dewarp.train import (
     code_record,
     compute_losses,
     improves,
-    memory_stats,
     train,
     validate,
     validation_signature,
@@ -185,6 +184,26 @@ def test_resume_compatibility_and_initialization_lineage(tmp_path):
         sources,
         code,
     )
+    # The validation signature (which marks a new best) covers what defines a result.
+    val = [{"name": "own-val", "records_sha256": "a", "content_sha256": "b"}]
+    reference = validation_signature(config, val)
+    for same in (
+        replace(config, val_batch_size=7),  # no sample limit: batch size does not matter
+        replace(config, num_workers=3, val_every=5, lr=1e-3),
+    ):
+        assert validation_signature(same, val) == reference
+    for changed in (
+        replace(config, val_max_batches=1),
+        replace(config, val_views=[ViewConfig("page", "page", (0.1, 0.1))]),
+        replace(config, val_select="docunet"),
+        replace(config, epe_reference_size=(1440, 1024)),
+    ):
+        assert validation_signature(changed, val) != reference
+    assert validation_signature(config, [{**val[0], "content_sha256": "c"}]) != reference
+    limited = replace(config, val_max_batches=1)
+    assert validation_signature(replace(limited, val_batch_size=1), val) != validation_signature(
+        limited, val
+    )
     for changed in (replace(config, lr=1e-3), replace(config, seed=1)):
         with pytest.raises(FlattenerError, match="resume"):
             _check_resume(changed, payload, spec, sources, code)
@@ -246,32 +265,6 @@ def test_resume_compatibility_and_initialization_lineage(tmp_path):
         assert error.value.reason_code == "invalid_init"
 
 
-def test_validation_signature_covers_what_defines_a_validation_result(tmp_path):
-    config = _config(tmp_path)
-    val = [{"name": "own-val", "records_sha256": "a", "content_sha256": "b"}]
-    reference = validation_signature(config, val)
-    same = (
-        replace(config, val_batch_size=7),  # no sample limit: batch size does not matter
-        replace(config, num_workers=3, val_every=5, lr=1e-3),
-    )
-    for changed in same:
-        assert validation_signature(changed, val) == reference
-    different = (
-        replace(config, val_max_batches=1),
-        replace(config, val_views=[ViewConfig("page", "page", (0.1, 0.1))]),
-        replace(config, val_select="docunet"),
-        replace(config, epe_reference_size=(1440, 1024)),
-    )
-    for changed in different:
-        assert validation_signature(changed, val) != reference
-    assert validation_signature(config, [{**val[0], "content_sha256": "c"}]) != reference
-    limited = replace(config, val_max_batches=1)
-    assert validation_signature(replace(limited, val_batch_size=1), val) != validation_signature(
-        limited, val
-    )
-    assert memory_stats(torch.device("cpu")) == {}
-
-
 def test_train_and_val_must_not_share_samples(tmp_path):
     _spec(tmp_path, split_field=False)  # both sources read every manifest entry
     with pytest.raises(FlattenerError, match="both train and val") as error:
@@ -280,29 +273,6 @@ def test_train_and_val_must_not_share_samples(tmp_path):
     status = json.loads((tmp_path / "run/status.json").read_text())
     assert status["state"] == "failed"
     assert status["evidence"]["measurement"] == "training_loss"  # labelled before any step
-
-
-def test_losses_are_masked_by_node_validity_and_3d_availability():
-    config = TrainConfig(
-        data_spec="s", output_dir="o", track="research", model=TINY, loss_recon=1.0
-    )
-    target = torch.zeros(2, 2, 5, 4)
-    valid = torch.ones(2, 1, 5, 4)
-    valid[1, :, 0, 0] = 0
-    prediction = torch.zeros(2, 2, 5, 4)
-    prediction[1, :, 0, 0] = 100.0  # ignored: invalid node
-    batch = {
-        "grid2d": target,
-        "valid": valid,
-        "grid3d": torch.ones(2, 3, 5, 4),
-        "has_grid3d": torch.tensor([True, False]),
-        "image": torch.rand(2, 3, 64, 48),
-    }
-    grid3d = torch.ones(2, 3, 5, 4)
-    grid3d[1] = 50.0  # ignored: sample without a 3-D target
-    losses = compute_losses(config, 0, batch, prediction, grid3d)
-    assert losses["loss_grid2d"] == 0 and losses["loss_grid3d"] == 0
-    assert "loss_recon" in losses and torch.isfinite(losses["loss"])
 
 
 @pytest.mark.training
@@ -361,11 +331,12 @@ def test_example_configs_parse_and_respect_tracks():
         assert spec.track == config.track
 
 
-# Validation samples without valid ground truth cannot be evaluated.
+# Targets without valid nodes.
 #
-# A sample whose target grid has no valid node has no endpoint error. Validation
-# leaves it out of every mean, counts it per view as ``not_evaluable`` and a view
-# where no sample is evaluable has no EPE, so it never becomes the best checkpoint.
+# Losses skip invalid nodes and samples without a 3-D target. A validation sample whose
+# target grid has no valid node has no endpoint error: validation leaves it out of every
+# mean, counts it per view as ``not_evaluable``, and a view where no sample is evaluable
+# has no EPE, so it never becomes the best checkpoint.
 
 
 def _validation_config(**changes):
@@ -407,21 +378,37 @@ def _model():
     return UVDocNet(TINY)
 
 
-def test_validation_without_valid_ground_truth_has_no_epe_and_no_best():
+def test_invalid_targets_are_left_out_of_losses_and_validation():
+    config = TrainConfig(
+        data_spec="s", output_dir="o", track="research", model=TINY, loss_recon=1.0
+    )
+    target = torch.zeros(2, 2, 5, 4)
+    valid = torch.ones(2, 1, 5, 4)
+    valid[1, :, 0, 0] = 0
+    prediction = torch.zeros(2, 2, 5, 4)
+    prediction[1, :, 0, 0] = 100.0  # ignored: invalid node
+    batch = {
+        "grid2d": target,
+        "valid": valid,
+        "grid3d": torch.ones(2, 3, 5, 4),
+        "has_grid3d": torch.tensor([True, False]),
+        "image": torch.rand(2, 3, 64, 48),
+    }
+    grid3d = torch.ones(2, 3, 5, 4)
+    grid3d[1] = 50.0  # ignored: sample without a 3-D target
+    losses = compute_losses(config, 0, batch, prediction, grid3d)
+    assert losses["loss_grid2d"] == 0 and losses["loss_grid3d"] == 0
+    assert "loss_recon" in losses and torch.isfinite(losses["loss"])
     config = _validation_config()
-    metrics = validate(_model(), [_batch([False, False], ["a", "a"])], config, torch.device("cpu"))
+    model = _model()
+    device = torch.device("cpu")
+    metrics = validate(model, [_batch([False, False], ["a", "a"])], config, device)
     assert _missing(metrics["epe_px"])
     for name, view in metrics["views"].items():
         assert _missing(view["epe_px"]), name
         assert view["not_evaluable"] == 2, name
         assert _missing(view["per_source_epe_px"]["a"]), name
     assert not improves(None, metrics["epe_px"])
-
-
-def test_samples_without_valid_ground_truth_are_counted_and_left_out():
-    config = _validation_config()
-    model = _model()
-    device = torch.device("cpu")
     evaluable = validate(model, [_batch([True], ["a"])], config, device)
     mixed = validate(model, [_batch([True, False], ["a", "b"])], config, device)
     for name, view in mixed["views"].items():

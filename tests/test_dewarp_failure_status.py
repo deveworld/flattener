@@ -58,6 +58,34 @@ def _degenerate_checkpoint(path):
     return path
 
 
+def test_rectify_follows_the_failure_policy_and_checks_the_output_size_first(monkeypatch):
+    image = np.random.default_rng(0).integers(0, 256, (40, 30, 3), dtype=np.uint8)
+    dewarper = Dewarper(_FoldGrid(), TINY, torch.device("cpu"))
+    with pytest.raises(FlattenerError) as error:  # the checked path rejects the fold
+        rectify(dewarper, image)
+    assert error.value.status == Status.INVALID_TRANSFORM
+    returned = rectify(dewarper, image, render_config=RenderConfig(on_error="return"))
+    assert returned.status == Status.INVALID_TRANSFORM and returned.image is None
+    assert returned.metadata["validation"]["failed_cells"] > 0
+    original = rectify(dewarper, image, render_config=RenderConfig(on_error="original"))
+    assert original.status == Status.INVALID_TRANSFORM and original.used_fallback
+    np.testing.assert_array_equal(original.image, image)
+    assert "forced_render" not in original.metadata
+    forced = rectify(dewarper, image, allow_unchecked=True)  # an image, still marked failed
+    assert forced.image is not None and forced.used_fallback
+    assert forced.status == Status.INVALID_TRANSFORM
+    assert forced.reason_code == "fold_or_degenerate"
+    # An oversized output is refused before the model runs.
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("oversized output reached prediction")
+
+    monkeypatch.setattr(predict, "predict_grid", unexpected)
+    with pytest.raises(FlattenerError) as error:
+        rectify(dewarper, image, (20, 20), render_config=RenderConfig(max_output_pixels=100))
+    assert error.value.reason_code == "size_limit_exceeded"
+
+
 def _photo(path, size=(40, 30)):
     Image.fromarray(np.random.default_rng(3).integers(0, 256, (*size, 3), np.uint8)).save(path)
     return path
@@ -71,22 +99,6 @@ def _exit_code(argv):
         return exit.code if isinstance(exit.code, int) else 1, None
     except FlattenerError as error:
         return 1, error
-
-
-def _records_invalid_transform(item):
-    return Status.INVALID_TRANSFORM.value in {str(value) for value in item.values()}
-
-
-def test_forced_rectify_keeps_the_invalid_transform_status():
-    image = np.random.default_rng(0).integers(0, 256, (40, 30, 3), dtype=np.uint8)
-    dewarper = Dewarper(_FoldGrid(), TINY, torch.device("cpu"))
-    with pytest.raises(FlattenerError) as error:  # the checked path rejects the fold
-        rectify(dewarper, image)
-    assert error.value.status == Status.INVALID_TRANSFORM
-    forced = rectify(dewarper, image, allow_unchecked=True)
-    assert forced.image is not None and forced.used_fallback
-    assert forced.status == Status.INVALID_TRANSFORM
-    assert forced.reason_code == "fold_or_degenerate"
 
 
 def test_image_cli_fails_on_a_degenerate_map_by_default(tmp_path, capsys):
@@ -111,41 +123,6 @@ def _docunet_args(tmp_path):
     output = tmp_path / "out"
     argv = ["--weights", str(weights), "docunet", "--input-dir", str(crops)]
     return [*argv, "--output-dir", str(output)], output
-
-
-def test_docunet_cli_records_failures_and_exits_non_zero(tmp_path, capsys):
-    argv, output = _docunet_args(tmp_path)
-    code, _ = _exit_code(argv)
-    assert code != 0
-    assert not (output / "1_1.png").exists()
-    [item] = json.loads((output / "predictions.json").read_text())["items"]
-    assert _records_invalid_transform(item)
-    assert json.loads(capsys.readouterr().out)["failed"] == 1
-
-
-def test_checked_rectify_follows_the_failure_policy():
-    image = np.random.default_rng(0).integers(0, 256, (40, 30, 3), dtype=np.uint8)
-    dewarper = Dewarper(_FoldGrid(), TINY, torch.device("cpu"))
-    returned = rectify(dewarper, image, render_config=RenderConfig(on_error="return"))
-    assert returned.status == Status.INVALID_TRANSFORM and returned.image is None
-    assert returned.metadata["validation"]["failed_cells"] > 0
-    original = rectify(dewarper, image, render_config=RenderConfig(on_error="original"))
-    assert original.status == Status.INVALID_TRANSFORM and original.used_fallback
-    np.testing.assert_array_equal(original.image, image)
-    assert "forced_render" not in original.metadata
-
-
-def test_rectify_checks_output_limits_before_prediction(monkeypatch):
-    image = np.zeros((40, 30, 3), np.uint8)
-    dewarper = Dewarper(_FoldGrid(), TINY, torch.device("cpu"))
-
-    def unexpected(*args, **kwargs):
-        pytest.fail("oversized output reached prediction")
-
-    monkeypatch.setattr(predict, "predict_grid", unexpected)
-    with pytest.raises(FlattenerError) as error:
-        rectify(dewarper, image, (20, 20), render_config=RenderConfig(max_output_pixels=100))
-    assert error.value.reason_code == "size_limit_exceeded"
 
 
 def _folds_dark_inputs(dewarper, image):

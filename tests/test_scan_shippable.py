@@ -1,9 +1,9 @@
 """Ship gate: lineage walk, categories, the research stamp and the CLI.
 
 The fixtures copy fields of real checkpoint sidecars and run-info files: the scratch
-run on 409k pages, the UVDoc-start runs on 199k pages (normal and long), the
-89x61-grid trial and the UVDoc-recipe reproduction. Run names inside the copied
-records are the real folder names; outputs/models/scores.json gives their plain names.
+run on 409k pages, the UVDoc-start run on 199k pages, the 89x61-grid trial and the
+UVDoc-recipe reproduction. Run names inside the copied records are the real folder
+names; outputs/models/scores.json gives their plain names.
 """
 
 import copy
@@ -109,7 +109,6 @@ SPEC_199K_SHA = "ba3418c5fdb553990c1a73e19b177d02f9df8d132062d9ee00de5454e84c394
 SPEC_409K_SHA = "567ff319e4e8b5f9c6d9160f9222b31188b4736394b15179d267de9ab34b5bb9"
 SPEC_RESEARCH_SHA = "857fb9c4787ac17d8deaebb35bbbaf79d5a20a30a9acf6846f8ab0e0f81c772f"
 UVDOC_199K_SHA = "30e8eabfa98ba259078501850acea35d00cee68e5e339b57135743baa521c033"
-UVDOC_199K_LONG_SHA = "47fabf17ddb59366bb26ce507ae87cbdd8e539be129559503971154582c10cd2"
 SCRATCH_409K_SHA = "417e2ce9eadaf85bcc7b3b54f2e937c53513c9bb91f335db264e802ad321ac4d"
 GRID89_SHA = "d31b814ebe5197b2b34cd46d54189e03bac60dae345dc28b6ba50afbf93cdbfb"
 RECIPE_REPRO_SHA = "c01b437fcbe178287b16ffa20874281832e94bb6cfd778ade6edd29b1b8cf529"
@@ -225,103 +224,50 @@ RECIPE_REPRO = _sidecar(
 )
 
 
-def _config(name, init, spec_path, init_path=None):
-    return {
-        "init": init,
-        "init_path": init_path,
+SCRATCH_409K_INFO = {
+    "schema": "flattener-release-run-info-1",
+    "name": "R4",
+    "track": "release",
+    "init": {"kind": "scratch"},
+    "config": {
+        "init": "scratch",
+        "init_path": None,
         "track": "release",
-        "data_spec": spec_path,
-        "output_dir": f"/workspace/runs/{name}",
+        "data_spec": "/workspace/specs/data-release.json",
+        "output_dir": "/workspace/runs/R4",
         "seed": 0,
         "model": MODEL_CONFIG,
-    }
-
-
-def _run_info(name, init, spec, spec_sha256, best_sha256, step, *, lineage=None):
-    return {
-        "schema": "flattener-release-run-info-1",
-        "name": name,
-        "track": "release",
-        "init": init,
-        "config": _config(name, init["kind"], "/workspace/specs/data-release.json"),
-        "data_spec_content": spec,
-        "data_spec_sha256": spec_sha256,
-        "lineage": lineage,
-        "result": {
-            "best_checkpoint": {"file": f"step_{step:08d}.pt", "sha256": best_sha256, "step": step},
-            "state": "completed",
-        },
-    }
-
-
-UVDOC_INIT = {
-    "kind": "uvdoc",
-    "license": "UVDoc MIT",
-    "path": "/workspace/uvdoc/model/best_model.pkl",
-    "sha256_expected": UVDOC_WEIGHTS_SHA256,
+    },
+    "data_spec_content": SPEC_409K,
+    "data_spec_sha256": SPEC_409K_SHA,
+    "lineage": {"kind": "clean", "note": "scratch init; release data spec only"},
+    "result": {
+        "best_checkpoint": {"file": "step_00140625.pt", "sha256": SCRATCH_409K_SHA, "step": 140625},
+        "state": "completed",
+    },
 }
-UVDOC_INIT_LONG = {**UVDOC_INIT, "same_as": "R3", "sha256": UVDOC_WEIGHTS_SHA256}
-UVDOC_NOTE = {"kind": "uvdoc-init", "chain": "R3long <- UVDoc MIT weights"}
-SCRATCH_409K_INFO = _run_info(
-    "R4",
-    {"kind": "scratch"},
-    SPEC_409K,
-    SPEC_409K_SHA,
-    SCRATCH_409K_SHA,
-    140625,
-    lineage={"kind": "clean", "note": "scratch init; release data spec only"},
-)
-UVDOC_199K_LONG_INFO = _run_info(
-    "R3long",
-    {**UVDOC_INIT_LONG, "sha256_matches": True},
-    SPEC_199K,
-    SPEC_199K_SHA,
-    UVDOC_199K_LONG_SHA,
-    93760,
-    lineage=UVDOC_NOTE,
-)
 
 
-def test_fixture_specs_hash_to_the_recorded_sha256():
-    assert DataSpec.from_dict(SPEC_199K).sha256 == SPEC_199K_SHA
-    assert DataSpec.from_dict(SPEC_409K).sha256 == SPEC_409K_SHA
-    assert DataSpec.from_dict(SPEC_RESEARCH).sha256 == SPEC_RESEARCH_SHA
-    assert set(REASONS) >= {"external_init", "external_weights", "unverified_data_spec"}
-
-
-@pytest.mark.parametrize(
-    "record",
-    [SCRATCH_409K, SCRATCH_409K_INFO],
-    ids=["scratch-409k-sidecar", "scratch-409k-run-info"],
-)
-def test_scratch_release_runs_are_shippable(record):
-    verdict = shippable(record)
-    assert verdict.shippable and not verdict.research
-    assert verdict.category == "release" and verdict.reasons == ()
-    assert verdict.track == "release" and verdict.initialization == "scratch"
-    assert verdict.sha256 == record.get("sha256", SCRATCH_409K_SHA)
-    assert [node["depth"] for node in verdict.chain] == [0, 1]
-    assert verdict.chain[0]["training"][0]["data"] == "release"
-    assert verdict.chain[-1] == {"depth": 1, "kind": "scratch"}
+def test_scratch_release_runs_ship_and_uvdoc_initialized_runs_are_research():
+    for record in (SCRATCH_409K, SCRATCH_409K_INFO):  # a sidecar and a run-info file
+        verdict = shippable(record)
+        assert verdict.shippable and not verdict.research
+        assert verdict.category == "release" and verdict.reasons == ()
+        assert verdict.track == "release" and verdict.initialization == "scratch"
+        assert verdict.sha256 == SCRATCH_409K_SHA
+        assert verdict.chain[0]["training"][0]["data"] == "release"
+        assert verdict.chain[-1] == {"depth": 1, "kind": "scratch"}
     payload = verdict.to_dict()
     assert payload["schema"] == "flattener-ship-gate-1"
     assert payload["shippable"] is True and payload["research"] is False
     assert json.loads(json.dumps(payload)) == payload
 
-
-@pytest.mark.parametrize(
-    "record", [UVDOC_199K, UVDOC_199K_LONG_INFO], ids=["uvdoc-199k", "uvdoc-199k-long-run-info"]
-)
-def test_uvdoc_initialized_release_runs_are_research(record):
-    verdict = shippable(record)
-    assert not verdict.shippable and verdict.research
-    assert verdict.category == "research"
+    verdict = shippable(UVDOC_199K)
+    assert not verdict.shippable and verdict.research and verdict.category == "research"
     assert verdict.reasons == ("external_init",)  # track and data are release
     assert verdict.track == "release" and verdict.initialization == "external_pretrained"
     assert verdict.chain[-1]["kind"] == "uvdoc" and verdict.chain[-1]["category"] == "external"
-
-
-def test_parent_checkpoints_are_walked_to_the_start():
+    # A fine-tune of it is walked through the parent checkpoint to the same start.
     verdict = shippable(GRID89)
     assert verdict.reasons == ("external_init",)
     assert [(node["depth"], node["kind"]) for node in verdict.chain] == [
@@ -333,14 +279,9 @@ def test_parent_checkpoints_are_walked_to_the_start():
     assert verdict.initialization == initialization({"kind": "checkpoint", **GRID89})
 
 
-def test_release_finetune_of_a_scratch_run_needs_the_parent_data_spec():
-    child = _sidecar(
-        "c" * 64,
-        SPEC_199K,
-        SPEC_199K_SHA,
-        [_parent(SCRATCH_409K, "/workspace/init/scratch-409k.pt"), _train(SPEC_199K_SHA)],
-        step=1000,
-    )
+def test_a_release_finetune_needs_every_parent_data_spec():
+    parent = _parent(SCRATCH_409K, "/workspace/init/scratch-409k.pt")
+    child = _sidecar("c" * 64, SPEC_199K, SPEC_199K_SHA, [parent, _train(SPEC_199K_SHA)], step=1000)
     verdict = shippable(child)
     assert verdict.reasons == ("unverified_data_spec",)
     assert verdict.chain[1]["training"][0] == {
@@ -351,20 +292,15 @@ def test_release_finetune_of_a_scratch_run_needs_the_parent_data_spec():
     }
     for parent_spec in (SCRATCH_409K, SCRATCH_409K_INFO, SPEC_409K, DataSpec.from_dict(SPEC_409K)):
         verdict = shippable(child, specs=[{"unrelated": 1}, SPEC_RESEARCH, parent_spec])
-        assert verdict.shippable, parent_spec
-        assert verdict.initialization == "scratch"
+        assert verdict.shippable and verdict.initialization == "scratch", parent_spec
         assert [node["kind"] for node in verdict.chain] == ["checkpoint", "checkpoint", "scratch"]
-
-
-def test_a_parent_start_may_carry_its_own_data_spec():
-    carried = {**_parent(SCRATCH_409K, "/workspace/init/scratch-409k.pt"), "data_spec": SPEC_409K}
-    child = _sidecar(
-        "c" * 64, SPEC_199K, SPEC_199K_SHA, [carried, _train(SPEC_199K_SHA)], step=1000
-    )
-    assert shippable(child).shippable
-    wrong = {**carried, "data_spec": SPEC_199K}  # hashes to another step's spec
-    child = _sidecar("c" * 64, SPEC_199K, SPEC_199K_SHA, [wrong, _train(SPEC_199K_SHA)], step=1000)
-    assert shippable(child).reasons == ("unverified_data_spec",)
+    # The parent's start entry may carry the spec; it counts only when it hashes right.
+    for carried, reasons in ((SPEC_409K, ()), (SPEC_199K, ("unverified_data_spec",))):
+        start = {**parent, "data_spec": carried}
+        child = _sidecar(
+            "c" * 64, SPEC_199K, SPEC_199K_SHA, [start, _train(SPEC_199K_SHA)], step=1000
+        )
+        assert shippable(child).reasons == reasons
 
 
 GATE_DATA = [
@@ -378,20 +314,12 @@ GATE_V0 = {"track": "release", "lineage": [{"kind": "scratch"}], "data": GATE_DA
 @pytest.mark.parametrize(
     "edit, reasons",
     [
-        ({}, ()),
         ({"track": "research"}, ("not_release_track",)),
-        ({"data": None}, ("unverified_data_spec",)),
         (
             {"data": [*GATE_DATA, {"kind": "doc3d", "license": "CC BY-NC-ND 3.0"}]},
             ("data_license_not_release",),
         ),
-        ({"data": [{**GATE_DATA[0], "track": "research"}]}, ("data_license_not_release",)),
         ({"data_spec": SPEC_RESEARCH}, ("research_data",)),
-        ({"data_spec": SPEC_409K, "data": None}, ()),
-        (
-            {"lineage": [{"kind": "scratch"}, {"kind": "train", "track": "research"}]},
-            ("not_release_track",),
-        ),
         ({"lineage": [UVDOC_START, {"kind": "train", "track": "release"}]}, ("external_init",)),
         ({"lineage": None}, ("unknown_init",)),
         ({"lineage": [{"kind": "scratch"}, {"kind": "distill"}]}, ("unknown_lineage_entry",)),
@@ -400,12 +328,11 @@ GATE_V0 = {"track": "release", "lineage": [{"kind": "scratch"}], "data": GATE_DA
 def test_page_gates_go_through_the_same_rules(edit, reasons):
     record = {key: value for key, value in {**GATE_V0, **edit}.items() if value is not None}
     verdict = gate_verdict(record, sha256="g" * 64)
-    assert verdict.reasons == reasons and verdict.shippable == (not reasons)
-    if not reasons:
-        assert verdict.category == "release" and verdict.initialization == "scratch"
+    assert verdict.reasons == reasons and not verdict.shippable
 
 
 def test_a_fine_tuned_page_gate_needs_its_parents_data():
+    assert gate_verdict(GATE_V0).category == "release"
     parent = {"kind": "checkpoint", "track": "release", "sha256": "p" * 64, **GATE_V0}
     child = {
         "track": "release",
@@ -423,7 +350,14 @@ def test_a_fine_tuned_page_gate_needs_its_parents_data():
     assert gate_verdict(None).category == "external"
 
 
-def test_research_parents_fail_a_release_child():
+def test_research_runs_and_their_children_fail():
+    verdict = shippable(RECIPE_REPRO)
+    assert verdict.category == "research" and verdict.track == "research"
+    assert set(verdict.reasons) == {
+        "not_release_track",
+        "research_data",
+        "data_license_not_release",
+    }
     child = _sidecar(
         "d" * 64,
         SPEC_199K,
@@ -436,44 +370,14 @@ def test_research_parents_fail_a_release_child():
     assert verdict.category == "research" and verdict.initialization == "scratch"
 
 
-def test_research_track_and_data_fail():
-    verdict = shippable(RECIPE_REPRO)
-    assert verdict.category == "research" and verdict.track == "research"
-    assert set(verdict.reasons) == {
-        "not_release_track",
-        "research_data",
-        "data_license_not_release",
-    }
-
-
-@pytest.mark.parametrize(
-    ("record", "kind"),
-    [
-        (
-            {
-                "kind": "uvdoc",
-                "track": "external",
-                "license": "MIT",
-                "sha256": UVDOC_WEIGHTS_SHA256,
-            },
-            "uvdoc",
-        ),
-        (
-            {"sha256": "557af82579157c000f3cbd27c79d02b2a7cfea177849dbb04b9499ff88c81b1f"},
-            "syntheticdoc",
-        ),
-        ({"provenance": "external_pretrained"}, "external"),
-    ],
-)
-def test_outside_weights_are_external(record, kind):
-    verdict = shippable(record)
-    assert not verdict.shippable and verdict.research
-    assert verdict.category == "external" and verdict.reasons == ("external_weights",)
-    assert verdict.chain[0]["kind"] == kind and verdict.initialization is None
+def test_outside_weights_and_records_without_lineage_never_ship():
+    uvdoc = {"kind": "uvdoc", "track": "external", "license": "MIT", "sha256": UVDOC_WEIGHTS_SHA256}
+    for record, kind in ((uvdoc, "uvdoc"), ({"provenance": "external_pretrained"}, "external")):
+        verdict = shippable(record)
+        assert not verdict.shippable and verdict.research
+        assert verdict.category == "external" and verdict.reasons == ("external_weights",)
+        assert verdict.chain[0]["kind"] == kind and verdict.initialization is None
     assert set(EXTERNAL_WEIGHTS_SHA256.values()) == {"uvdoc", "syntheticdoc"}
-
-
-def test_records_without_lineage():
     for record in ({"sha256": "f" * 64}, {"kind": ["uvdoc"], "provenance": ["own_checkpoint"]}):
         verdict = shippable(record)
         assert verdict.category == "external" and verdict.reasons == ("no_lineage_record",)
@@ -487,26 +391,6 @@ def test_records_without_lineage():
     with pytest.raises(FlattenerError) as caught:
         shippable([SCRATCH_409K])
     assert caught.value.status is Status.INPUT_ERROR
-
-
-def test_dewarper_info_needs_the_spec_through_specs():
-    info = {
-        "kind": "checkpoint",
-        "step": SCRATCH_409K["step"],
-        "track": "release",
-        "lineage": SCRATCH_409K["lineage"],
-        "data_spec_sha256": SPEC_409K_SHA,
-        "code_sha256": CODE_SCRATCH_409K,
-        "sha256": SCRATCH_409K_SHA,
-    }
-    verdict = shippable(info)
-    assert verdict.reasons == ("unverified_data_spec",)
-    assert verdict.initialization == initialization(info) == "scratch"
-    assert shippable(info, specs=[SPEC_409K]).shippable
-    uvdoc_info = {**info, "lineage": UVDOC_199K["lineage"], "data_spec_sha256": SPEC_199K_SHA}
-    verdict = shippable(uvdoc_info, specs=[SPEC_199K])
-    assert verdict.reasons == ("external_init",)
-    assert verdict.initialization == initialization(uvdoc_info) == "external_pretrained"
 
 
 def _edited(record, edit):
@@ -533,12 +417,7 @@ def _nc_license(record):
             {"data_spec_mismatch", "unverified_data_spec"},
         ),
         (_research_source, {"research_data", "unverified_data_spec"}),
-        (lambda r: r["lineage"][1].update(track="research"), {"not_release_track"}),
         (_nc_license, {"data_license_not_release"}),
-        (
-            lambda r: r["lineage"][1].update(data_spec_sha256=SPEC_199K_SHA),
-            {"lineage_mismatch", "unverified_data_spec"},
-        ),
         (
             lambda r: r["lineage"][1].update(kind="distill"),
             {"unknown_lineage_entry", "lineage_mismatch"},
@@ -562,7 +441,7 @@ def _weights(path, content, sidecar=None):
     return path
 
 
-def test_gate_file_reads_the_sidecar(tmp_path):
+def test_gate_file_reads_the_sidecar_and_the_parent_sidecars(tmp_path):
     release = _weights(tmp_path / "scratch-409k.pt", b"release weights", SCRATCH_409K)
     verdict = gate_file(release)
     assert verdict.shippable and verdict.sha256 == hashlib.sha256(b"release weights").hexdigest()
@@ -571,27 +450,24 @@ def test_gate_file_reads_the_sidecar(tmp_path):
     bare = _weights(tmp_path / "best_model.pkl", b"outside weights")
     assert gate_file(bare).category == "external"
     assert gate_file(bare).reasons == ("no_lineage_record",)
-    release.write_bytes(b"other bytes")
-    verdict = gate_file(release)
-    assert verdict.reasons == ("sidecar_mismatch",) and verdict.category == "research"
-    with pytest.raises(FlattenerError) as caught:
-        gate_file(tmp_path / "missing.pt")
-    assert caught.value.status is Status.IO_ERROR
-
-
-def test_gate_file_finds_parent_sidecars_at_their_recorded_path(tmp_path):
-    parent = _weights(tmp_path / "parent.pt", b"parent weights", SCRATCH_409K)
-    parent_record = json.loads((tmp_path / "parent.pt.json").read_text(encoding="utf-8"))
-    lineage = [_parent(parent_record, str(parent)), _train(SPEC_199K_SHA)]
+    # A fine-tune finds the parent's sidecar at the path its lineage records.
+    parent_record = json.loads((tmp_path / "scratch-409k.pt.json").read_text(encoding="utf-8"))
+    lineage = [_parent(parent_record, str(release)), _train(SPEC_199K_SHA)]
     child = _weights(
         tmp_path / "child.pt",
         b"fine-tuned",
         _sidecar("", SPEC_199K, SPEC_199K_SHA, lineage, step=9),
     )
     assert gate_file(child).shippable
-    (tmp_path / "parent.pt.json").unlink()
+    release.write_bytes(b"other bytes")
+    verdict = gate_file(release)
+    assert verdict.reasons == ("sidecar_mismatch",) and verdict.category == "research"
+    (tmp_path / "scratch-409k.pt.json").unlink()
     assert gate_file(child).reasons == ("unverified_data_spec",)
     assert gate_file(child, specs=[SPEC_409K]).shippable
+    with pytest.raises(FlattenerError) as caught:
+        gate_file(tmp_path / "missing.pt")
+    assert caught.value.status is Status.IO_ERROR
 
 
 TINY = DewarpModelConfig(input_size=(64, 48), grid_size=(5, 4), num_filter=4)

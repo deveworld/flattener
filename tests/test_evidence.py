@@ -35,6 +35,14 @@ def test_only_trained_own_checkpoints_on_docunet_count_as_new_model_real_photo()
     assert calibration.CALIBRATION_EVIDENCE == external
     with pytest.raises(ValueError):
         evidence("docunet")
+    # Earlier models and training losses are not new-model results.
+    previous = evidence("docunet_standard", {"provenance": "own_previous_model"})
+    assert previous["evidence_kind"] == "docunet_standard"
+    assert previous["model_provenance"] == "own_previous_model"
+    assert not previous["new_model_real_photo"] and previous["training"] is None
+    trained = evidence("training_loss", OWN)
+    assert trained["evidence_kind"] == "training_loss" and not trained["new_model_real_photo"]
+    assert evidence("training_loss", {**OWN, "step": 5})["evidence_kind"] == "smoke_training"
 
 
 def test_initialization_follows_the_lineage_to_its_start():
@@ -54,16 +62,6 @@ def test_initialization_follows_the_lineage_to_its_start():
     assert initialization(UVDOC) is None and initialization(None) is None
 
 
-def test_earlier_models_and_training_losses_are_not_new_model_results():
-    previous = evidence("docunet_standard", {"provenance": "own_previous_model"})
-    assert previous["evidence_kind"] == "docunet_standard"
-    assert previous["model_provenance"] == "own_previous_model"
-    assert not previous["new_model_real_photo"] and previous["training"] is None
-    trained = evidence("training_loss", OWN)
-    assert trained["evidence_kind"] == "training_loss" and not trained["new_model_real_photo"]
-    assert evidence("training_loss", {**OWN, "step": 5})["evidence_kind"] == "smoke_training"
-
-
 def _record(predictions, model, inputs):
     items = [
         {"output": f"{k}_{m}.png", "action": "written", "status": "success"}
@@ -74,21 +72,18 @@ def _record(predictions, model, inputs):
     (predictions / "predictions.json").write_text(json.dumps({**record, "items": items}))
 
 
-@pytest.mark.parametrize(
-    ("model", "kind"),
-    [(OWN, "new_model_real_photo"), ({**OWN, "step": 50}, "smoke_training")],
-)
-def test_docunet_reports_carry_the_evidence_of_their_predictions(tiny_docunet, model, kind):
+def test_docunet_reports_carry_the_evidence_of_their_predictions(tiny_docunet):
     scans, predictions = tiny_docunet
-    _record(predictions, model, "docunet_crop")
-    report = docunet.evaluate_docunet(
-        predictions,
-        pattern="{k}_{m}.png",
-        conventions=["128_excl64"],
-        build=None,
-        references_dir=scans,
-        verify_references=False,
-        workers=1,
-    )
-    assert report["evidence"]["evidence_kind"] == kind
-    assert report["evidence"]["measurement"] == "docunet_standard"
+    for model, kind in ((OWN, "new_model_real_photo"), ({**OWN, "step": 50}, "smoke_training")):
+        _record(predictions, model, "docunet_crop")
+        report = docunet.evaluate_docunet(
+            predictions,
+            pattern="{k}_{m}.png",
+            conventions=["128_excl64"],
+            build=None,
+            references_dir=scans,
+            verify_references=False,
+            workers=1,
+        )
+        assert report["evidence"]["evidence_kind"] == kind
+        assert report["evidence"]["measurement"] == "docunet_standard"
