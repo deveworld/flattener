@@ -15,9 +15,9 @@ A code outside the registry keeps the status it came with; with the
 
 ``Outcome`` names the image a result holds: ``rectified``, ``rectified_with_warnings``,
 ``perspective`` (page outline flattened, curl kept), ``original_returned``, or
-``failed`` when there is no image (the input could not be read). ``exit_code`` maps
-outcomes to the CLI exit status: 0 when every page was rectified, 1 on any fallback or
-failure; 2 is a usage error.
+``failed`` when there is no image (the input could not be read). The CLI exit statuses
+are ``EXIT_SCANNED``, ``EXIT_FALLBACK`` and ``EXIT_USAGE`` (see ``flattener.scan``'s
+``__main__``).
 
 ``ScanPlan`` holds what a render needs: the source record, the geometry (a grid of
 flattener values in source coordinates, or a homography), the output size and the
@@ -479,12 +479,6 @@ def decide_outcome(kind: str | None, reasons: Iterable[Reason] = ()) -> Outcome:
     if any(item.severity != Severity.INFO for item in reasons):
         return Outcome.RECTIFIED_WITH_WARNINGS
     return Outcome.RECTIFIED
-
-
-def exit_code(outcomes: Iterable[Outcome | str]) -> int:
-    """``EXIT_SCANNED`` when every page was rectified, else ``EXIT_FALLBACK``."""
-    scanned = all(Outcome(outcome) in SCANNED_OUTCOMES for outcome in outcomes)
-    return EXIT_SCANNED if scanned else EXIT_FALLBACK
 
 
 def _pair(value: Any, name: str) -> tuple[int, int]:

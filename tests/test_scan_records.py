@@ -53,7 +53,7 @@ def make_plan(**changes):
     return rec.ScanPlan(**fields)
 
 
-def test_outcomes_and_exit_codes():
+def test_outcomes_and_exit_statuses():
     info = rec.reason("page_fills_frame")
     warning = rec.reason("possible_occlusion", solidity=0.8)
     assert rec.decide_outcome("dewarp", [info]) == rec.Outcome.RECTIFIED
@@ -63,11 +63,7 @@ def test_outcomes_and_exit_codes():
     assert rec.decide_outcome(None) == rec.Outcome.FAILED
     with pytest.raises(ValueError):
         rec.decide_outcome("crop")
-    assert rec.exit_code(["rectified", rec.Outcome.RECTIFIED_WITH_WARNINGS]) == 0
-    assert rec.exit_code(["rectified", "perspective"]) == rec.EXIT_FALLBACK == 1
-    assert rec.exit_code(["original_returned"]) == 1
-    assert rec.exit_code(["failed"]) == 1
-    assert rec.EXIT_USAGE == 2
+    assert (rec.EXIT_SCANNED, rec.EXIT_FALLBACK, rec.EXIT_USAGE) == (0, 1, 2)
 
 
 def test_plan_json_round_trip_is_exact():
