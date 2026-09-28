@@ -716,6 +716,14 @@ def test_the_perspective_fallback_follows_the_latest_quarter_turn(angle):
     np.testing.assert_allclose(top_left, page.corners()[0], atol=4.0)
 
 
+def test_skip_dewarp_without_a_gate_flattens_the_outline_corners():
+    scanner, _ = _scanner(gate=False)
+    result = scanner.scan(ramp_scene(SIZE, TRUE), overrides=ScanOverrides(skip_dewarp=True))
+    assert result.outcome == Outcome.PERSPECTIVE and "unverified_region" in _codes(result)
+    np.testing.assert_allclose(result.plan.region["quad"], TRUE.corners(), atol=0.5)
+    assert result.image.shape[:2] != SIZE
+
+
 def test_border_and_inset_apply_to_perspective_plans():
     scanner, _ = _scanner()
     image = ramp_scene(SIZE, TRUE)

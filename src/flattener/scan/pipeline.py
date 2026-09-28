@@ -1860,9 +1860,10 @@ class Scanner:
         options: ScanOptions,
         overrides: ScanOverrides,
     ) -> PlannedScan:
-        """A requested homography-only plan from the quad, the region or the page box. The
-        quarter turn comes from the overrides or the quad, else from OrientNet as on the
-        dewarp path (``orientation_uncertain`` when it is unsure or missing)."""
+        """A requested homography-only plan from the quad, the region, the gate's page box or,
+        without a gate, the corners of the whole-photo outline. The quarter turn comes from
+        the overrides or the quad, else from OrientNet as on the dewarp path
+        (``orientation_uncertain`` when it is unsure or missing)."""
         src, clock = planned.source, planned.clock
         with clock.stage("orient"):
             orientation = self._orient_pre(src, memo, located, options, overrides)
@@ -1876,6 +1877,11 @@ class Scanner:
             elif located.mask is not None and located.method != "fills_frame":
                 points = locating.cell_corners(located.mask, src.info.size)
                 quad = rect_quad(points, located.angle_deg)
+            elif located.mask is None and located.pass0 is not None:
+                grid = np.asarray(located.pass0)
+                corners = np.array([grid[0, 0], grid[0, -1], grid[-1, -1], grid[-1, 0]])
+                height, width = src.info.size
+                quad = (corners + 1.0) / 2.0 * np.array([width, height])
             else:
                 height, width = src.info.size
                 quad = np.array([[0, 0], [width, 0], [width, height], [0, height]], float)
