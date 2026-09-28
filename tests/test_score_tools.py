@@ -129,6 +129,46 @@ def test_ocr_reports_have_their_own_names_and_match_engine_and_images(tmp_path):
     assert not tool.ocr_report_matches(path, images, engine, "truncate")
 
 
+def test_a_record_left_by_other_weights_is_refused(tmp_path, monkeypatch):
+    tool = docunet_tool
+    weights = tmp_path / "model.pt"
+    weights.write_bytes(b"new weights")
+    args = tool.build_parser().parse_args([str(weights), "demo", "--stress", "rot90"])
+    images = tool.prediction_dir(tmp_path, "demo", "round")
+    stress_dir = tmp_path / "stress" / "demo"
+    for folder in (images, stress_dir, tmp_path / "scores" / "stress"):
+        folder.mkdir(parents=True)
+    record = {
+        "model": {"sha256": "old"},
+        "complete": True,
+        "quantize": "round",
+        "counts": {"items": 130},
+        "items": [],
+    }
+    summary = {"model": {"sha256": "old"}, "config": {"variants": ["rot90"]}, "variants": {}}
+    (images / "predictions.json").write_text(json.dumps(record))
+    (stress_dir / "stress.json").write_text(json.dumps(summary))
+    monkeypatch.setattr(tool, "run", lambda command, env, ok=(0,): 1)  # a crash
+    with pytest.raises(SystemExit, match="predictions.json holds predictions of other weights"):
+        tool.predict(args, tmp_path, {})
+    with pytest.raises(SystemExit, match="stress.json holds predictions of other weights"):
+        tool.stress(args, tmp_path, {}, tmp_path / "scores")
+    record["model"]["sha256"] = summary["model"]["sha256"] = tool.sha256_file(weights)
+    (images / "predictions.json").write_text(json.dumps(record))
+    (stress_dir / "stress.json").write_text(json.dumps(summary))
+    assert tool.predict(args, tmp_path, {})[0] == record
+    assert tool.stress(args, tmp_path, {}, tmp_path / "scores") == summary
+    summary["variants"] = {"rot90": {"status": "scored"}}
+    (stress_dir / "stress.json").write_text(json.dumps(summary))
+    (stress_dir / "rot90").mkdir()
+    (stress_dir / "rot90" / "predictions.json").write_text(json.dumps({"model": {"sha256": "o"}}))
+    with pytest.raises(SystemExit, match="rot90/predictions.json holds predictions of other"):
+        tool.stress(args, tmp_path, {}, tmp_path / "scores")
+    args.stress = ["rot90", "small_page"]
+    with pytest.raises(SystemExit, match="stress.json holds other variants"):
+        tool.stress(args, tmp_path, {}, tmp_path / "scores")
+
+
 # DIR300
 
 
@@ -162,14 +202,22 @@ def test_a_metric_report_matches_only_its_own_images_and_settings(tmp_path):
 
 def test_photos_left_unrectified_stop_the_run_before_scoring(tmp_path, monkeypatch):
     tool = dir300_tool
-    args = tool.build_parser().parse_args([str(tmp_path / "model.pt"), "demo"])
+    weights = tmp_path / "model.pt"
+    weights.write_bytes(b"weights")
+    args = tool.build_parser().parse_args([str(weights), "demo"])
     images = tool.prediction_dir(tmp_path, "demo", "round")
     items = [{"output": f"{k}.png", "action": "written"} for k in tool.dir300.DOCUMENTS]
     items[200] = {"output": "201.png", "action": "not_written", "reason": "size_limit_exceeded"}
 
     def fake_run(command, env, ok=(0,)):
         images.mkdir(parents=True, exist_ok=True)
-        record = {"complete": True, "quantize": "round", "counts": {"items": 300}, "items": items}
+        record = {
+            "model": {"sha256": tool.local.sha256_file(weights)},
+            "complete": True,
+            "quantize": "round",
+            "counts": {"items": 300},
+            "items": items,
+        }
         (images / "predictions.json").write_text(json.dumps(record))
         return 1
 
@@ -179,6 +227,29 @@ def test_photos_left_unrectified_stop_the_run_before_scoring(tmp_path, monkeypat
     items[200] = {"output": "201.png", "action": "written"}
     record, _ = tool.predict(args, tmp_path, {})
     assert record["counts"]["items"] == 300
+
+
+def test_a_dir300_record_left_by_other_weights_is_refused(tmp_path, monkeypatch):
+    tool = dir300_tool
+    weights = tmp_path / "model.pt"
+    weights.write_bytes(b"new weights")
+    args = tool.build_parser().parse_args([str(weights), "demo"])
+    images = tool.prediction_dir(tmp_path, "demo", "round")
+    images.mkdir(parents=True)
+    record = {
+        "model": {"sha256": "old"},
+        "complete": True,
+        "quantize": "round",
+        "counts": {"items": 300},
+        "items": [],
+    }
+    (images / "predictions.json").write_text(json.dumps(record))
+    monkeypatch.setattr(tool.local, "run", lambda command, env, ok=(0,): 1)  # a crash
+    with pytest.raises(SystemExit, match="predictions.json holds predictions of other weights"):
+        tool.predict(args, tmp_path, {})
+    record["model"]["sha256"] = tool.local.sha256_file(weights)
+    (images / "predictions.json").write_text(json.dumps(record))
+    assert tool.predict(args, tmp_path, {})[0] == record
 
 
 def test_summary_lines_show_an_empty_reference_cer_as_na():

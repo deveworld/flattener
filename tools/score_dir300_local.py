@@ -10,7 +10,8 @@ Steps:
      outputs/benchmarks/dir300/dist300 at each photo's own size with ``--force-render``
      and ``--quantize Q`` into CACHE/dir300/pred/RUN (Q=round, the default) or
      CACHE/dir300/pred-Q/RUN. Images that predictions.json lists for the same weights,
-     quantization and inputs are kept.
+     quantization and inputs are kept. A predictions.json of other weights stops the
+     script.
   2. ``flattener.benchmark dir300`` scores them (MS-SSIM, LD, AD, plain means over the
      300 pairs) into CACHE/scores/RUN/dir300.json, or dir300-Q.json for
      Q=truncate. An existing report is kept when its prediction hashes, quantization and
@@ -214,6 +215,7 @@ def predict(args, cache: Path, env: dict[str, str]) -> tuple[dict, float]:
     local.run(command, env, ok=(0, 1))  # 1: some map failed its checks and was force-rendered
     wall = time.perf_counter() - started
     record = json.loads((images / "predictions.json").read_text(encoding="utf-8"))
+    local.check_model(record, local.sha256_file(args.checkpoint), images / "predictions.json")
     if not record.get("complete") or record["counts"]["items"] != ITEMS:
         raise SystemExit(f"error: {images}/predictions.json is incomplete")
     if record.get("quantize") != args.quantize:

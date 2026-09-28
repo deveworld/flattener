@@ -19,7 +19,7 @@ Steps:
      preset name or the values, see ``flattener.dewarp.predict.inset_label``), with
      ``-rerunR`` and then ``-deskew`` appended for crop passes. Images that
      predictions.json lists for the same weights, quantization, inset, rerun settings
-     and inputs are kept.
+     and inputs are kept. A predictions.json of other weights stops the script.
   2. ``flattener.benchmark docunet`` scores them with all three conventions and
      ``--ref-resize R`` into CACHE/scores/RUN/docunet-R.json, or
      docunet-R-truncate.json for Q=truncate (default: docunet-once.json), with
@@ -31,7 +31,8 @@ Steps:
      ``flattener.benchmark docunet-stress`` predicts and scores the
      stress variants (default: full_frame, rot90, rot270, small_page) into
      CACHE/stress/RUN and copies stress.json and each variant's docunet.json and
-     predictions.json to CACHE/scores/RUN/stress/.
+     predictions.json to CACHE/scores/RUN/stress/. A stress.json of other weights or
+     variants, or a variant's predictions.json of other weights, stops the script.
   4. With ``--ocr``: ``flattener.benchmark ocr`` (DocTr protocol, Setting 1 and 2) into
      CACHE/scores/RUN/ocr-doctr.json, or ocr-doctr-Q.json for Q=truncate
      (``-inset-L``, ``-rerunR`` and ``-deskew`` before .json as set). An existing
@@ -252,6 +253,13 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def check_model(record: dict, weights_sha256: str, path: Path) -> None:
+    """Stop when the record at ``path`` names weights other than ``weights_sha256``. A
+    child that crashed also exits with status 1 and leaves an earlier run's record."""
+    if (record.get("model") or {}).get("sha256") != weights_sha256:
+        raise SystemExit(f"error: {path} holds predictions of other weights; see the output above")
+
+
 def _suffix(quantize: str, inset=None, rerun: int = 0, deskew: bool = False) -> str:
     """-Q unless Q is round, then -inset-L for an inset (``inset_label``), -rerunR for
     crop passes and -deskew with deskew."""
@@ -416,6 +424,7 @@ def predict(args, cache: Path, env: dict[str, str]) -> tuple[dict, float]:
     run(command, env, ok=(0, 1))  # 1: some map failed its checks and was force-rendered
     wall = time.perf_counter() - started
     record = json.loads((images / "predictions.json").read_text(encoding="utf-8"))
+    check_model(record, sha256_file(args.checkpoint), images / "predictions.json")
     if not record.get("complete") or record["counts"]["items"] != 130:
         raise SystemExit(f"error: {images}/predictions.json is incomplete")
     if record.get("quantize", DEFAULT_QUANTIZE) != args.quantize:
@@ -463,6 +472,16 @@ def stress(args, cache: Path, env: dict[str, str], out_dir: Path) -> dict:
         command.append("--quiet")
     run(command, env, ok=(0, 1))  # 1: a check failed (still scored) or a variant was not
     summary = json.loads((stress_dir / "stress.json").read_text(encoding="utf-8"))
+    digest = sha256_file(args.checkpoint)
+    check_model(summary, digest, stress_dir / "stress.json")
+    if summary.get("config", {}).get("variants") != list(variants):
+        raise SystemExit(
+            f"error: {stress_dir}/stress.json holds other variants; see the output above"
+        )
+    for variant in summary["variants"]:
+        record = stress_dir / variant / "predictions.json"
+        if record.is_file():
+            check_model(json.loads(record.read_text(encoding="utf-8")), digest, record)
     target = out_dir / "stress"
     for variant in summary["variants"]:
         for name in ("docunet.json", "predictions.json"):
