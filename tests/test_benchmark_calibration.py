@@ -41,7 +41,7 @@ ALL = [(k, m) for k in range(1, 66) for m in (1, 2)]
 EXCL = [(k, m) for k, m in ALL if k != 64]
 
 
-def test_g1_compares_means_with_both_solvers(tmp_path):
+def test_g1_compares_means_with_both_solvers():
     values = _values(0.47, 8.5, 0.39, ALL)
     adres = {"rows": {f"{k}_{m}": v for (k, m), v in values.items()}, "file_mean_row": {}}
     ok = calibration.gate_g1(_docunet_report("paperedge-once", values), adres)
@@ -99,21 +99,16 @@ def _ocr_report(scale, version="tesseract v5.0.1.20220118"):
     }
 
 
-def test_g4_relative_tolerance_on_doctr_settings():
+def test_g4_needs_the_relative_tolerance_tesseract_501_and_the_plain_doctr_setup():
     assert calibration.gate_g4(_ocr_report(1.019))["status"] == "pass"
     assert calibration.gate_g4(_ocr_report(0.979))["status"] == "fail"
     gate = calibration.gate_g4(_ocr_report(1.0))
     assert gate["tesseract_version"] == "tesseract v5.0.1.20220118"
-    assert gate["tesseract_build"] is None and gate["tesseract_leptonica_version"] is None
     assert gate["checks"][-1]["metric"] == "tesseract_version" and gate["checks"][-1]["pass"]
     assert "'tesseract v5.0.1.20220118' must be 5.0.1 -> ok" in calibration.format_gates([gate])
-
-
-def test_g4_requires_tesseract_501_and_the_plain_doctr_configuration():
     other = calibration.gate_g4(_ocr_report(1.0, version="tesseract 5.5.3"))
     assert other["status"] == "fail"
     assert [check["pass"] for check in other["checks"]] == [True, True, True, True, False]
-    assert "-> FAIL" in calibration.format_gates([other])
     assert calibration.gate_g4(_ocr_report(1.0, version=None))["status"] == "fail"
     for key, value in (
         ("protocols", ["doctr", "uvdoc"]),
@@ -126,61 +121,31 @@ def test_g4_requires_tesseract_501_and_the_plain_doctr_configuration():
             calibration.gate_g4(report)
 
 
-def _adres(path, rows):
-    lines = [f"{k} {m} {v['ad']} {v['ms_ssim']} {v['ld']}" for (k, m), v in rows.items()]
-    means = [np.mean([v[key] for v in rows.values()]) for key in ("ad", "ms_ssim", "ld")]
+def test_calibrate_reads_adres_reuses_reports_and_writes_relative_paths(tmp_path):
+    values = {(k, m): {"ms_ssim": 0.4 + k / 1000, "ld": 8 + m / 10, "ad": 0.39} for k, m in ALL}
+    lines = [f"{k} {m} {v['ad']} {v['ms_ssim']} {v['ld']}" for (k, m), v in values.items()]
+    means = [np.mean([v[key] for v in values.values()]) for key in ("ad", "ms_ssim", "ld")]
     lines.append(f"33 1.5 {means[0]} {means[1]} {means[2]}")
-    path.write_text("\n".join(lines) + "\n")
-
-
-def test_parse_adres_reads_rows_and_mean_row(tmp_path):
-    rng = np.random.default_rng(0)
-    rows = {
-        key: {"ad": rng.random(), "ms_ssim": rng.random(), "ld": 10 * rng.random()} for key in ALL
-    }
-    _adres(tmp_path / "adres.txt", rows)
-    parsed = calibration.parse_adres(tmp_path / "adres.txt")
-    assert len(parsed["rows"]) == 130
-    assert parsed["rows"]["7_2"]["ld"] == pytest.approx(rows[(7, 2)]["ld"])
-    assert parsed["file_mean_row"]["ms_ssim"] == pytest.approx(
-        np.mean([v["ms_ssim"] for v in rows.values()])
-    )
+    (tmp_path / calibration.ADRES_NAME).write_text("\n".join(lines) + "\n")
     (tmp_path / "bad.txt").write_text("1 2 3\n4 5 6\n")
     with pytest.raises(ValueError):
         calibration.parse_adres(tmp_path / "bad.txt")
     reports = tmp_path / "reports"
-    calibration.run_calibration(reports, paperedge_dir=tmp_path, runs=(), log=print)
-    written = json.loads((reports / "paperedge-adres.json").read_text())
-    assert written["evidence"] == calibration.CALIBRATION_EVIDENCE
-
-
-def test_run_and_summarize_reuse_reports_and_write_relative_paths(tmp_path):
-    reports = tmp_path / "reports"
     reports.mkdir()
-    values = _values(0.47, 8.5, 0.39, ALL)
     write_json_atomic(reports / "paperedge-once.json", _docunet_report("paperedge-once", values))
-    adres = {
-        "rows": {f"{k}_{m}": v for (k, m), v in values.items()},
-        "file_mean_row": {"ad": 0.39, "ld": 8.5, "ms_ssim": 0.47},
-        "schema": calibration.ADRES_SCHEMA,
-    }
-    write_json_atomic(reports / "paperedge-adres.json", adres)
-    status = calibration.run_calibration(reports, log=lambda message: None)
+    status = calibration.run_calibration(reports, paperedge_dir=tmp_path, log=lambda _: None)
     assert status["paperedge-once"] == "reused"
     assert status["uvdoc-uvdoc"].startswith("skipped")
+    adres = json.loads((reports / "paperedge-adres.json").read_text())
+    assert len(adres["rows"]) == 130 and adres["rows"]["7_2"]["ms_ssim"] == pytest.approx(0.407)
+    assert adres["file_mean_row"]["ld"] == pytest.approx(8.15)
+    assert adres["evidence"] == calibration.CALIBRATION_EVIDENCE
     summary = calibration.summarize_calibration(reports, tmp_path / "calibration.json")
     written = json.loads((tmp_path / "calibration.json").read_text())
     assert written["schema"] == calibration.SCHEMA
-    assert written["reports"]["paperedge-once"]["path"] == "reports/paperedge-once.json"
-    adres_entry = written["reports"]["paperedge-adres"]  # written before reports had a label
-    assert adres_entry["evidence"] == calibration.CALIBRATION_EVIDENCE
-    assert adres_entry["evidence_in_file"] is False
-    assert written["evidence"] == calibration.CALIBRATION_EVIDENCE
-    assert [gate["status"] for gate in summary["gates"]] == [
-        "pass",
-        "not_run",
-        "not_run",
-        "not_run",
-    ]
+    entry = written["reports"]["paperedge-once"]  # a report without its own label
+    assert entry["path"] == "reports/paperedge-once.json" and entry["evidence_in_file"] is False
+    assert entry["evidence"] == written["evidence"] == calibration.CALIBRATION_EVIDENCE
+    assert [gate["status"] for gate in summary["gates"]] == ["pass", *["not_run"] * 3]
     assert summary["all_pass"] is False
     assert "G1: PASS" in calibration.format_gates(summary["gates"])

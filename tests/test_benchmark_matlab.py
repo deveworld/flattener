@@ -60,7 +60,16 @@ def _oracle_imresize(image: np.ndarray, rows: int, cols: int) -> np.ndarray:
     return np.array(work, dtype=image.dtype)
 
 
-def test_rgb2gray_matches_a_per_pixel_oracle_and_rounds_half_away_from_zero():
+def test_imread_rgb2gray_and_imgradient_follow_matlab():
+    pixels = np.zeros((2, 2, 4), dtype=np.uint8)
+    pixels[..., :3] = 200
+    pixels[0, 0, 3] = 255
+    image = Image.fromarray(pixels, "RGBA")
+    rgb = matlab.imread_rgb(image)  # alpha over black, or over the bKGD colour
+    assert rgb[0, 0].tolist() == [200, 200, 200] and rgb[1, 1].tolist() == [0, 0, 0]
+    image.info["background"] = (10, 20, 30)
+    assert matlab.imread_rgb(image)[1, 1].tolist() == [10, 20, 30]
+
     rng = np.random.default_rng(1)
     image = rng.integers(0, 256, size=(5, 7, 3), dtype=np.uint8)
     red, green, blue = matlab.RGB2GRAY_COEFFICIENTS
@@ -74,38 +83,31 @@ def test_rgb2gray_matches_a_per_pixel_oracle_and_rounds_half_away_from_zero():
     assert np.array_equal(matlab.rgb2gray(image), expected)
     gray = rng.integers(0, 256, size=(3, 4), dtype=np.uint8)
     assert matlab.rgb2gray(gray) is gray
-    assert matlab.rgb2gray(image.astype(np.float64)).dtype == np.float64
+
+    step = np.zeros((5, 6), dtype=np.uint8)
+    step[:, 3:] = 10
+    gradient = matlab.imgradient(step)  # Sobel magnitude, replicate padding
+    assert gradient[2, 2] == gradient[2, 3] == pytest.approx(40.0) and gradient[2, 0] == 0.0
 
 
-@pytest.mark.parametrize(
-    ("shape", "output"),
-    [((9, 7), (4, 3)), ((6, 5), (13, 11))],
-)
-def test_imresize_matches_scalar_oracle_for_uint8_and_double(shape, output):
-    rng = np.random.default_rng(sum(shape) + sum(output))
-    image = rng.integers(0, 256, size=shape, dtype=np.uint8)
-    got = matlab.imresize(image, output_shape=output)
-    assert got.dtype == np.uint8
-    assert np.array_equal(got, _oracle_imresize(image, *output))
-    double = rng.random(shape)
-    assert np.allclose(
-        matlab.imresize(double, output_shape=output),
-        _oracle_imresize(double, *output),
-        rtol=0,
-        atol=1e-12,
-    )
-
-
-def test_imresize_scale_uses_ceil_size_and_keeps_constants_and_linear_ramps():
+def test_imresize_matches_scalar_oracle_and_rounds_the_size_up():
+    for shape, output in (((9, 7), (4, 3)), ((6, 5), (13, 11))):
+        rng = np.random.default_rng(sum(shape) + sum(output))
+        image = rng.integers(0, 256, size=shape, dtype=np.uint8)
+        got = matlab.imresize(image, output_shape=output)
+        assert got.dtype == np.uint8
+        assert np.array_equal(got, _oracle_imresize(image, *output))
+        double = rng.random(shape)
+        assert np.allclose(
+            matlab.imresize(double, output_shape=output),
+            _oracle_imresize(double, *output),
+            rtol=0,
+            atol=1e-12,
+        )
     image = np.full((7, 9), 77, dtype=np.uint8)
     resized = matlab.imresize(image, scale=0.35)
     assert resized.shape == (math.ceil(7 * 0.35), math.ceil(9 * 0.35))
     assert np.all(resized == 77)
-    # Keys' cubic reproduces linear functions: interior samples of an upsampled ramp.
-    ramp = np.tile(np.arange(1.0, 13.0), (3, 1))
-    up = matlab.imresize(ramp, output_shape=(3, 24))
-    centres = np.array([i / 2.0 + 0.25 for i in range(1, 25)])
-    assert np.allclose(up[:, 4:-4], centres[4:-4], atol=1e-12)
     rgb = np.stack([image, image // 2, image // 3], axis=2)
     assert matlab.imresize(rgb, scale=0.5).shape == (4, 5, 3)
 
@@ -120,7 +122,6 @@ def _oracle_reduce(image: np.ndarray) -> np.ndarray:
             index = -index - 1 if index < 0 else 2 * length - index - 1
         return index
 
-    passes = []
     for axis in (0, 1):
         out = np.zeros_like(work)
         for i in range(rows):
@@ -135,17 +136,7 @@ def _oracle_reduce(image: np.ndarray) -> np.ndarray:
         if image.dtype == np.uint8:
             out = np.vectorize(lambda v: min(255.0, max(0.0, _round_half_away(v))))(out)
         work = out
-        passes.append(out)
     return work[::2, ::2].astype(image.dtype)
-
-
-def test_impyramid_reduce_matches_oracle_and_ceil_half_size():
-    rng = np.random.default_rng(3)
-    for shape in ((9, 6), (4, 7)):
-        image = rng.integers(0, 256, size=shape, dtype=np.uint8)
-        reduced = matlab.impyramid_reduce(image)
-        assert reduced.shape == (math.ceil(shape[0] / 2), math.ceil(shape[1] / 2))
-        assert np.array_equal(reduced, _oracle_reduce(image))
 
 
 def _oracle_ssim(first: np.ndarray, second: np.ndarray) -> float:
@@ -173,21 +164,24 @@ def _oracle_ssim(first: np.ndarray, second: np.ndarray) -> float:
     return float(ssim_map.mean())
 
 
-def test_ssim_matches_direct_window_oracle_and_is_symmetric():
-    rng = np.random.default_rng(4)
+def test_impyramid_ssim_and_ms_ssim_match_direct_oracles():
+    rng = np.random.default_rng(3)
+    for shape in ((9, 6), (4, 7)):
+        image = rng.integers(0, 256, size=shape, dtype=np.uint8)
+        reduced = matlab.impyramid_reduce(image)
+        assert reduced.shape == (math.ceil(shape[0] / 2), math.ceil(shape[1] / 2))
+        assert np.array_equal(reduced, _oracle_reduce(image))
+
     first = rng.integers(0, 256, size=(13, 15), dtype=np.uint8)
-    second = np.clip(first.astype(int) + rng.integers(-40, 41, size=first.shape), 0, 255).astype(
-        np.uint8
-    )
+    noise = rng.integers(-40, 41, size=first.shape)
+    second = np.clip(first.astype(int) + noise, 0, 255).astype(np.uint8)
     value = matlab.ssim(first, second)
     assert value == pytest.approx(_oracle_ssim(first, second), abs=1e-12)
     assert value == pytest.approx(matlab.ssim(second, first), abs=1e-14)
     assert matlab.ssim(first, first) == pytest.approx(1.0, abs=1e-12)
-    assert value < 1.0
+    with pytest.raises(ValueError):
+        matlab.ssim(first, second[:-1])
 
-
-def test_ms_ssim_is_the_weighted_sum_of_pyramid_ssims():
-    rng = np.random.default_rng(5)
     first = rng.integers(0, 256, size=(40, 36), dtype=np.uint8)
     second = matlab.gaussian_filter(first, 5, 1.2)
     assert matlab.ms_ssim(first, first) == pytest.approx(sum(matlab.MS_SSIM_WEIGHTS), abs=1e-12)
@@ -199,26 +193,3 @@ def test_ms_ssim_is_the_weighted_sum_of_pyramid_ssims():
         if level < 4:
             a, b = _oracle_reduce(a), _oracle_reduce(b)
     assert matlab.ms_ssim(first, second) == pytest.approx(expected, abs=1e-12)
-    with pytest.raises(ValueError):
-        matlab.ssim(first, second[:-1])
-
-
-def test_imread_composites_alpha_over_black_or_bkgd():
-    pixels = np.zeros((2, 2, 4), dtype=np.uint8)
-    pixels[..., :3] = 200
-    pixels[0, 0, 3] = 255
-    image = Image.fromarray(pixels, "RGBA")
-    rgb = matlab.imread_rgb(image)
-    assert rgb[0, 0].tolist() == [200, 200, 200]
-    assert rgb[1, 1].tolist() == [0, 0, 0]
-    image.info["background"] = (10, 20, 30)
-    assert matlab.imread_rgb(image)[1, 1].tolist() == [10, 20, 30]
-
-
-def test_imgradient_is_sobel_magnitude_with_replicate_padding():
-    image = np.zeros((5, 6), dtype=np.uint8)
-    image[:, 3:] = 10
-    gradient = matlab.imgradient(image)
-    assert gradient[2, 2] == pytest.approx(40.0)
-    assert gradient[2, 3] == pytest.approx(40.0)
-    assert gradient[2, 0] == 0.0

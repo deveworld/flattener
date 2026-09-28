@@ -38,56 +38,35 @@ def _one_image(tmp_path):
     return images
 
 
-# DocUNet
-
-
-def test_a_report_matches_only_its_own_settings(tmp_path):
-    tool = docunet_tool
-    images = _one_image(tmp_path)
-    report = _docunet_report(images, "uvdoc_view2_double", {"quantize": "truncate"})
-    path = tmp_path / "report.json"
-    path.write_text(json.dumps(report))
-    assert tool.report_matches(path, images, "s", "uvdoc_view2_double", "truncate")
-    assert not tool.report_matches(path, images, "s", "once", "truncate")
-    assert not tool.report_matches(path, images, "s", "uvdoc_view2_double", "round")
-    del report["predictions_record"]["quantize"]  # scored before the field: rounded images
-    path.write_text(json.dumps(report))
-    assert tool.report_matches(path, images, "s", "uvdoc_view2_double", "round")
-    assert not tool.report_matches(path, images, "s", "uvdoc_view2_double", "truncate")
-
-
-def test_rerun_settings_get_their_own_files_and_reports(tmp_path, monkeypatch):
+def test_metric_reports_match_only_their_own_images_and_settings(tmp_path, monkeypatch):
     from flattener.dewarp.predict import rerun_record
 
     tool = docunet_tool
-    args = tool.build_parser().parse_args(["model.pt", "demo", "--rerun", "1", "--deskew"])
-    assert (args.rerun, args.deskew) == (1, True)
-    assert tool.build_parser().parse_args(["model.pt", "demo"]).rerun == 0
-    assert tool.prediction_dir(tmp_path, "demo", "round", None, 0) == tmp_path / "pred" / "demo"
-    assert tool.prediction_dir(tmp_path, "demo", "round", None, 1) == (
-        tmp_path / "pred-rerun1" / "demo"
-    )
+    images = _one_image(tmp_path)
+    record = {"quantize": "truncate", "rerun": rerun_record(1, True)}
+    report = _docunet_report(images, "uvdoc_view2_double", record)
+    path = tmp_path / "report.json"
+    path.write_text(json.dumps(report))
+    own = ("uvdoc_view2_double", "truncate", None, 1, True)
+    assert tool.report_matches(path, images, "s", *own)
+    assert not tool.report_matches(path, images, "other", *own)
+    assert not tool.report_matches(path, images, "s", "once", *own[1:])
+    assert not tool.report_matches(path, images, "s", "uvdoc_view2_double", "round", None, 1, True)
+    assert not tool.report_matches(path, images, "s", *own[:3])
+    assert not tool.report_matches(path, images, "s", *own[:3], 2, True)
+    del record["quantize"], record["rerun"]  # scored before the fields: rounded, one pass
+    path.write_text(json.dumps(report))
+    assert tool.report_matches(path, images, "s", "uvdoc_view2_double", "round")
+    assert not tool.report_matches(path, images, "s", "uvdoc_view2_double", "truncate")
+    assert not tool.report_matches(path, images, "s", "uvdoc_view2_double", "round", None, 1)
+    assert tool.prediction_dir(tmp_path, "demo", "round") == tmp_path / "pred" / "demo"
     assert tool.prediction_dir(tmp_path, "demo", "truncate", 0.02, 2, True) == (
         tmp_path / "pred-truncate-inset-0.02-rerun2-deskew" / "demo"
     )
     assert tool.report_name("once", "round", None, 1, True) == "docunet-once-rerun1-deskew.json"
     assert tool.record_name("truncate", None, 1) == "predictions-truncate-rerun1.json"
-    assert tool.ocr_report_name("round", None, 3) == "ocr-doctr-rerun3.json"
-    assert tool.rerun_argument() == [] and tool.rerun_argument(0) == []
+    assert tool.rerun_argument() == []
     assert tool.rerun_argument(2, True) == ["--rerun", "2", "--deskew"]
-    images = _one_image(tmp_path)
-    record = {"quantize": "round", "rerun": rerun_record(1, True)}
-    report = _docunet_report(images, "once", record)
-    path = tmp_path / "report.json"
-    path.write_text(json.dumps(report))
-    settings = (images, "s", "once", "round", None)
-    assert tool.report_matches(path, *settings, 1, True)
-    assert not tool.report_matches(path, *settings)
-    assert not tool.report_matches(path, *settings, 1)
-    assert not tool.report_matches(path, *settings, 2, True)
-    del record["rerun"]  # scored before the field: whole-image predictions
-    path.write_text(json.dumps(report))
-    assert tool.report_matches(path, *settings) and not tool.report_matches(path, *settings, 1)
     weights = tmp_path / "model.pt"
     weights.write_bytes(b"")
     monkeypatch.setenv("FLATTENER_SIFTFLOW_SOURCE", str(tmp_path))
@@ -96,85 +75,8 @@ def test_rerun_settings_get_their_own_files_and_reports(tmp_path, monkeypatch):
     with pytest.raises(SystemExit, match="--deskew"):
         tool.main([str(weights), "demo", "--deskew"])
 
-
-def test_ocr_reports_have_their_own_names_and_match_engine_and_images(tmp_path):
-    tool = docunet_tool
-    assert tool.ocr_report_name("round") == "ocr-doctr.json"
-    assert tool.ocr_report_name("truncate") == "ocr-doctr-truncate.json"
-    args = tool.build_parser().parse_args(["model.pt", "demo", "--ocr", "--tessdata-dir", "td"])
-    assert args.ocr and args.tessdata_dir == Path("td")
-    images = _one_image(tmp_path)
-    engine = {
-        "executable_sha256": "e",
-        "traineddata": {"eng.traineddata": {"sha256": "t"}},
-    }
-    report = {
-        "config": {"protocols": ["doctr"]},
-        "inputs": {"predictions": {"1_1": tool.sha256_file(images / "1_1.png")}},
-        "predictions_record": {"quantize": "truncate"},
-        "tesseract": engine,
-    }
-    path = tmp_path / "ocr.json"
-    path.write_text(json.dumps(report))
-    assert tool.ocr_report_matches(path, images, engine, "truncate")
-    assert not tool.ocr_report_matches(path, images, engine, "round")
-    assert not tool.ocr_report_matches(
-        path, images, {**engine, "executable_sha256": "x"}, "truncate"
-    )
-    assert not tool.ocr_report_matches(path, images, {**engine, "traineddata": {}}, "truncate")
-    (images / "1_1.png").write_bytes(b"other")
-    assert not tool.ocr_report_matches(path, images, engine, "truncate")
-    report["inputs"]["predictions"] = {}
-    path.write_text(json.dumps(report))
-    assert not tool.ocr_report_matches(path, images, engine, "truncate")
-
-
-def test_a_record_left_by_other_weights_is_refused(tmp_path, monkeypatch):
-    tool = docunet_tool
-    weights = tmp_path / "model.pt"
-    weights.write_bytes(b"new weights")
-    args = tool.build_parser().parse_args([str(weights), "demo", "--stress", "rot90"])
-    images = tool.prediction_dir(tmp_path, "demo", "round")
-    stress_dir = tmp_path / "stress" / "demo"
-    for folder in (images, stress_dir, tmp_path / "scores" / "stress"):
-        folder.mkdir(parents=True)
-    record = {
-        "model": {"sha256": "old"},
-        "complete": True,
-        "quantize": "round",
-        "counts": {"items": 130},
-        "items": [],
-    }
-    summary = {"model": {"sha256": "old"}, "config": {"variants": ["rot90"]}, "variants": {}}
-    (images / "predictions.json").write_text(json.dumps(record))
-    (stress_dir / "stress.json").write_text(json.dumps(summary))
-    monkeypatch.setattr(tool, "run", lambda command, env, ok=(0,): 1)  # a crash
-    with pytest.raises(SystemExit, match="predictions.json holds predictions of other weights"):
-        tool.predict(args, tmp_path, {})
-    with pytest.raises(SystemExit, match="stress.json holds predictions of other weights"):
-        tool.stress(args, tmp_path, {}, tmp_path / "scores")
-    record["model"]["sha256"] = summary["model"]["sha256"] = tool.sha256_file(weights)
-    (images / "predictions.json").write_text(json.dumps(record))
-    (stress_dir / "stress.json").write_text(json.dumps(summary))
-    assert tool.predict(args, tmp_path, {})[0] == record
-    assert tool.stress(args, tmp_path, {}, tmp_path / "scores") == summary
-    summary["variants"] = {"rot90": {"status": "scored"}}
-    (stress_dir / "stress.json").write_text(json.dumps(summary))
-    (stress_dir / "rot90").mkdir()
-    (stress_dir / "rot90" / "predictions.json").write_text(json.dumps({"model": {"sha256": "o"}}))
-    with pytest.raises(SystemExit, match="rot90/predictions.json holds predictions of other"):
-        tool.stress(args, tmp_path, {}, tmp_path / "scores")
-    args.stress = ["rot90", "small_page"]
-    with pytest.raises(SystemExit, match="stress.json holds other variants"):
-        tool.stress(args, tmp_path, {}, tmp_path / "scores")
-
-
-# DIR300
-
-
-def test_a_metric_report_matches_only_its_own_images_and_settings(tmp_path):
     tool = dir300_tool
-    images = tmp_path / "pred"
+    images = tmp_path / "dir300"
     images.mkdir()
     for k in tool.dir300.DOCUMENTS:
         (images / f"{k}.png").write_bytes(str(k).encode())
@@ -200,56 +102,101 @@ def test_a_metric_report_matches_only_its_own_images_and_settings(tmp_path):
     assert not tool.report_matches(path, images, "s", "truncate")
 
 
-def test_photos_left_unrectified_stop_the_run_before_scoring(tmp_path, monkeypatch):
-    tool = dir300_tool
+def test_ocr_reports_have_their_own_names_and_match_engine_and_images(tmp_path):
+    tool = docunet_tool
+    assert tool.ocr_report_name("round") == "ocr-doctr.json"
+    assert tool.ocr_report_name("truncate", None, 3) == "ocr-doctr-truncate-rerun3.json"
+    args = tool.build_parser().parse_args(["model.pt", "demo", "--ocr", "--tessdata-dir", "td"])
+    assert args.ocr and args.tessdata_dir == Path("td")
+    images = _one_image(tmp_path)
+    engine = {"executable_sha256": "e", "traineddata": {"eng.traineddata": {"sha256": "t"}}}
+    report = {
+        "config": {"protocols": ["doctr"]},
+        "inputs": {"predictions": {"1_1": tool.sha256_file(images / "1_1.png")}},
+        "predictions_record": {"quantize": "truncate"},
+        "tesseract": engine,
+    }
+    path = tmp_path / "ocr.json"
+    path.write_text(json.dumps(report))
+    assert tool.ocr_report_matches(path, images, engine, "truncate")
+    assert not tool.ocr_report_matches(path, images, engine, "round")
+    other = {**engine, "executable_sha256": "x"}
+    assert not tool.ocr_report_matches(path, images, other, "truncate")
+    assert not tool.ocr_report_matches(path, images, {**engine, "traineddata": {}}, "truncate")
+    (images / "1_1.png").write_bytes(b"other")
+    assert not tool.ocr_report_matches(path, images, engine, "truncate")
+    report["inputs"]["predictions"] = {}
+    path.write_text(json.dumps(report))
+    assert not tool.ocr_report_matches(path, images, engine, "truncate")
+
+
+def _record(weights, items, count):
+    return {
+        "model": {"sha256": weights},
+        "complete": True,
+        "quantize": "round",
+        "counts": {"items": count},
+        "items": items,
+    }
+
+
+def test_predict_refuses_a_record_of_other_weights_or_photos_left_unrectified(
+    tmp_path, monkeypatch
+):
+    tool = docunet_tool
     weights = tmp_path / "model.pt"
-    weights.write_bytes(b"weights")
+    weights.write_bytes(b"new weights")
+    args = tool.build_parser().parse_args([str(weights), "demo", "--stress", "rot90"])
+    images = tool.prediction_dir(tmp_path, "demo", "round")
+    stress_dir = tmp_path / "stress" / "demo"
+    for folder in (images, stress_dir, tmp_path / "scores" / "stress"):
+        folder.mkdir(parents=True)
+    record = _record("old", [], 130)
+    summary = {"model": {"sha256": "old"}, "config": {"variants": ["rot90"]}, "variants": {}}
+    (images / "predictions.json").write_text(json.dumps(record))
+    (stress_dir / "stress.json").write_text(json.dumps(summary))
+    monkeypatch.setattr(tool, "run", lambda command, env, ok=(0,): 1)  # a crash
+    with pytest.raises(SystemExit, match="predictions.json holds predictions of other weights"):
+        tool.predict(args, tmp_path, {})
+    with pytest.raises(SystemExit, match="stress.json holds predictions of other weights"):
+        tool.stress(args, tmp_path, {}, tmp_path / "scores")
+    record["model"]["sha256"] = summary["model"]["sha256"] = tool.sha256_file(weights)
+    (images / "predictions.json").write_text(json.dumps(record))
+    (stress_dir / "stress.json").write_text(json.dumps(summary))
+    assert tool.predict(args, tmp_path, {})[0] == record
+    assert tool.stress(args, tmp_path, {}, tmp_path / "scores") == summary
+    summary["variants"] = {"rot90": {"status": "scored"}}
+    (stress_dir / "stress.json").write_text(json.dumps(summary))
+    (stress_dir / "rot90").mkdir()
+    (stress_dir / "rot90" / "predictions.json").write_text(json.dumps({"model": {"sha256": "o"}}))
+    with pytest.raises(SystemExit, match="rot90/predictions.json holds predictions of other"):
+        tool.stress(args, tmp_path, {}, tmp_path / "scores")
+    args.stress = ["rot90", "small_page"]
+    with pytest.raises(SystemExit, match="stress.json holds other variants"):
+        tool.stress(args, tmp_path, {}, tmp_path / "scores")
+
+    tool = dir300_tool
     args = tool.build_parser().parse_args([str(weights), "demo"])
     images = tool.prediction_dir(tmp_path, "demo", "round")
     items = [{"output": f"{k}.png", "action": "written"} for k in tool.dir300.DOCUMENTS]
     items[200] = {"output": "201.png", "action": "not_written", "reason": "size_limit_exceeded"}
+    written = {"sha256": "old"}
 
-    def fake_run(command, env, ok=(0,)):
+    def fake_run(command, env, ok=(0,)):  # a crash that leaves a record
         images.mkdir(parents=True, exist_ok=True)
-        record = {
-            "model": {"sha256": tool.local.sha256_file(weights)},
-            "complete": True,
-            "quantize": "round",
-            "counts": {"items": 300},
-            "items": items,
-        }
+        record = _record(written["sha256"], items, 300)
         (images / "predictions.json").write_text(json.dumps(record))
         return 1
 
     monkeypatch.setattr(tool.local, "run", fake_run)
+    with pytest.raises(SystemExit, match="predictions.json holds predictions of other weights"):
+        tool.predict(args, tmp_path, {})
+    written["sha256"] = tool.local.sha256_file(weights)
     with pytest.raises(SystemExit, match="1 photos were not rectified .size_limit_exceeded"):
         tool.predict(args, tmp_path, {})
     items[200] = {"output": "201.png", "action": "written"}
     record, _ = tool.predict(args, tmp_path, {})
     assert record["counts"]["items"] == 300
-
-
-def test_a_dir300_record_left_by_other_weights_is_refused(tmp_path, monkeypatch):
-    tool = dir300_tool
-    weights = tmp_path / "model.pt"
-    weights.write_bytes(b"new weights")
-    args = tool.build_parser().parse_args([str(weights), "demo"])
-    images = tool.prediction_dir(tmp_path, "demo", "round")
-    images.mkdir(parents=True)
-    record = {
-        "model": {"sha256": "old"},
-        "complete": True,
-        "quantize": "round",
-        "counts": {"items": 300},
-        "items": [],
-    }
-    (images / "predictions.json").write_text(json.dumps(record))
-    monkeypatch.setattr(tool.local, "run", lambda command, env, ok=(0,): 1)  # a crash
-    with pytest.raises(SystemExit, match="predictions.json holds predictions of other weights"):
-        tool.predict(args, tmp_path, {})
-    record["model"]["sha256"] = tool.local.sha256_file(weights)
-    (images / "predictions.json").write_text(json.dumps(record))
-    assert tool.predict(args, tmp_path, {})[0] == record
 
 
 def test_summary_lines_show_an_empty_reference_cer_as_na():

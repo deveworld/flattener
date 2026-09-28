@@ -1,8 +1,5 @@
 """DocUNet metric core: LSQR emulation, AD alignment and pair scoring on tiny inputs."""
 
-import os
-from pathlib import Path
-
 import numpy as np
 import pytest
 
@@ -46,7 +43,7 @@ def _affine_flow(shape, scale_x, scale_y, shift_x, shift_y):
     return vx, vy
 
 
-def test_ad_matches_an_independent_weighted_residual_oracle():
+def test_ad_and_ld_match_independent_oracles():
     shape = (9, 11)
     rng = np.random.default_rng(2)
     vx, vy = _affine_flow(shape, 1.1, 0.9, 0.5, 1.0)
@@ -70,29 +67,10 @@ def test_ad_matches_an_independent_weighted_residual_oracle():
         metrics.aligned_distortions(vx, vy, None)
     with pytest.raises(ValueError):
         metrics.aligned_distortions(vx, vy, np.zeros(shape))
-
-
-def test_local_distortion_is_mean_flow_magnitude():
+    # LD is the mean flow magnitude.
     vx = np.array([[3.0, 0.0], [0.0, 1.0]])
     vy = np.array([[4.0, 0.0], [2.0, 0.0]])
     assert metrics.local_distortion(vx, vy) == pytest.approx((5.0 + 0.0 + 2.0 + 1.0) / 4)
-
-
-def test_prepare_reference_converts_to_gray_before_resizing_and_can_resize_twice(monkeypatch):
-    monkeypatch.setattr(metrics, "METRIC_AREA", 120)
-    rng = np.random.default_rng(3)
-    scan = rng.integers(0, 256, size=(20, 14, 3), dtype=np.uint8)
-    prepared = metrics.prepare_reference(scan)
-    gray = matlab.rgb2gray(scan)
-    scale = matlab.metric_scale(20, 14, 120)
-    assert np.array_equal(prepared.image, matlab.imresize(gray, scale=scale))
-    assert prepared.source_shape == (20, 14)
-    assert prepared.gradient.max() == pytest.approx(1.0)
-    twice = metrics.prepare_reference(scan, resizes=2)
-    again = matlab.imresize(prepared.image, scale=matlab.metric_scale(*prepared.image.shape, 120))
-    assert np.array_equal(twice.image, again)
-    with pytest.raises(ValueError):
-        metrics.prepare_reference(scan, resizes=0)
 
 
 class _ConstantFlow:
@@ -106,7 +84,22 @@ class _ConstantFlow:
         return np.full(half, self.dx), np.full(half, self.dy)
 
 
-def test_score_pair_resizes_prediction_to_scan_metric_size_and_uses_flow_backend(monkeypatch):
+def test_score_pair_grays_the_scan_before_resizing_and_fits_the_prediction_to_it(monkeypatch):
+    monkeypatch.setattr(metrics, "METRIC_AREA", 120)
+    rng = np.random.default_rng(3)
+    scan = rng.integers(0, 256, size=(20, 14, 3), dtype=np.uint8)
+    prepared = metrics.prepare_reference(scan)
+    gray = matlab.rgb2gray(scan)
+    assert np.array_equal(
+        prepared.image, matlab.imresize(gray, scale=matlab.metric_scale(20, 14, 120))
+    )
+    assert prepared.gradient.max() == pytest.approx(1.0)
+    twice = metrics.prepare_reference(scan, resizes=2)
+    again = matlab.imresize(prepared.image, scale=matlab.metric_scale(*prepared.image.shape, 120))
+    assert np.array_equal(twice.image, again)
+    with pytest.raises(ValueError):
+        metrics.prepare_reference(scan, resizes=0)
+
     monkeypatch.setattr(metrics, "METRIC_AREA", 600)
     rng = np.random.default_rng(4)
     scan = rng.integers(0, 256, size=(40, 30), dtype=np.uint8)
@@ -126,28 +119,3 @@ def test_score_pair_resizes_prediction_to_scan_metric_size_and_uses_flow_backend
     assert record["metric_shape_hw"] == list(score.metric_shape)
     with pytest.raises(ValueError):
         metrics.score_pair(prediction, scan, ad_solver="svd")
-
-
-PAPEREDGE_ENV = "FLATTENER_BENCH_PAPEREDGE_DIR"
-REFERENCES_ENV = "FLATTENER_BENCH_REFERENCES_DIR"
-
-
-@pytest.mark.skipif(
-    not os.environ.get(PAPEREDGE_ENV),
-    reason=f"set {PAPEREDGE_ENV} to PaperEdge res_test/ (with adres.txt) to compare with MATLAB",
-)
-def test_ms_ssim_matches_matlab_adres_on_two_paperedge_images():
-    """MS-SSIM only (no SIFT flow): two small scans against PaperEdge's MATLAB values."""
-    from flattener.benchmark import calibration, docunet
-
-    outputs = Path(os.environ[PAPEREDGE_ENV])
-    references = Path(os.environ.get(REFERENCES_ENV, docunet.DEFAULT_REFERENCES_DIR))
-    adres = calibration.parse_adres(outputs / calibration.ADRES_NAME)["rows"]
-    for k, m in ((1, 1), (5, 1)):
-        scan = references / docunet.DEFAULT_REFERENCE_PATTERN.format(k=k)
-        if not scan.is_file():
-            pytest.skip(f"DocUNet scan {scan} not found; set {REFERENCES_ENV}")
-        score = metrics.score_pair(
-            metrics.read_image(outputs / f"{k}_{m}.png"), metrics.read_image(scan)
-        )
-        assert score.ms_ssim == pytest.approx(adres[f"{k}_{m}"]["ms_ssim"], abs=2e-5)

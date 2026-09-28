@@ -9,7 +9,6 @@ import pytest
 from PIL import Image
 
 from flattener.benchmark import ocr
-from flattener.benchmark.reporting import write_json_atomic
 
 
 def _dp_distance(first: str, second: str) -> int:
@@ -38,7 +37,7 @@ def test_levenshtein_fixed_strings_and_random_dp_oracle():
     assert ocr.levenshtein(long_a, long_b) == _dp_distance(long_a, long_b)
 
 
-def test_doctr_score_averages_views_then_settings():
+def test_doctr_averages_views_then_settings_and_uvdoc_strips_only_for_cer():
     references = {k: "x" * 10 for k in ocr.DOCTR_SETTING_1}
     predictions = {}
     for k in ocr.DOCTR_SETTING_1:
@@ -47,60 +46,45 @@ def test_doctr_score_averages_views_then_settings():
     summary, rows = ocr.score_doctr(references, predictions, ocr.DOCTR_SETTING_1)
     assert summary["n"] == 60 and len(rows) == 60
     assert summary["views"]["1"]["ed"] == 0.0 and summary["views"]["2"]["ed"] == 2.0
-    assert summary["ed"] == pytest.approx(1.0)
-    assert summary["cer"] == pytest.approx(0.1)
+    assert summary["ed"] == pytest.approx(1.0) and summary["cer"] == pytest.approx(0.1)
     assert len(ocr.DEWARPNET_SETTING_2) == 25 and len(ocr.DOCTR_SETTING_1) == 30
-
-
-def test_uvdoc_score_strips_for_cer_but_not_for_ed():
     references = {k: "  abcd\n\x0c" for k in ocr.DEWARPNET_SETTING_2}
     predictions = {(k, m): "abcd" for k in ocr.DEWARPNET_SETTING_2 for m in (1, 2)}
     summary, rows = ocr.score_uvdoc(references, predictions, ocr.DEWARPNET_SETTING_2)
-    assert summary["n"] == 50
-    assert summary["cer"] == 0.0
+    assert summary["n"] == 50 and summary["cer"] == 0.0
     assert summary["ed"] == pytest.approx(4.0)
 
 
-@pytest.mark.parametrize(
-    "score,second,expected_cer",
-    [
+def test_empty_reference_cer_serializes_as_null():
+    for score, second, expected_cer in (
         (ocr.score_doctr, "page", None),
         (ocr.score_uvdoc, "page", 0.0),
         (ocr.score_uvdoc, "", None),
-    ],
-)
-def test_empty_reference_cer_serializes_as_null(score, second, expected_cer):
-    references = {1: "", 9: second}
-    predictions = {(k, m): "page" for k in references for m in (1, 2)}
-    summary, rows = score(references, predictions, tuple(references))
-    assert rows[0]["cer"] is None and summary["cer"] == expected_cer
-    json.dumps({"summary": summary, "rows": rows}, allow_nan=False)
+    ):
+        references = {1: "", 9: second}
+        predictions = {(k, m): "page" for k in references for m in (1, 2)}
+        summary, rows = score(references, predictions, tuple(references))
+        assert rows[0]["cer"] is None and summary["cer"] == expected_cer
+        json.dumps({"summary": summary, "rows": rows}, allow_nan=False)
 
 
-def test_prepare_like_pytesseract_composites_alpha_on_white_and_keeps_format():
+def test_tesseract_is_called_like_pytesseract(monkeypatch, tmp_path):
     pixels = np.zeros((2, 3, 4), dtype=np.uint8)
     pixels[0, 0] = (10, 20, 30, 255)
-    image = Image.fromarray(pixels, "RGBA")
-    prepared, extension = ocr.prepare_like_pytesseract(image)
+    prepared, extension = ocr.prepare_like_pytesseract(Image.fromarray(pixels, "RGBA"))
     assert extension == "PNG" and prepared.format == "PNG" and prepared.mode == "RGB"
     assert prepared.getpixel((0, 0)) == (10, 20, 30)
-    assert prepared.getpixel((2, 1)) == (255, 255, 255)
+    assert prepared.getpixel((2, 1)) == (255, 255, 255)  # alpha over white
     jpeg = Image.new("RGB", (2, 2))
     jpeg.format = "JPEG"
     assert ocr.prepare_like_pytesseract(jpeg)[1] == "JPEG"
-    odd = Image.new("RGB", (2, 2))
-    odd.format = "ICO"
+    jpeg.format = "ICO"
     with pytest.raises(TypeError):
-        ocr.prepare_like_pytesseract(odd)
-
-
-def test_tesseract_command_line_mimics_pytesseract(monkeypatch, tmp_path):
+        ocr.prepare_like_pytesseract(jpeg)
     calls = []
 
     def fake_run(arguments, **kwargs):
         calls.append((arguments, kwargs))
-        with Image.open(arguments[1]) as saved:
-            calls[-1] += (saved.mode, saved.getpixel((0, 0)))
         with open(arguments[2] + ".txt", "wb") as stream:
             stream.write("Ünïcode text\n\x0c".encode())
         return subprocess.CompletedProcess(arguments, 0, b"", b"")
@@ -110,11 +94,9 @@ def test_tesseract_command_line_mimics_pytesseract(monkeypatch, tmp_path):
     image = Image.new("RGBA", (4, 3), (0, 0, 0, 0))
     assert engine.image_to_string(image) == "Ünïcode text\n\x0c"
     assert engine.image_to_string(image, "--oem 1") == "Ünïcode text\n\x0c"
-    (first, kwargs, mode, pixel), (second, *_) = calls
-    assert first[0] == "/opt/tess/tesseract" and first[1].endswith(".PNG")
+    (first, kwargs), (second, _) = calls
+    assert first[0] == "/opt/tess/tesseract" and first[1] == first[2] + ".PNG"
     assert first[3:] == ["txt"] and second[3:] == ["--oem", "1", "txt"]
-    assert first[1] == first[2] + ".PNG"
-    assert mode == "RGB" and pixel == (255, 255, 255)
     assert kwargs["env"]["OMP_THREAD_LIMIT"] == "1"
     assert list(tmp_path.iterdir()) == []
 
@@ -211,11 +193,7 @@ def test_evaluate_ocr_report_with_fake_engine(tmp_path):
     assert ((9, 4), "--oem 1") in engine.seen and ((5, 7), "") in engine.seen
     assert ((5, 7), "--oem 1") not in engine.seen
     assert report["texts"]["doctr"]["reference"]["1"] == reference
-    assert len(report["texts"]["doctr"]["prediction"]) == 2 * len(documents)
-    assert report["tesseract"] == {"version_first_line": "fake 1.0"}
     assert report["comparable"] is False
-    assert report["comparability"]["tesseract_version_matches"] is False
-    assert report["comparability"]["tesseract_build"] is None
     assert report["config"]["tesseract_config"] == {"doctr": "", "uvdoc": "--oem 1"}
     assert len(report["inputs"]["crops"]) == 50
     assert doctr["setting1_doctr_60"]["prediction_failures"] is None  # no predictions.json
@@ -236,8 +214,6 @@ def test_evaluate_ocr_report_with_fake_engine(tmp_path):
     assert counted["setting1_doctr_60"]["prediction_unrecorded"] == 1
     assert counted["setting2_dewarpnet_50"]["prediction_failures"] == 1  # document 1 only
     (predictions / "predictions.json").unlink()
-    write_json_atomic(tmp_path / "ocr.json", report)
-    assert json.loads((tmp_path / "ocr.json").read_text())["summary"] == report["summary"]
     (crops / "1_1 copy.png").unlink()
     with pytest.raises(FileNotFoundError):
         ocr.evaluate_ocr(

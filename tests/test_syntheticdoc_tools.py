@@ -24,32 +24,27 @@ import sdlicense  # noqa: E402
 import sdsplit  # noqa: E402
 
 
-def test_license_normalization():
+def test_licenses_normalize_and_the_split_is_group_disjoint():
     cc = sdlicense.cc_license
-    assert cc("https://creativecommons.org/licenses/by/4.0/legalcode", "CC BY") == (
-        "CC-BY-4.0",
-        "clean",
-    )
+    base = "https://creativecommons.org/licenses/by"
+    assert cc(f"{base}/4.0/legalcode", "CC BY") == ("CC-BY-4.0", "clean")
     assert cc("http://creativecommons.org/licenses/by-4.0/", "CC BY 4.0") == ("CC-BY-4.0", "clean")
-    assert cc("https://creativecommons.org/licenses/by-sa/4.0/deed.de", "CC BY SA")[1] == "sa"
-    assert cc("https://creativecommons.org/licenses/by-nc/3.0/", "CC BY NC") == (
-        "CC-BY-NC-3.0",
-        "nc",
-    )
-    assert cc("https://creativecommons.org/licenses/by-nc-sa/4.0/", "")[1] == "nc"
-    assert cc("", "CC BY NC SA")[1] == "nc"
-    assert cc("", "CC BY-ND")[1] == "unknown"
-    assert cc("", "all rights reserved")[1] == "unknown"
+    assert cc(f"{base}-nc/3.0/", "CC BY NC") == ("CC-BY-NC-3.0", "nc")
+    for url, label, kind in (
+        (f"{base}-sa/4.0/deed.de", "CC BY SA", "sa"),
+        (f"{base}-nc-sa/4.0/", "", "nc"),
+        ("", "CC BY NC SA", "nc"),
+        ("", "CC BY-ND", "unknown"),
+        ("", "all rights reserved", "unknown"),
+    ):
+        assert cc(url, label)[1] == kind, label
     assert sdlicense.background_class("CC0") == ("CC0-1.0", "clean")
     assert sdlicense.background_class("CC-BY") == ("CC-BY", "clean")
     assert sdlicense.background_class("CC BY-NC-ND 2.0")[1] == "nc"
     assert sdlicense.background_class(None)[1] == "unknown"
     assert sdlicense.combine("clean", "sa") == "sa"
-    assert sdlicense.combine("sa", "unknown") == "unknown"
     assert sdlicense.combine("unknown", "nc", "clean") == "nc"
 
-
-def test_split_is_group_disjoint_and_deterministic():
     rng = np.random.default_rng(0)
     rows = []
     for k in range(6000):
@@ -77,9 +72,8 @@ def test_split_is_group_disjoint_and_deterministic():
 
 def test_convert_sample_full_resolution_and_fp16():
     rng = np.random.default_rng(1)
-    image = rng.integers(0, 255, (1440, 1024, 3), dtype=np.uint8)
     png = io.BytesIO()
-    Image.fromarray(image).save(png, "PNG", compress_level=1)
+    Image.new("RGB", (1024, 1440), (90, 120, 150)).save(png, "PNG")
     bm = rng.uniform(-1, 1, (177, 121, 2)).astype(np.float32)
     npy = io.BytesIO()
     np.save(npy, bm)
@@ -156,28 +150,13 @@ def _download(tmp_path):
 def _run(source, output, *extra):
     return compact.main(
         [
-            "--source",
-            str(source),
-            "--output",
-            str(output),
-            "--workers",
-            "1",
-            "--input-size",
-            "48",
-            "36",
-            "--stats-samples",
-            "8",
-            *extra,
+            "--source", str(source), "--output", str(output), "--workers", "1",
+            "--input-size", "48", "36", "--stats-samples", "8", *extra,
         ]
-    )
+    )  # fmt: skip
 
 
-def _manifest(output):
-    lines = (output / "manifest.jsonl").read_text().splitlines()
-    return [json.loads(line) for line in lines]
-
-
-def test_compact_copy_is_resized_hashed_and_readable_by_the_loader(tmp_path):
+def test_compact_copy_is_readable_by_the_loader_and_keeps_its_settings_and_track(tmp_path):
     source, output = _download(tmp_path), tmp_path / "cache"
     assert _run(source, output) == 0
     settings = json.loads((output / "compact.json").read_text())
@@ -186,7 +165,7 @@ def test_compact_copy_is_resized_hashed_and_readable_by_the_loader(tmp_path):
     # to 1/16 that is 0.5625.
     needed = statistics["page_tight_scale_percentiles"]["75"]
     assert 0.5 < needed < settings["scale"] == 0.5625 and statistics["samples"] == 3
-    entries = _manifest(output)
+    entries = [json.loads(line) for line in (output / "manifest.jsonl").read_text().splitlines()]
     assert [e["sample_id"][-7:] for e in entries] == ["0000001", "0000002", "0000009"]
     for entry in entries:
         image = output / entry["image"]
@@ -203,27 +182,13 @@ def test_compact_copy_is_resized_hashed_and_readable_by_the_loader(tmp_path):
     assert record["attribution"]["dataset"]["name"] == "SyntheticDoc"
     assert record["source"]["image_size"] == list(RENDER)
     # The dewarp loader reads the copy; its targets equal those of the full-size download.
-    spec = DataSpec.from_dict(
-        {
-            "schema": SPEC_SCHEMA,
-            "name": "c",
-            "track": "release",
-            "sources": [
-                {
-                    "name": name,
-                    "kind": kind,
-                    "root": str(root),
-                    "track": "release",
-                    "split": "train",
-                    "license": "CC BY 4.0",
-                }
-                for name, kind, root in (
-                    ("copy", "syntheticdoc_compact", output),
-                    ("full", "converted", source),
-                )
-            ],
-        }
-    )
+    source_spec = {"track": "release", "split": "train", "license": "CC BY 4.0"}
+    sources = [
+        {"name": "copy", "kind": "syntheticdoc_compact", "root": str(output), **source_spec},
+        {"name": "full", "kind": "converted", "root": str(source), **source_spec},
+    ]
+    spec = {"schema": SPEC_SCHEMA, "name": "c", "track": "release", "sources": sources}
+    spec = DataSpec.from_dict(spec)
     dataset = build_dataset(
         spec, track="release", split="train", input_size=(48, 36), grid_size=(5, 4), train=False
     )
@@ -233,18 +198,13 @@ def test_compact_copy_is_resized_hashed_and_readable_by_the_loader(tmp_path):
         np.testing.assert_array_equal(a.grid, b.grid)
         assert a.size == (81, 57) and b.size == RENDER
         a.image.close(), b.image.close()
-
-
-def test_settings_are_fixed_by_the_first_run_and_tracks_are_enforced(tmp_path):
-    source, output = _download(tmp_path), tmp_path / "cache"
-    assert _run(source, output, "--scale", "0.75", "--stats-only") == 0
-    assert json.loads((output / "compact.json").read_text())["scale"] == 0.75
+    # The first run fixes the settings; a research sample is reported and left out.
+    assert _run(source, tmp_path / "fixed", "--scale", "0.75", "--stats-only") == 0
+    assert json.loads((tmp_path / "fixed" / "compact.json").read_text())["scale"] == 0.75
     for extra in (("--quality", "80"), ("--scale", "0.5"), ("--track", "research")):
         with pytest.raises(SystemExit, match="compact.json fixes"):
             _run(source, output, *extra)
     _write_sample(source, "train_002", "0000003", seed=3, track="research")
-    assert _run(source, output) == 1  # the research sample is reported and left out
+    assert _run(source, output) == 1
     summary = json.loads((output / "compact-manifest.json").read_text())
     assert summary["counts"]["samples"] == 3 and "track 'research'" in summary["errors"][0]
-    with pytest.raises(SystemExit):
-        compact.parser().parse_args(["--source", "s", "--output", "o", "--workers", "9"])

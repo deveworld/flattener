@@ -9,15 +9,12 @@ import pytest
 from flattener.benchmark import metrics, siftflow
 
 
-def test_level_offsets_follow_siftflowc2f():
+def test_level_offsets_follow_siftflowc2f_and_the_scan_pyramid_is_reused_only_when_equal():
     offset_x, offset_y = siftflow._level_offset((3, 4), (5, 7))
     xx = np.arange(1, 5)
     expected_x = np.floor((xx - 1) * (7 - 1) / (4 - 1) + 1 - xx + 0.5)
     assert np.array_equal(offset_x[0], expected_x)
     assert offset_y[:, 0].tolist() == [0.0, 1.0, 2.0]
-
-
-def test_reference_pyramid_is_reused_only_for_an_identical_scan():
     backend = object.__new__(siftflow.SiftFlow)
     backend._reference_cache = None
     built = []

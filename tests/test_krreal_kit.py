@@ -77,16 +77,14 @@ def _errors(label) -> list[str]:
 # Plan and vocabulary -----------------------------------------------------------------
 
 
-def test_schema_enums_follow_kit_json():
+def test_schema_and_labeler_carry_kit_json():
     defs = SCHEMA["$defs"]
     assert defs["capture"]["properties"]["stratum"]["enum"] == [s["code"] for s in KIT["strata"]]
     assert SCHEMA["properties"]["flags"]["items"]["enum"] == list(KIT["flags"])
     assert SCHEMA["properties"]["cut_off_sides"]["items"]["enum"] == KIT["sides"]
     assert defs["text_polygon"]["properties"]["kind"]["enum"] == list(KIT["text_kinds"])
     assert defs["reference_line"]["properties"]["kind"]["enum"] == list(KIT["reference_kinds"])
-
-
-def test_labeler_is_one_offline_file_carrying_kit_json():
+    # The labeler is one offline file.
     assert kitlib.embedded_kit(HTML) == KIT
     assert re.search(r"<(script|link|img|iframe)[^>]+(src|href)=\"(https?:)?//", HTML) is None
     assert "@import" not in HTML and "fetch(" not in HTML
@@ -115,10 +113,8 @@ def test_a_complete_label_passes_and_each_broken_rule_is_reported(tmp_path):
     )
 
     broken = copy.deepcopy(label)
-    broken["pages"][0]["curved_edges"]["top"][3], broken["pages"][0]["curved_edges"]["top"][4] = (
-        broken["pages"][0]["curved_edges"]["top"][4],
-        broken["pages"][0]["curved_edges"]["top"][3],
-    )
+    top = broken["pages"][0]["curved_edges"]["top"]
+    top[3], top[4] = top[4], top[3]
     assert any("do not advance" in m for m in _errors(broken))
 
     broken = copy.deepcopy(label)
@@ -159,13 +155,11 @@ def test_a_complete_label_passes_and_each_broken_rule_is_reported(tmp_path):
     broken["review"]["checker"] = "B"
     assert _errors(broken) == []
 
-
-def test_page_angle_and_quarter_follow_the_reading_order_corners():
+    # Page angle and quarter follow the reading-order corners.
     square = [[0, 0], [100, 0], [100, 100], [0, 100]]
     for turn in range(4):
         quad = square[turn:] + square[:turn]
-        angle = labelcheck.page_rotation_deg(quad)
-        assert labelcheck.page_quarter(angle) == turn
+        assert labelcheck.page_quarter(labelcheck.page_rotation_deg(quad)) == turn
         assert labelcheck.quad_problems(quad) == []
     assert labelcheck.page_rotation_deg([[0, 0], [100, 30], [90, 130], [-10, 100]]) == 16.7
     assert labelcheck.page_quarter(-45.01) == 3 and labelcheck.page_quarter(45.0) == 1
@@ -209,11 +203,19 @@ def test_splits_are_by_source_and_stay_put():
     assert {s: again[s] for s in splits} == splits
 
 
-def test_a_photo_with_gps_data_is_never_a_public_candidate(tmp_path):
+def test_cli_keeps_gps_photos_private_and_writes_only_where_git_ignores(tmp_path):
+    assert krreal.main(["shotlist", "--root", str(tmp_path)]) == 0
+    with open(tmp_path / "shotlist.csv", encoding="utf-8-sig", newline="") as stream:
+        rows = list(csv.DictReader(stream))
+    assert len(rows) == 60 and rows[0]["variant"] == "thick_left"
+    assert krreal.main(["shotlist", "--root", str(tmp_path)]) == 1
     _jpeg(tmp_path / "photos" / "kr1-p1-flat-d01-001.jpg")
     _jpeg(tmp_path / "photos" / "kr1-p1-flat-d01-002.jpg", gps=True)
     (tmp_path / "sources.csv").write_text("source_id,kind,public,note\nd01,document,yes,\n")
-    manifest = kitlib.build_manifest(tmp_path)
+    out = tmp_path / "elsewhere" / "manifest.json"
+    assert krreal.main(["manifest", "--root", str(tmp_path), "--out", str(out)]) == 0
+    manifest = json.loads(out.read_text(encoding="utf-8"))
+    assert manifest["photos"][0]["device"]["model"]
     visibility = {photo["file"]: photo["visibility"] for photo in manifest["photos"]}
     assert visibility == {
         "kr1-p1-flat-d01-001.jpg": "public_candidate",
@@ -222,28 +224,11 @@ def test_a_photo_with_gps_data_is_never_a_public_candidate(tmp_path):
     assert [w for w in manifest["warnings"] if "GPS" in w] == [
         "kr1-p1-flat-d01-002.jpg: carries GPS data; turn off location tags on the phone"
     ]
-
-
-def test_cli_writes_the_shot_list_and_refuses_tracked_roots(tmp_path, capsys):
-    assert krreal.main(["shotlist", "--root", str(tmp_path)]) == 0
-    with open(tmp_path / "shotlist.csv", encoding="utf-8-sig", newline="") as stream:
-        rows = list(csv.DictReader(stream))
-    assert len(rows) == 60 and rows[0]["variant"] == "thick_left"
-    assert krreal.main(["shotlist", "--root", str(tmp_path)]) == 1
     if shutil.which("git") is None:
         pytest.skip("git is not installed")
     kitlib.ensure_ignored(krreal.DEFAULT_ROOT)
     with pytest.raises(SystemExit, match="not ignored"):
         kitlib.ensure_ignored(KIT_DIR / "photos-here")
-
-
-def test_the_manifest_goes_only_to_a_folder_git_ignores(tmp_path, capsys):
-    _jpeg(tmp_path / "photos" / "kr1-p1-flat-d01-001.jpg")
-    out = tmp_path / "elsewhere" / "manifest.json"
-    assert krreal.main(["manifest", "--root", str(tmp_path), "--out", str(out)]) == 0
-    assert json.loads(out.read_text(encoding="utf-8"))["photos"][0]["device"]["model"]
-    if shutil.which("git") is None:
-        pytest.skip("git is not installed")
     tracked = KIT_DIR / "manifest-here" / "manifest.json"
     with pytest.raises(SystemExit, match="not ignored"):
         krreal.main(["manifest", "--root", str(tmp_path), "--out", str(tracked)])

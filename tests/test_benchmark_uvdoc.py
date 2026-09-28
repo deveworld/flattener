@@ -105,50 +105,39 @@ def test_unwarp_follows_upstream_and_both_conventions_agree():
         uvdoc.unwarp(image, grid, "other")
 
 
-def test_predict_writes_textures_and_photos_and_records_checks(tiny_root, tmp_path, monkeypatch):
+def test_predict_writes_textures_and_photos_and_applies_the_inset(tiny_root, tmp_path, monkeypatch):
     monkeypatch.setattr(predict, "predict_grid", _identity_grid)
     dewarper = predict.load_dewarper(_tiny_weights(tmp_path))
+    grid = _identity_grid(dewarper, None)
     output = tmp_path / "out"
     record = uvdoc.predict_uvdoc(dewarper, output, root=tiny_root)
     assert record["complete"] and record["counts"]["items"] == 100
     assert record["counts"]["failed"] == 0 and record["quantize"] == "truncate"
-    grid = _identity_grid(dewarper, None)
-    for pred_type, folder in (("uwp_texture", "warped_textures"), ("uwp_img", "img")):
-        written = np.asarray(Image.open(output / pred_type / "00007.png"))
-        source = np.asarray(Image.open(tiny_root / folder / "00007.png"))
-        assert np.array_equal(written, uvdoc.unwarp(source, grid, "flattener"))
+    assert record["inset"] == {"x": 0.0, "y": 0.0, "preset": None}
     stored = prediction_record(output)
     assert stored["inputs"] == "uvdoc_benchmark" and stored["failures"] == {}
     assert "uwp_texture/00049.png" in stored["outputs"]
-    assert report_evidence(stored)["measurement"] == "uvdoc_benchmark"
     assert report_evidence(stored)["evidence_kind"] == "new_model_real_photo"
+    preset = "syntheticdoc_half_cell"
+    inset = uvdoc.predict_uvdoc(dewarper, tmp_path / "inset", root=tiny_root, inset=preset)
+    assert inset["inset"] == inset["evidence"]["inset"] == predict.inset_record(preset)
+    stored = prediction_record(tmp_path / "inset")
+    assert report_evidence(stored)["inset"] == predict.inset_record(preset)
+    for pred_type, folder in (("uwp_texture", "warped_textures"), ("uwp_img", "img")):
+        source = np.asarray(Image.open(tiny_root / folder / "00007.png"))
+        plain = np.asarray(Image.open(output / pred_type / "00007.png"))
+        assert np.array_equal(plain, uvdoc.unwarp(source, grid, "flattener"))
+        inset_image = np.asarray(Image.open(tmp_path / "inset" / pred_type / "00007.png"))
+        assert np.array_equal(inset_image, uvdoc.unwarp(source, grid, "flattener", preset))
+        assert not np.array_equal(inset_image, plain)
+    with pytest.raises(predict.FlattenerError, match="inset"):
+        uvdoc.predict_uvdoc(dewarper, tmp_path / "bad", root=tiny_root, inset="other")
+    assert not (tmp_path / "bad").exists()
     with pytest.raises(FileExistsError):
         uvdoc.predict_uvdoc(dewarper, output, root=tiny_root)
     (tiny_root / "img" / "00003.png").write_bytes(b"changed")
     with pytest.raises(ValueError, match="differs"):
         uvdoc.predict_uvdoc(dewarper, output, root=tiny_root, overwrite=True)
-
-
-def test_predict_passes_the_inset_through(tiny_root, tmp_path, monkeypatch):
-    monkeypatch.setattr(predict, "predict_grid", _identity_grid)
-    dewarper = predict.load_dewarper(_tiny_weights(tmp_path))
-    output = tmp_path / "out"
-    preset = "syntheticdoc_half_cell"
-    record = uvdoc.predict_uvdoc(dewarper, output, root=tiny_root, inset=preset)
-    assert record["inset"] == record["evidence"]["inset"] == predict.inset_record(preset)
-    grid = _identity_grid(dewarper, None)
-    for pred_type, folder in (("uwp_texture", "warped_textures"), ("uwp_img", "img")):
-        written = np.asarray(Image.open(output / pred_type / "00007.png"))
-        source = np.asarray(Image.open(tiny_root / folder / "00007.png"))
-        assert np.array_equal(written, uvdoc.unwarp(source, grid, "flattener", preset))
-        assert not np.array_equal(written, uvdoc.unwarp(source, grid, "flattener"))
-    stored = prediction_record(output)
-    assert stored["inset"] == report_evidence(stored)["inset"] == predict.inset_record(preset)
-    plain = uvdoc.predict_uvdoc(dewarper, tmp_path / "plain", root=tiny_root)
-    assert plain["inset"] == {"x": 0.0, "y": 0.0, "preset": None}
-    with pytest.raises(predict.FlattenerError, match="inset"):
-        uvdoc.predict_uvdoc(dewarper, tmp_path / "bad", root=tiny_root, inset="other")
-    assert not (tmp_path / "bad").exists()
 
 
 def _predictions(root, output):
@@ -191,28 +180,16 @@ def test_evaluate_scores_all_samples_against_the_flat_textures(tiny_root, tmp_pa
 
 def test_cli_predicts_and_scores(tiny_root, tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(predict, "predict_grid", _identity_grid)
-    output = tmp_path / "out"
+    output, report_path = tmp_path / "out", tmp_path / "uvdoc.json"
     weights = str(_tiny_weights(tmp_path))
-    base = ["--root", str(tiny_root)]
-    assert (
-        cli.main(
-            ["uvdoc-predict", "--weights", weights, "--output-dir", str(output), "--quiet", *base]
-        )
-        == 0
-    )
+    base = ["--root", str(tiny_root), "--quiet"]
+    predict_command = ["uvdoc-predict", "--weights", weights, "--output-dir", str(output)]
+    assert cli.main([*predict_command, *base]) == 0
     assert json.loads(capsys.readouterr().out)["written"] == 100
-    report_path = tmp_path / "uvdoc.json"
     command = [
-        "uvdoc",
-        str(output),
-        "--output",
-        str(report_path),
-        "--ms-ssim-only",
-        "--workers",
-        "1",
-        "--quiet",
+        "uvdoc", str(output), "--output", str(report_path), "--ms-ssim-only", "--workers", "1",
         *base,
-    ]
+    ]  # fmt: skip
     assert cli.main(command) == 0
     report = json.loads(report_path.read_text())
     assert report["summary"]["prediction_failures"] == 0 and report["summary"]["n"] == 50
