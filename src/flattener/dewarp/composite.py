@@ -10,6 +10,11 @@ pixels behind a hard, anti-aliased edge; outside, the background is a CC0 textur
 ``BackgroundBank`` or a procedural surface. Page and background share one illumination
 field, cast shadow and white balance.
 
+With ``neighbor_prob`` a page of another sample is drawn next to the placed page's left or
+right edge, sharing that edge like the facing page of an open book, with a fold shadow
+across both. The target stays the placed page, so the model learns to stop at the fold
+where the paper goes on.
+
 ``tilt_transform`` builds the ``tilt`` evaluation view of ``data.evaluation_view``: the
 page crop seen by a tilted camera, the frame corners moved by up to a fixed fraction.
 """
@@ -69,6 +74,13 @@ class CompositeConfig:
     - ``jpeg_prob``, ``jpeg_quality``: JPEG round trip of the finished composite.
     - ``edge_trim``: largest inward shift of the page edge in output pixels, drawn per
       sample, so the render's original background does not show along the outline.
+    - ``neighbor_prob``: chance that a composite shows a facing page (another sample's
+      page, passed to ``compose`` as ``neighbor``) along the page's left or right edge.
+    - ``neighbor_width``: how much of the facing page shows, as a fraction of the page
+      width, drawn uniformly.
+    - ``neighbor_fold``: largest change of the facing page's far edge, as a fraction of
+      its length (scale) and of the page height (shift), for a page lifted at the fold.
+    - ``fold_shadow``: strength range of the shadow along the fold (0 to 1).
     """
 
     prob: float = 0.0
@@ -90,9 +102,13 @@ class CompositeConfig:
     jpeg_prob: float = 0.0
     jpeg_quality: tuple[int, int] = (45, 95)
     edge_trim: float = 1.0
+    neighbor_prob: float = 0.0
+    neighbor_width: tuple[float, float] = (0.3, 1.0)
+    neighbor_fold: float = 0.15
+    fold_shadow: tuple[float, float] = (0.05, 0.45)
 
     def __post_init__(self) -> None:
-        pairs = ("area", "page_gain", "jpeg_quality")
+        pairs = ("area", "page_gain", "jpeg_quality", "neighbor_width", "fold_shadow")
         for name in (*pairs, "turns"):
             object.__setattr__(self, name, tuple(getattr(self, name)))
         for item in fields(self):
@@ -121,6 +137,12 @@ class CompositeConfig:
             raise ValueError("overhang < 0.25, perspective <= 0.3 and illumination < 1")
         if self.wide_angle > 180 or self.white_balance >= 0.5:
             raise ValueError("wide_angle <= 180 and white_balance < 0.5")
+        near, far = self.neighbor_width
+        if len(self.neighbor_width) != 2 or not 0 < near <= far <= 1.5:
+            raise ValueError("neighbor_width must be (low, high) with 0 < low <= high <= 1.5")
+        low, high = self.fold_shadow
+        if len(self.fold_shadow) != 2 or not 0 <= low <= high < 1 or self.neighbor_fold > 0.5:
+            raise ValueError("fold_shadow must be (low, high) within [0, 1); neighbor_fold <= 0.5")
 
     @property
     def enabled(self) -> bool:
@@ -578,6 +600,74 @@ def _background(
 # --------------------------------------------------------------------------- composite
 
 
+def _corners(nodes_px: NDArray) -> NDArray[np.float64]:
+    """Top-left, top-right, bottom-right and bottom-left corner nodes."""
+    return np.array([nodes_px[0, 0], nodes_px[0, -1], nodes_px[-1, -1], nodes_px[-1, 0]])
+
+
+def _draw_neighbor(
+    surface: NDArray[np.float32],
+    neighbor: tuple[Image.Image | NDArray[np.uint8], NDArray, NDArray],
+    placed: NDArray,
+    out_hw: tuple[int, int],
+    config: CompositeConfig,
+    rng: np.random.Generator,
+) -> NDArray | None:
+    """Draw the facing page along the left or right edge of the placed page (corners
+    ``placed``, output px) onto ``surface``; return the fold as two output points."""
+    image, grid, valid = neighbor
+    if not valid.all():
+        return None
+    if not isinstance(image, Image.Image):
+        image = Image.fromarray(image)
+    width, height = image.size
+    other = _corners((grid.astype(np.float64) + 1.0) / 2.0 * np.array([width, height]))
+    tl, tr, br, bl = placed
+    share = rng.uniform(*config.neighbor_width)
+    right = rng.random() < 0.5
+    if right:  # facing page on the right: its left part shows
+        fold = np.array([tr, br])
+        far = fold + share * np.array([tr - tl, br - bl])
+        source = [other[0], other[0] + share * (other[1] - other[0]),
+                  other[3] + share * (other[2] - other[3]), other[3]]  # fmt: skip
+    else:  # facing page on the left: its right part shows
+        fold = np.array([tl, bl])
+        far = fold + share * np.array([tl - tr, bl - br])
+        source = [other[1] - share * (other[1] - other[0]), other[1],
+                  other[2], other[2] - share * (other[2] - other[3])]  # fmt: skip
+    scale, shift = rng.uniform(-config.neighbor_fold, config.neighbor_fold, size=2)
+    middle = far.mean(axis=0)
+    far = middle + (far - middle) * (1.0 + scale) + shift * (bl - tl)
+    target = np.array([tr, far[0], far[1], br] if right else [far[0], tl, bl, far[1]])
+    if abs(polygon_area(target)) < 1.0:
+        return None
+    box = polygon_box(target, out_hw)
+    if box is None:
+        return fold
+    transform = corner_homography(np.array(source), target)
+    step = math.sqrt(abs(polygon_area(np.array(source))) / abs(polygon_area(target)))
+    pixels = warp_homography(image, transform, out_hw, step=step, box=box)
+    x0, y0, x1, y1 = box
+    alpha = page_alpha(target, box, rng.uniform(0.0, config.edge_trim))[..., None]
+    region = surface[y0:y1, x0:x1]
+    gain = np.float32(rng.uniform(*config.page_gain))
+    region += alpha * (pixels.astype(np.float32) * gain - region)
+    return fold
+
+
+def _fold_shade(
+    fold: NDArray, page_width: float, out_hw: tuple[int, int], strength: float, rng
+) -> NDArray[np.float32]:
+    """A shadow along the fold line: 1 far from it, down to 1 - strength on it."""
+    height, width = out_hw
+    yy, xx = np.mgrid[0:height, 0:width].astype(np.float32) + np.float32(0.5)
+    a, b = fold.astype(np.float32)
+    direction = (b - a) / max(float(np.hypot(*(b - a))), 1e-6)
+    distance = np.abs((xx - a[0]) * direction[1] - (yy - a[1]) * direction[0])
+    sigma = np.float32(max(rng.uniform(0.01, 0.05) * page_width, 1.0))
+    return (1.0 - np.float32(strength) * np.exp(-distance / sigma)).astype(np.float32)
+
+
 def compose(
     image: Image.Image | NDArray[np.uint8],
     nodes: NDArray,
@@ -586,10 +676,12 @@ def compose(
     config: CompositeConfig,
     rng: np.random.Generator,
     bank: BackgroundBank | None = None,
+    neighbor: tuple[Image.Image | NDArray[np.uint8], NDArray, NDArray] | None = None,
 ) -> tuple[torch.Tensor, NDArray[np.float32], int] | None:
     """The composite of one sample: (3, H, W) uint8 image, target grid in output
     flattener values, quarter turn index. ``nodes`` are the sample's edge-aligned grid
-    values with respect to ``image``.
+    values with respect to ``image``. ``neighbor`` (image, grid values, valid) is another
+    sample whose page is drawn as the facing page.
 
     Returns None when the sample cannot be placed exactly: an invalid node, or a page
     outline that leaves the source image (its pixels would be missing).
@@ -608,6 +700,10 @@ def compose(
     placed = apply_homography(transform, page)
     box = polygon_box(placed, out_hw)
     surface = _background(config, bank, rng, out_hw)
+    fold = None
+    if neighbor is not None:
+        corners = apply_homography(transform, _corners(nodes_px))
+        fold = _draw_neighbor(surface, neighbor, corners, out_hw, config, rng)
     alpha = np.zeros(out_hw, dtype=np.float32)
     if box is not None:
         left, top, right, bottom = box
@@ -626,6 +722,10 @@ def compose(
         region = result[top:bottom, left:right]
         weight = alpha[top:bottom, left:right, None]
         region += weight * (pixels.astype(np.float32) * np.float32(gain) - region)
+    if fold is not None:
+        page_width = float(np.hypot(*(corners[1] - corners[0])))
+        strength = rng.uniform(*config.fold_shadow)
+        result *= _fold_shade(fold, page_width, out_hw, strength, rng)[..., None]
     light = rng.uniform(1.0 - config.illumination, 1.0 + 0.3 * config.illumination, (3, 3))
     field = smooth_field(light, out_hw)
     if rng.random() < config.cast_shadow_prob:  # an object between the light and the scene

@@ -415,3 +415,39 @@ def test_two_training_steps_with_composites_and_a_tilt_view(tmp_path):
     assert checkpoint["metrics"]["views"]["tilt"]["epe_px"] > 0
     assert checkpoint["train_config"]["augment"]["composite"]["prob"] == 1.0
     assert TrainConfig.from_dict(checkpoint["train_config"]) == config
+
+
+def test_a_facing_page_shows_at_the_fold_and_the_target_stays_the_page():
+    size = (120, 90)
+    nodes, valid = _values(_nodes(size), size), np.ones(GRID, bool)
+    red = np.zeros((*size, 3), np.uint8)
+    red[..., 0] = 250  # the facing page is plain red
+    config = CompositeConfig(
+        prob=1.0,
+        area=(0.1, 0.2),
+        neighbor_prob=1.0,
+        fold_shadow=(0.0, 0.0),
+        panel_prob=0.0,
+        **PLAIN,
+    )
+    expected = _sample_at(torch.from_numpy(_ramp(size)).permute(2, 0, 1), nodes)
+    inner = (slice(1, -1), slice(1, -1))
+    beside = 0
+    for seed in range(6):
+        image, target, _ = compose(
+            _ramp(size),
+            nodes,
+            valid,
+            OUT,
+            config,
+            np.random.default_rng(seed),
+            neighbor=(red, nodes, valid),
+        )
+        np.testing.assert_allclose(_sample_at(image, target)[inner], expected[inner], atol=3)
+        edge = (target[GRID[0] // 2] + 1) / 2 * [OUT[1], OUT[0]]  # the middle row, output px
+        step = (edge[-1] - edge[0]) * 0.05
+        for x, y in (edge[-1] + step, edge[0] - step):  # just outside the right and left edges
+            if 0 <= x < OUT[1] and 0 <= y < OUT[0]:
+                r, g, b = image[:, int(y), int(x)].tolist()
+                beside += r >= 245 and g <= 5 and b <= 5
+    assert beside >= 3

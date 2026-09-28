@@ -1375,9 +1375,31 @@ class DewarpDataset(torch.utils.data.Dataset):
         rng = np.random.default_rng([self.seed, int(position), COMPOSITE_STREAM])
         if rng.random() >= place.prob:
             return None
-        return composite.compose(
-            sample.image, sample.grid, sample.valid, self.input_size, place, rng, self.backgrounds
-        )
+        neighbor = None
+        if place.neighbor_prob > 0 and rng.random() < place.neighbor_prob:
+            neighbor = self._neighbor(int(rng.integers(len(self))))
+        try:
+            return composite.compose(
+                sample.image,
+                sample.grid,
+                sample.valid,
+                self.input_size,
+                place,
+                rng,
+                self.backgrounds,
+                None if neighbor is None else (neighbor.image, neighbor.grid, neighbor.valid),
+            )
+        finally:
+            if neighbor is not None and isinstance(neighbor.image, Image.Image):
+                neighbor.image.close()
+
+    def _neighbor(self, flat: int) -> RawSample:
+        """Another sample of the set, for the facing page of a composite."""
+        which = bisect.bisect_right(self.offsets, flat) - 1
+        other = self.sources[which].load(flat - self.offsets[which])
+        if self.track == "release" and other.meta["track"] != "release":
+            raise _error("track_violation", f"release dataset loaded {other.meta}")
+        return other
 
     def _train_item(self, sample: RawSample, position: int) -> dict[str, Any]:
         rng = None
