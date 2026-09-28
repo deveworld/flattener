@@ -140,6 +140,11 @@ from .timing import StageClock
 from .views import VIEW_SOURCES, crop_placement, run_view
 
 BUNDLE_SCHEMA = "flattener-scan-bundle-1"
+BUNDLE_KEYS = {
+    "dewarp": {"path", "sha256"},
+    "gate": {"path", "sha256"},
+    "orient": {"path", "sha256", "threshold"},
+}
 PIPELINE_NAME = "flattener.scan"
 PIPELINE_VERSION = 3  # 2: the gate is a hint, settle pass; 3: page evidence (scan.look)
 AUTO_PASSES = 1
@@ -744,6 +749,7 @@ def _orient_record(orienter: Orienter) -> dict[str, Any]:
         "track": info.get("track"),
         "temperature": orienter.temperature,
         "threshold": orienter.threshold,
+        "threshold_given": bool(info.get("threshold_given")),
         "shippable": bool(info.get("shippable")),
     }
 
@@ -795,11 +801,14 @@ class Scanner:
         backend: str = "torch",
         research: bool = False,
         cache_size: int = CACHE_SIZE,
+        orient_threshold: float | None = None,
     ) -> Scanner:
         """Load a bundle: a ``flattener-scan-bundle-1`` JSON file (or dict) naming
         ``dewarp`` and optionally ``gate`` and ``orient`` weights, each a path (relative
-        to the bundle file) or ``{"path", "sha256"}``. Weights that fail the ship gate
-        need ``research=True`` (results are then stamped research)."""
+        to the bundle file) or ``{"path", "sha256"}``. The ``orient`` entry may also hold
+        the ``threshold`` measured on real photos; ``orient_threshold`` replaces it. Any
+        other key is an error. Weights that fail the ship gate need ``research=True``
+        (results are then stamped research)."""
         if backend not in BACKENDS:
             raise FlattenerError(
                 Status.INPUT_ERROR,
@@ -821,8 +830,13 @@ class Scanner:
             raise FlattenerError(
                 Status.INPUT_ERROR, "invalid_bundle", f"bundle schema must be {BUNDLE_SCHEMA}"
             )
-        paths = {}
-        for role in ("dewarp", "gate", "orient"):
+        unknown = sorted(set(data) - {"schema", *BUNDLE_KEYS})
+        if unknown:
+            raise FlattenerError(
+                Status.INPUT_ERROR, "invalid_bundle", f"unknown bundle keys: {', '.join(unknown)}"
+            )
+        paths, entries = {}, {}
+        for role, allowed in BUNDLE_KEYS.items():
             entry = data.get(role)
             if entry is None:
                 continue
@@ -832,6 +846,14 @@ class Scanner:
                 raise FlattenerError(
                     Status.INPUT_ERROR, "invalid_bundle", f"{role} must be a path or {{path}}"
                 )
+            extra = sorted(set(entry) - allowed)
+            if extra:
+                raise FlattenerError(
+                    Status.INPUT_ERROR,
+                    "invalid_bundle",
+                    f"unknown keys in {role}: {', '.join(extra)}",
+                )
+            entries[role] = entry
             resolved = Path(entry["path"]).expanduser()
             resolved = resolved if resolved.is_absolute() else base / resolved
             expected = entry.get("sha256")
@@ -845,10 +867,13 @@ class Scanner:
             paths[role] = resolved
         if "dewarp" not in paths:
             raise FlattenerError(Status.INPUT_ERROR, "invalid_bundle", "bundle needs dewarp")
+        if orient_threshold is None:
+            orient_threshold = entries.get("orient", {}).get("threshold")
         return cls.from_files(
             paths["dewarp"],
             gate=paths.get("gate"),
             orient=paths.get("orient"),
+            orient_threshold=orient_threshold,
             device=device,
             research=research,
             cache_size=cache_size,
@@ -862,13 +887,15 @@ class Scanner:
         *,
         gate: str | os.PathLike[str] | None = None,
         orient: str | os.PathLike[str] | None = None,
+        orient_threshold: float | None = None,
         device: str = "cpu",
         research: bool = False,
         cache_size: int = CACHE_SIZE,
         info: dict[str, Any] | None = None,
     ) -> Scanner:
         """Load dewarp weights through the ship gate, and the optional page gate and
-        OrientNet; non-shippable models need ``research=True``."""
+        OrientNet (with ``orient_threshold``, a threshold measured on real photos, in place
+        of the checkpoint's); non-shippable models need ``research=True``."""
         started = time.perf_counter()
         dewarper = load_weights(weights, research=research, device=device)
         segmenter = None
@@ -885,8 +912,22 @@ class Scanner:
                     metadata={"ship_gate": record},
                 )
         orienter = None
+        if orient is None and orient_threshold is not None:
+            raise FlattenerError(
+                Status.INPUT_ERROR,
+                "missing_orient_weights",
+                "an OrientNet threshold needs OrientNet weights",
+            )
         if orient is not None:
-            orienter = Orienter.load(orient, device=device, research=research)
+            if orient_threshold is not None and (
+                isinstance(orient_threshold, bool) or not isinstance(orient_threshold, (int, float))
+            ):
+                raise FlattenerError(
+                    Status.INPUT_ERROR, "invalid_bundle", "the orient threshold must be a number"
+                )
+            orienter = Orienter.load(
+                orient, device=device, research=research, threshold=orient_threshold
+            )
         load = {"seconds": time.perf_counter() - started, "device": device}
         return cls(
             dewarper,

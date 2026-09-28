@@ -90,5 +90,6 @@ step; the lineage entry of its parent carries it.
 
 Validation fits a temperature and the lowest threshold with at most 0.5% silent errors on
 the synthetic val split (`calibration.source = "synthetic_val"`). The design sets the
-operating threshold on the real-photo dev split; pass it to `export --threshold` once it
-is measured. Until then the scanner starts from 0.9.
+operating threshold on the real-photo dev split. Once it is measured, put it in the scan
+bundle's `orient` entry (`"threshold"`) or pass `--orient-threshold` to the scanner, and
+pass it to `export --threshold` for the ONNX file. Until then the scanner uses 0.9.

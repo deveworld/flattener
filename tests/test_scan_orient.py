@@ -235,6 +235,8 @@ def test_checkpoint_loads_only_inside_the_release_lineage(tmp_path):
         synthetic, _payload(model, calibration={**calibration, "source": "synthetic_val"})
     )
     assert Orienter.load(synthetic).threshold == orient.DEFAULT_THRESHOLD
+    given = Orienter.load(synthetic, threshold=0.0)  # a threshold measured on real photos
+    assert given.threshold == 0.0 and given.info["threshold_given"]
     assert sidecar["schema"] == orient.SIDECAR_SCHEMA and "model_state" not in sidecar
     assert json.loads((tmp_path / "release.pt.json").read_text())["track"] == "release"
     orienter = Orienter.load(path)

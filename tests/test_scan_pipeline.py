@@ -27,6 +27,7 @@ from flattener.dewarp.model import DewarpModelConfig, UVDocNet
 from flattener.dewarp.predict import BatchInput, Dewarper, rectify, rectify_batch, rerun_grid
 from flattener.scan import locate, look
 from flattener.scan.io import read_scan_record, read_source, save_scan
+from flattener.scan.orient import Orienter
 from flattener.scan.pipeline import (
     BUNDLE_SCHEMA,
     VERIFY,
@@ -734,3 +735,33 @@ def test_border_and_inset_apply_to_perspective_plans():
     assert (border.border, inset.inset) == (0.2, (0.1, 0.1))
     assert border.output.height / plain.output.height == pytest.approx(1.2, rel=0.02)
     assert inset.output.height / plain.output.height == pytest.approx(0.9, rel=0.02)
+
+
+def test_bundles_carry_a_real_photo_orient_threshold(tmp_path, monkeypatch):
+    _tiny_checkpoint(tmp_path / "model.pt")
+    (tmp_path / "orient.pt").write_bytes(b"weights")
+    thresholds = []
+
+    def load(path, **kwargs):
+        thresholds.append(kwargs["threshold"])
+        return FakeOrienter(TRUE, SIZE)
+
+    monkeypatch.setattr(Orienter, "load", load)
+    bundle = tmp_path / "bundle.json"
+    orient = {"path": "orient.pt", "threshold": 0.93}
+    bundle.write_text(json.dumps({"schema": BUNDLE_SCHEMA, "dewarp": "model.pt", "orient": orient}))
+    Scanner.load(bundle, research=True)
+    Scanner.load(bundle, research=True, orient_threshold=0.97)
+    assert thresholds == [0.93, 0.97]
+    for wrong in (
+        {"dewarp": "model.pt", "orientation": "orient.pt"},  # a misspelled role
+        {"dewarp": {"path": "model.pt", "threshold": 0.5}},
+        {"dewarp": "model.pt", "orient": {"path": "orient.pt", "threshold": "high"}},
+    ):
+        bundle.write_text(json.dumps({"schema": BUNDLE_SCHEMA, **wrong}))
+        with pytest.raises(FlattenerError) as error:
+            Scanner.load(bundle, research=True)
+        assert error.value.reason_code == "invalid_bundle"
+    with pytest.raises(FlattenerError) as error:
+        Scanner.from_files(tmp_path / "model.pt", orient_threshold=0.9, research=True)
+    assert error.value.reason_code == "missing_orient_weights"

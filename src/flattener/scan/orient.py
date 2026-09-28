@@ -941,7 +941,8 @@ class Orienter:
         temperature: float | None = None,
         threshold: float | None = None,
     ) -> Orienter:
-        """Load a checkpoint; weights outside the release lineage need ``research=True``."""
+        """Load a checkpoint; weights outside the release lineage need ``research=True``. A
+        given ``threshold`` (measured on real photos) replaces ``operating_threshold``."""
         path = Path(path)
         payload = load_checkpoint(path)
         sha256 = json.loads(sidecar_path(path).read_text(encoding="utf-8"))["sha256"]
@@ -957,12 +958,15 @@ class Orienter:
         model = OrientNet(OrientConfig.from_dict(payload["model_config"]))
         model.load_state_dict(payload["model_state"])
         calibration = payload.get("calibration") or {}
+        if temperature is None:
+            temperature = calibration.get("temperature") or DEFAULT_TEMPERATURE
+        info.update(path=str(path), calibration=calibration, threshold_given=threshold is not None)
         return cls(
             model,
-            temperature=temperature or calibration.get("temperature") or DEFAULT_TEMPERATURE,
-            threshold=threshold or operating_threshold(calibration),
+            temperature=temperature,
+            threshold=operating_threshold(calibration) if threshold is None else threshold,
             device=device,
-            info={**info, "path": str(path), "calibration": calibration},
+            info=info,
         )
 
     @torch.no_grad()

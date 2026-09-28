@@ -129,6 +129,11 @@ def parser() -> argparse.ArgumentParser:
     weights.add_argument(
         "--orient-weights", type=Path, help="OrientNet checkpoint (with --weights)"
     )
+    weights.add_argument(
+        "--orient-threshold",
+        type=float,
+        help="OrientNet threshold measured on real photos; replaces the bundle's and 0.9",
+    )
     weights.add_argument("--device", default="cpu")
     weights.add_argument("--threads", type=int, help="torch CPU threads")
     weights.add_argument(
@@ -300,12 +305,17 @@ def _load(args: argparse.Namespace) -> Scanner:
     cache_size = 0 if args.no_cache else CACHE_SIZE
     if args.bundle is not None:
         return Scanner.load(
-            args.bundle, device=args.device, research=args.research, cache_size=cache_size
+            args.bundle,
+            device=args.device,
+            research=args.research,
+            cache_size=cache_size,
+            orient_threshold=args.orient_threshold,
         )
     return Scanner.from_files(
         args.weights,
         gate=args.gate,
         orient=args.orient_weights,
+        orient_threshold=args.orient_threshold,
         device=args.device,
         research=args.research,
         cache_size=cache_size,

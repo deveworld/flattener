@@ -270,3 +270,11 @@ def test_timing_debug_and_their_errors(tmp_path, photo, capsys, monkeypatch):
     (line,) = _lines(capsys)
     assert line["outcome"] == "rectified_with_warnings" and "disk full" in line["debug_error"]
     assert "debug" not in line["files"] and (out / "photo.jpg").is_file()
+
+
+def test_an_orient_threshold_reaches_the_loader(tmp_path, photo, monkeypatch):
+    loaded = _install(monkeypatch)
+    args = [str(photo), "--out", str(tmp_path / "out"), "--orient-threshold", "0.95"]
+    assert cli.main([*args, "--weights", "w", "--orient-weights", "o"]) == 0
+    assert cli.main([*args, "--bundle", "b.json", "--overwrite"]) == 0
+    assert [kwargs["orient_threshold"] for _, kwargs in loaded] == [0.95, 0.95]

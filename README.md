@@ -22,7 +22,7 @@ python -m flattener.scan IMG... --out DIR --bundle bundle.json
 python -m flattener.scan IMG... --out DIR --weights DEWARP.pt [--gate GATE.pt] [--orient-weights O.pt]
 ```
 
-- 가중치는 두 방식 중 하나로만 줍니다. 번들은 `{"schema": "flattener-scan-bundle-1", "dewarp": ..., "gate": ..., "orient": ...}`이고 `dewarp`만 꼭 있어야 합니다. 각 값은 번들 파일 기준 경로이거나 `{"path": ..., "sha256": ...}`입니다.
+- 가중치는 두 방식 중 하나로만 줍니다. 번들은 `{"schema": "flattener-scan-bundle-1", "dewarp": ..., "gate": ..., "orient": ...}`이고 `dewarp`만 꼭 있어야 합니다. 각 값은 번들 파일 기준 경로이거나 `{"path": ..., "sha256": ...}`입니다. `orient`에는 실사진으로 정한 방향 판별 임계값 `"threshold"`도 넣을 수 있고, `--orient-threshold`를 주면 그 값을 씁니다. 그 밖의 키는 오류입니다.
 - 가중치는 배포 검사(아래 "모델")를 통과해야 불러옵니다. `--research`를 주면 통과하지 못한 가중치도 불러오고, 기록에 `research: true`가 남습니다.
 - `--device`의 기본값은 `cpu`입니다.
 - 수동 수정: `--region L,T,R,B`, `--quad x1,y1,...,x4,y4`(왼쪽 위부터 시계 방향), `--quarter 0..3`, `--no-dewarp`, `--long-side N`, `--output-size H,W`, `--aspect`.
