@@ -128,7 +128,11 @@ def parser() -> argparse.ArgumentParser:
         action="store_true",
         help="load weights that fail the ship gate; records say research: true",
     )
-    manual = parser.add_argument_group("manual corrections")
+    manual = parser.add_argument_group(
+        "manual corrections",
+        "Coordinates use EXIF-oriented decoded image pixels. For a JPEG decoded at reduced "
+        "resolution, divide full-resolution coordinates by source.scale in its scan record.",
+    )
     area = manual.add_mutually_exclusive_group()
     area.add_argument("--region", type=_region, metavar="L,T,R,B", help="page box in pixels")
     area.add_argument(
@@ -250,12 +254,18 @@ def _load(args: argparse.Namespace) -> Scanner:
 
 def _stems(images: Sequence[Path]) -> list[str]:
     seen: dict[str, int] = {}
+    reserved = {path.stem for path in images}
     stems = []
     for path in images:
         stem = path.stem
         count = seen.get(stem, 0)
+        name = stem if count == 0 else f"{stem}-{count + 1}"
+        while count and name in reserved:
+            count += 1
+            name = f"{stem}-{count + 1}"
         seen[stem] = count + 1
-        stems.append(stem if count == 0 else f"{stem}-{count + 1}")
+        reserved.add(name)
+        stems.append(name)
     return stems
 
 

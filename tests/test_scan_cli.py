@@ -153,20 +153,27 @@ def test_same_stems_get_numbered_and_unreadable_photos_fail(tmp_path, photo, cap
     other = tmp_path / "again"
     other.mkdir()
     Image.fromarray(ramp_scene(SIZE, PAGE)).save(other / "photo.png")
+    numbered = tmp_path / "photo-2.png"
+    numbered.write_bytes(photo.read_bytes())
     broken = tmp_path / "broken.jpg"
     broken.write_bytes(b"not an image")
     out = tmp_path / "out"
-    args = [str(photo), str(other / "photo.png"), str(broken), "--out", str(out), "--weights", "w"]
+    inputs = [photo, other / "photo.png", numbered, broken]
+    args = [*map(str, inputs), "--out", str(out), "--weights", "w", "--overwrite"]
     assert cli.main(args) == 1
     lines = _lines(capsys)
     assert [line["outcome"] for line in lines] == [
         "rectified_with_warnings",
         "rectified_with_warnings",
+        "rectified_with_warnings",
         "failed",
     ]
-    assert lines[2]["status"] == "input_error"
+    assert lines[-1]["status"] == "input_error"
     assert (out / "photo.jpg").is_file() and (out / "photo-2.jpg").is_file()
     assert np.asarray(Image.open(out / "photo-2.jpg")).shape == (190, 150, 3)
+    assert len(list(out.glob("*.jpg"))) == 3
+    records = [read_scan_record(line["files"]["record"]).input for line in lines[:-1]]
+    assert records == list(map(str, inputs[:-1]))
 
 
 def test_timing_rows_cover_decoding_and_flag_cached_repeats(tmp_path, photo, capsys, monkeypatch):
