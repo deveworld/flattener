@@ -199,11 +199,11 @@ class ScanOptions:
     drifts). ``output``: ``"auto"``, a long side or (height, width). ``aspect``:
     ``"auto"``, ``"estimate"``, ``"snap"``, a paper name or width / height. ``inset``: as
     ``dewarp.predict --inset``; ``border`` moves each side out by border / 2 of the page
-    extent. ``fast_check``: check dewarp plans with
-    ``scan.fast_check`` (the renderer's decisions from the grid, a small proxy render) and
-    sample the full size in ``render``. ``preview``: long side of a preview image
-    sampled from the same map (``None``: no preview). ``chain``: try the other candidates
-    after ``default`` fails.
+    extent. ``fast_check`` (the default): check dewarp plans with ``scan.fast_check`` (the
+    renderer's decisions from the grid, a small proxy render) and sample the full size in
+    ``render``; ``False`` runs the renderer's checks at full size. ``preview``: long side
+    of a preview image sampled from the same map (``None``: no preview). ``chain``: try
+    the other candidates after ``default`` fails.
     ``use_focal``: take the EXIF focal length into the aspect estimate. ``fill_rgb``: the
     color of output pixels outside the source; the plan keeps it with ``quantize``, so a
     stored plan renders the same image. ``pages`` (for ``Scanner.split``): ``"auto"``
@@ -220,7 +220,7 @@ class ScanOptions:
     inset: Inset = None
     border: float = 0.0
     quantize: str = "round"
-    fast_check: bool = False
+    fast_check: bool = True
     view_source: str = "original"
     view_extent: str = "canvas"
     fallback: str = "original"

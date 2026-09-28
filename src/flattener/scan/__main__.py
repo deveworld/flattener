@@ -194,9 +194,9 @@ def parser() -> argparse.ArgumentParser:
         help="number the left page (ltr) or the right page (rtl) first",
     )
     processing.add_argument(
-        "--fast-check",
+        "--full-check",
         action="store_true",
-        help="take the render checks from the grid (and a small proxy), then sample once",
+        help="run the renderer's checks at full size (default: from the grid and a small proxy)",
     )
     output = parser.add_argument_group("output")
     size = output.add_mutually_exclusive_group()
@@ -241,7 +241,7 @@ def _options(args: argparse.Namespace) -> ScanOptions:
         border=args.border,
         fallback=args.fallback,
         on_error=args.on_error,
-        fast_check=args.fast_check,
+        fast_check=not args.full_check,
         chain=not args.no_chain,
         pages=args.pages,
         page_order=args.page_order,

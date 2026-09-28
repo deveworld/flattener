@@ -109,7 +109,7 @@ v0 가중치는 위치 추정 연구의 `best.pt`(파라미터 140,545개, 입�
 - 수동 수정(`--region`, `--quad`, `--quarter`, `--no-dewarp`, `--long-side`, `--output-size`, `--aspect`)은 자동 경로와 같은 단계를 거치고 기록에 `manual`로 남습니다. `--no-dewarp`도 방향을 지정하지 않으면 OrientNet에 묻습니다. 사각형은 `--quad`, `--region`, 페이지 게이트의 영역 순으로 정하고, 게이트가 없으면 사진 전체를 한 번 추론한 윤곽의 네 꼭짓점을 씁니다. `--quad`는 왼쪽 위부터 시계 방향으로 줍니다. 반시계 방향은 뒤집힌 페이지를 뜻하므로 입력 오류입니다. `--no-dewarp`로 요청한 원근 보정 결과는 스캔된 것으로 셉니다. 모델 출력은 입력 sha256별로 캐시하므로 바뀐 단계 뒤만 다시 계산합니다.
 - 판정 임계값(`scan.locate.THRESHOLDS`, `scan.pipeline.VERIFY`)은 설계의 시작값이고 스캔 기록에 남습니다. SmartDoc train 분할과 합성 val로 정하는 일이 남아 있습니다. 종이·글줄·크롭 검사의 값과 조각 나눔의 0.5는 KR-Real dev, SmartDoc train, 페이지가 없는 사진 76장(배경 크롭과 질감 사진)으로 정했습니다.
 - `--timing F.jsonl`은 사진마다 단계별 시간(디코드 포함, 패스별 `infer_pass_*`, `render_map`/`render_check`/`render_sample`, `preview`), 저장까지의 `end_to_end`, 캐시 적중을 한 줄씩 쓰고, 첫 줄에 모델 로드 시간을 남깁니다. 같은 사진을 반복해 잴 때는 `--no-cache`를 씁니다.
-- `--fast-check`(`ScanOptions(fast_check=True)`)는 렌더러의 맵 검사 판정을 격자에서 계산하고, 작은 proxy에서만 `flattener.render`를 돌립니다. 저장 이미지는 같습니다. 방법은 `scan/fast_check.py`에, 판정 비교는 `tools/fast_check_agreement.py`에 있습니다.
+- 렌더러의 맵 검사 판정은 기본으로 격자에서 계산하고, 작은 proxy에서만 `flattener.render`를 돌립니다(`ScanOptions.fast_check`, 기본 `True`). 저장 이미지는 같습니다. `--full-check`(`fast_check=False`)는 원래 해상도에서 검사합니다. KR-Real 12MP 20장에서 끝까지 시간 중앙값이 1.52초에서 1.26초로(p95 2.51초에서 1.75초로) 줄었고 저장 이미지는 모두 같았습니다(노트북 CPU 2스레드). 방법은 `scan/fast_check.py`에, 판정 비교는 `tools/fast_check_agreement.py`에 있습니다.
 - `rectify_batch(scanner.dewarper, inputs, out, **scanner.batch_kwargs(options))`는 벤치마크 예측 폴더를 스캐너로 만듭니다. `predictions.json`에 pipeline과 스캐너의 양자화·inset·pass 설정이 남고, 다른 pipeline의 예측이 있는 폴더나 스캐너 설정과 다른 인자는 거부합니다.
 
 ## 휨 보정 예측

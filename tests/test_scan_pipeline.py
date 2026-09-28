@@ -92,7 +92,7 @@ def test_the_default_path_rectifies_a_skewed_page():
     assert result.valid_mask.all()
     timings = result.timings
     assert {"read", "detect", "orient", "infer", "infer_pass_A", "infer_pass_1"} <= set(timings)
-    assert {"verify", "plan", "render", "render_map", "render_check"} <= set(timings)
+    assert {"verify", "plan", "render", "render_check"} <= set(timings)
     assert {"render_sample", "preview", "total"} <= set(timings)
     assert timings["infer"] >= timings["infer_pass_A"]
     assert all(item["ok"] for item in result.metadata["timing_stages"])
@@ -407,7 +407,9 @@ def test_whole_image_passes_render_what_rectify_renders(convention):
     whole = ScanOverrides(region=(0, 0, SIZE[1], SIZE[0]))
     config = RenderConfig(on_error="return")
     for passes, deskew in ((0, False), (1, False), (1, True)):
-        options = ScanOptions(passes=passes, deskew=deskew, orient="none", output=SIZE)
+        options = ScanOptions(
+            passes=passes, deskew=deskew, orient="none", output=SIZE, fast_check=False
+        )
         result = scanner.scan(image, options, whole)
         assert result.status == Status.SUCCESS and not result.qa["rerun_discarded"]
         expected = rectify(dewarper, image, render_config=config, rerun=passes, deskew=deskew)
@@ -421,7 +423,7 @@ def test_whole_image_passes_render_what_rectify_renders(convention):
         assert fast.metadata["renderer"]["check"] == "fast_check"
         proxy = fast.metadata["renderer"]["check_resolution"]["proxy"]
         assert proxy[0] * proxy[1] <= SIZE[0] * SIZE[1] / 16
-    assert scanner.pipeline_record(ScanOptions(fast_check=True)) != scanner.pipeline_record()
+    assert scanner.pipeline_record(ScanOptions(fast_check=False)) != scanner.pipeline_record()
 
 
 def test_plan_then_render_matches_scan_and_plans_round_trip(tmp_path):
