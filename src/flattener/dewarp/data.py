@@ -14,7 +14,9 @@ flattener convention (edge-aligned nodes, align_corners=False values relative to
 returned image; see ``coords``), a node validity mask, an optional UVDoc-normalized
 3-D grid and string metadata including the track. Training items also carry
 ``color`` and ``noise_seed``: per-sample photometric parameters that
-``apply_color_batch`` applies to a float batch on the training device. Evaluation
+``apply_color_batch`` applies to a float batch on the training device. With
+``AugmentConfig.composite`` enabled they also carry ``turn``, the quarter turn (0-3,
+counter-clockwise) of a composite page (see ``composite``); other items hold 0. Evaluation
 items stack one entry per ``ViewConfig`` along dim 0 of ``image``, ``grid2d`` and
 ``valid``.
 
@@ -69,7 +71,8 @@ from PIL import Image
 from torch.nn import functional as F
 
 from ..contracts import FlattenerError, Status
-from . import coords
+from . import composite, coords
+from .composite import BackgroundBank, CompositeConfig
 from .coords import (
     map_to_grid,
     pixels_to_flattener,
@@ -137,13 +140,17 @@ BENCHMARK_FILES = (
     ("TRACK.json", lambda data: data.get("track") == "eval-only"),
     ("provenance.json", lambda data: data.get("training_use") is False),
 )
-VIEW_CROPS = ("page", "full_frame", "small_page")
+VIEW_CROPS = ("page", "full_frame", "small_page", "tilt")
+DEFAULT_TILT = 0.15
 VIEW_ROTATIONS = (0, 90, 180, 270)  # counter-clockwise degrees
 _TURNS = {
     90: Image.Transpose.ROTATE_90,
     180: Image.Transpose.ROTATE_180,
     270: Image.Transpose.ROTATE_270,
 }
+# Extra seed word of the generator that decides and draws composites, so samples that
+# stay plain crops consume the main generator exactly as without composites.
+COMPOSITE_STREAM = 1
 # ``color`` item layout: on, brightness, contrast, saturation, gain r/g/b, gamma,
 # grayscale, blur on, blur sigma, noise on, noise std.
 COLOR_PARAMS = 13
@@ -329,7 +336,10 @@ class AugmentConfig:
     ``BORDER_REPLICATE``). ``full_frame_prob`` keeps the whole image.
     ``rotation_kinds`` limits rotation to those source kinds (empty: all; upstream UVDoc
     rotates its own dataset only). ``jpeg_draft`` lets JPEG decoding skip resolution
-    the crop discards (DCT scaling by 1/2, 1/4 or 1/8).
+    the crop discards (DCT scaling by 1/2, 1/4 or 1/8). ``composite`` places a share
+    of the samples on new backgrounds with perspective (``composite.CompositeConfig``;
+    a JSON object in configs). A disabled composite stays out of ``to_dict``, so
+    configs without it keep their signature.
     """
 
     enabled: bool = True
@@ -350,10 +360,12 @@ class AugmentConfig:
     noise_prob: float = 0.5
     noise_std: float = 0.02
     jpeg_draft: bool = True
+    composite: CompositeConfig = field(default_factory=CompositeConfig)
 
     def __post_init__(self) -> None:
         margin = tuple(self.margin)
         object.__setattr__(self, "margin", margin)
+        object.__setattr__(self, "composite", CompositeConfig.from_value(self.composite))
         if len(margin) != 2 or not 0 <= margin[0] <= margin[1] <= 1:
             raise ValueError("margin must be (low, high) with 0 <= low <= high <= 1")
         kinds = self.rotation_kinds
@@ -366,7 +378,7 @@ class AugmentConfig:
             if item.name in ("enabled", "clip_to_image", "jpeg_draft"):
                 if not isinstance(value, bool):
                     raise ValueError(f"{item.name} must be a bool")
-            elif item.name not in ("margin", "rotation_kinds") and (
+            elif item.name not in ("margin", "rotation_kinds", "composite") and (
                 isinstance(value, bool) or not isinstance(value, (int, float)) or not value >= 0
             ):
                 raise ValueError(f"{item.name} must be a non-negative number")
@@ -376,7 +388,15 @@ class AugmentConfig:
             raise ValueError("rotation_deg must be <= 45; brightness/contrast/gain < 1")
 
     def to_dict(self) -> dict[str, Any]:
-        return {k: list(v) if isinstance(v, tuple) else v for k, v in asdict(self).items()}
+        result = {}
+        for item in fields(self):
+            value = getattr(self, item.name)
+            if item.name == "composite":
+                if value.enabled:
+                    result["composite"] = value.to_dict()
+                continue
+            result[item.name] = list(value) if isinstance(value, tuple) else value
+        return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -389,10 +409,14 @@ class ViewConfig:
     pixels and is clipped to the image, like a saved crop file. ``full_frame`` uses the
     whole image. ``small_page`` takes the ``page`` crop and shrinks it onto a plain
     textured canvas of the model input size, covering a seeded ``page_fraction`` of its
-    area at a seeded position. ``rotation`` turns the crop counter-clockwise by 90, 180
-    or 270 degrees before resizing; the target values turn with it, so the model has to
-    return the upright page. Crops are resampled bilinearly without antialiasing
-    (values within one level of ``predict``'s float resize).
+    area at a seeded position. ``tilt`` takes the ``page`` crop as seen by a tilted
+    camera: the four frame corners move by up to ``tilt`` of the frame side (seeded),
+    shrunk about the frame centre when the page would leave the frame, and the source
+    is sampled through that homography with its border repeated. ``rotation`` turns the
+    crop counter-clockwise by 90, 180 or 270 degrees before resizing; the target values
+    turn with it, so the model has to return the upright page. Crops are resampled
+    bilinearly without antialiasing (values within one level of ``predict``'s float
+    resize).
     """
 
     name: str
@@ -400,6 +424,7 @@ class ViewConfig:
     margin: tuple[float, float] = (0.025, 0.025)
     rotation: int = 0
     page_fraction: tuple[float, float] = (0.1, 0.25)
+    tilt: float = DEFAULT_TILT
 
     def __post_init__(self) -> None:
         margin, fraction = tuple(self.margin), tuple(self.page_fraction)
@@ -420,19 +445,28 @@ class ViewConfig:
             raise ValueError(f"view rotation must be one of {VIEW_ROTATIONS}")
         if self.crop != "small_page" and fraction != (0.1, 0.25):
             raise ValueError("page_fraction applies to the small_page crop only")
+        if isinstance(self.tilt, bool) or not isinstance(self.tilt, (int, float)):
+            raise ValueError("view tilt must be a number")
+        if self.crop == "tilt" and (not 0 < self.tilt <= 0.3 or self.rotation):
+            raise ValueError("a tilt view needs 0 < tilt <= 0.3 and no rotation")
+        if self.crop != "tilt" and self.tilt != DEFAULT_TILT:
+            raise ValueError("tilt applies to the tilt crop only")
 
     def to_dict(self) -> dict[str, Any]:
-        """The fields that define the view; rotation and page_fraction only when used."""
+        """The fields that define the view; rotation, page_fraction and tilt only when
+        used."""
         data: dict[str, Any] = {"name": self.name, "crop": self.crop, "margin": list(self.margin)}
         if self.rotation:
             data["rotation"] = self.rotation
         if self.crop == "small_page":
             data["page_fraction"] = list(self.page_fraction)
+        if self.crop == "tilt":
+            data["tilt"] = self.tilt
         return data
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ViewConfig:
-        allowed = {"name", "crop", "margin", "rotation", "page_fraction"}
+        allowed = {"name", "crop", "margin", "rotation", "page_fraction", "tilt"}
         if not isinstance(data, dict) or set(data) - allowed:
             raise ValueError(f"bad view {data!r}")
         return cls(**data)
@@ -1102,6 +1136,8 @@ def evaluation_view(
     """
     rng = np.random.default_rng([zlib.crc32(view.name.encode()), zlib.crc32(key.encode())])
     left, top, right, bottom = view_box(sample, view, rng)
+    if view.crop == "tilt":
+        return _tilt_view(sample, input_size, view, rng, (left, top, right, bottom))
     half = np.array([right - left, bottom - top], dtype=np.float64) / 2.0
     box = Crop(0.0, np.array([left, top], dtype=np.float64) + half, half)
     target = box.target(_edge_points(sample)).astype(np.float64)
@@ -1121,6 +1157,28 @@ def evaluation_view(
     canvas[:, y0 : y0 + page_h, x0 : x0 + page_w] = _resize_region(region, (page_h, page_w))
     pixels = (target + 1.0) / 2.0 * [page_w, page_h] + [x0, y0]
     return canvas, (2.0 * pixels / [width, height] - 1.0).astype(np.float32)
+
+
+def _tilt_view(
+    sample: RawSample,
+    input_size: tuple[int, int],
+    view: ViewConfig,
+    rng: np.random.Generator,
+    box: tuple[int, int, int, int],
+) -> tuple[torch.Tensor, NDArray[np.float32]]:
+    """The ``box`` crop scaled to the input, then tilted (``composite.tilt_transform``).
+    Sampled without antialiasing like the page views."""
+    height, width = input_size
+    left, top, right, bottom = box
+    scale_x, scale_y = width / (right - left), height / (bottom - top)
+    base = np.array([[scale_x, 0, -left * scale_x], [0, scale_y, -top * scale_y], [0, 0, 1]])
+    points = _edge_points(sample)
+    page = points[sample.valid] if sample.valid.any() else points.reshape(-1, 2)
+    transform = composite.tilt_transform(base, page, input_size, view.tilt, rng)
+    pixels = composite.warp_homography(_as_image(sample.image), transform, input_size, edge=True)
+    target = 2.0 * composite.apply_homography(transform, points) / [width, height] - 1.0
+    image = torch.from_numpy(np.array(pixels)).permute(2, 0, 1).contiguous()
+    return image, target.astype(np.float32)
 
 
 def draw_color_params(
@@ -1207,8 +1265,13 @@ def to_float_images(batch: dict[str, Any]) -> torch.Tensor:
 
 class DewarpDataset(torch.utils.data.Dataset):
     """Concatenation of sources. Keys are ints or ``(flat_index, position)``;
-    augmentation draws from ``default_rng([seed, position])``, so every worker
-    assignment gives the same items. Top-level and picklable (Windows spawn)."""
+    augmentation draws from ``default_rng([seed, position])`` (composites from
+    ``default_rng([seed, position, COMPOSITE_STREAM])``), so every worker assignment
+    gives the same items. Top-level and picklable (Windows spawn).
+
+    A training set with composite backgrounds opens their folder when it is built: a
+    release-track set refuses textures whose license is not on the release list, and
+    ``describe`` adds the folder's manifest digest to every source."""
 
     def __init__(
         self,
@@ -1232,6 +1295,17 @@ class DewarpDataset(torch.utils.data.Dataset):
         if len({view.name for view in self.views}) != len(self.views):
             raise _error("invalid_config", "view names must be unique")
         self.offsets = np.cumsum([0] + [len(source) for source in sources]).tolist()
+        self.backgrounds: BackgroundBank | None = None
+        place = augment.composite
+        if train and augment.enabled and place.enabled and place.background_dir:
+            license_ok = release_license_ok if track == "release" else None
+            try:
+                directory = expand_path(place.background_dir)
+                self.backgrounds = BackgroundBank(directory, license_ok=license_ok)
+            except PermissionError as error:
+                raise _error("track_violation", f"composite backgrounds: {error}") from error
+            except (OSError, ValueError, KeyError) as error:
+                raise _error("invalid_config", f"composite backgrounds: {error}") from error
 
     def __len__(self) -> int:
         return self.offsets[-1]
@@ -1250,7 +1324,11 @@ class DewarpDataset(torch.utils.data.Dataset):
         return [float(weight) / sum(weights) for weight in weights]
 
     def describe(self) -> list[dict[str, Any]]:
-        return [source.describe() for source in self.sources]
+        described = [source.describe() for source in self.sources]
+        if self.backgrounds is not None:
+            backgrounds = self.backgrounds.describe()
+            described = [{**entry, "backgrounds": backgrounds} for entry in described]
+        return described
 
     def sample_keys(self) -> set[tuple[str, str]]:
         """``(resolved root, sample_id)`` of every sample (overlap checks)."""
@@ -1289,22 +1367,44 @@ class DewarpDataset(torch.utils.data.Dataset):
             torch.from_numpy(valid[None].astype(np.float32)),
         )
 
+    def _composite(
+        self, sample: RawSample, position: int
+    ) -> tuple[torch.Tensor, NDArray[np.float32], int] | None:
+        """The sample placed on a new background, or None when it stays a plain crop."""
+        place = self.augment.composite
+        rng = np.random.default_rng([self.seed, int(position), COMPOSITE_STREAM])
+        if rng.random() >= place.prob:
+            return None
+        return composite.compose(
+            sample.image, sample.grid, sample.valid, self.input_size, place, rng, self.backgrounds
+        )
+
     def _train_item(self, sample: RawSample, position: int) -> dict[str, Any]:
         rng = None
         if self.augment.enabled:
             rng = np.random.default_rng([self.seed, int(position)])
-        image, grid = apply_geometry(sample, self.input_size, self.augment, rng)
+        placed = None
+        if rng is not None and self.augment.composite.enabled:
+            placed = self._composite(sample, position)
+        if placed is None:
+            image, grid = apply_geometry(sample, self.input_size, self.augment, rng)
+            turn = 0
+        else:
+            image, grid, turn = placed
         color, noise_seed = IDENTITY_COLOR, 0
         if rng is not None:
             color, noise_seed = draw_color_params(self.augment, rng)
         grid2d, valid = self._target(sample, grid)
-        return {
+        item = {
             "image": image,
             "grid2d": grid2d,
             "valid": valid,
             "color": torch.from_numpy(color.copy()),
             "noise_seed": torch.tensor(noise_seed, dtype=torch.int64),
         }
+        if self.augment.composite.enabled:
+            item["turn"] = torch.tensor(turn, dtype=torch.int64)
+        return item
 
     def _eval_item(self, sample: RawSample) -> dict[str, Any]:
         key = f"{sample.meta.get('source', '')}/{sample.meta.get('sample_id', '')}"
@@ -1382,8 +1482,8 @@ def _code_tokens(source: str) -> str:
 def target_code_sha256() -> str:
     """sha256 of the code that turns stored values into targets and pairs them with the
     image: ``coords`` and here the grid readers, the source loaders, the crop mapping,
-    the image warp and the target masking. Only tokens count, so comment, docstring and
-    layout edits leave it unchanged."""
+    the image warp, the target masking and the composite warp. Only tokens count, so
+    comment, docstring and layout edits leave it unchanged."""
     parts = (
         coords,
         _read_matrix,
@@ -1398,6 +1498,10 @@ def target_code_sha256() -> str:
         _edge_points,
         warp_image,
         DewarpDataset._target,
+        composite.apply_homography,
+        composite._reduce_source,
+        composite.warp_homography,
+        composite.compose,
     )
     digest = hashlib.sha256()
     for part in parts:

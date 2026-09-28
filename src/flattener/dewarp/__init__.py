@@ -2,8 +2,10 @@
 
 Independent of ``flattener.learning``. Modules: ``model`` (UVDocnet, MIT-derived),
 ``coords`` (grid conventions), ``data`` (sources, tracks, augmentation),
-``checkpoint``, ``train`` (``python -m flattener.dewarp.train``) and ``predict``
-(``python -m flattener.dewarp.predict``).
+``composite`` (pages placed on new backgrounds with perspective), ``checkpoint``,
+``train`` (``python -m flattener.dewarp.train``), ``predict``
+(``python -m flattener.dewarp.predict``) and ``probe`` (the tilt probe,
+``python -m flattener.dewarp.probe``).
 """
 
 from .coords import (
