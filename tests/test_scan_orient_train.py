@@ -250,7 +250,7 @@ def test_dataset_items_and_targets(built):
 
 
 @pytest.mark.training
-def test_training_smoke_records_a_release_lineage(built, tmp_path):
+def test_training_smoke_records_a_release_lineage(built, tmp_path, monkeypatch):
     directory, _ = built
     torch.set_num_threads(2)
     config = TrainConfig(
@@ -303,6 +303,17 @@ def test_training_smoke_records_a_release_lineage(built, tmp_path):
     with pytest.raises(FlattenerError) as caught:
         train(replace(config, lr=1e-3))
     assert caught.value.reason_code == "resume_mismatch"
+
+    # Final validation without improvement must still save; dropout must resume exactly.
+    monkeypatch.setattr("flattener.scan.orient_train.improves", lambda *args: False)
+    split = replace(config, output_dir=str(tmp_path / "split"), max_steps=2)
+    train(split, resume="none")
+    resumed = train(replace(split, max_steps=3))
+    expected = orient.load_checkpoint(summary["checkpoint"])
+    actual = orient.load_checkpoint(resumed["checkpoint"])
+    assert actual["step"] == expected["step"] == 3
+    for key, value in expected["model_state"].items():
+        assert torch.equal(value, actual["model_state"][key]), key
 
 
 def test_a_fine_tune_start_carries_the_parent_data_spec(tmp_path):

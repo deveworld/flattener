@@ -692,6 +692,8 @@ def _loader(dataset, sampler, config: TrainConfig, device, workers: int, batch_s
         persistent_workers=workers > 0,
         prefetch_factor=config.prefetch_factor if workers > 0 else None,
         worker_init_fn=worker_init if workers > 0 else None,
+        # Creating a loader iterator must not advance the model's dropout RNG.
+        generator=torch.Generator().manual_seed(config.seed),
     )
 
 
@@ -813,6 +815,8 @@ def train(config: TrainConfig, *, resume: str = "auto") -> dict[str, Any]:
             if payload.get("scaler_state"):
                 scaler.load_state_dict(payload["scaler_state"])
             torch.set_rng_state(payload["rng_state"]["torch"])
+            if device.type == "cuda" and payload["rng_state"].get("cuda") is not None:
+                torch.cuda.set_rng_state(payload["rng_state"]["cuda"], device)
         write_json(output / "config.json", config.to_dict())
 
         weights = None
@@ -863,7 +867,10 @@ def train(config: TrainConfig, *, resume: str = "auto") -> dict[str, Any]:
                     "model_state": {k: v.contiguous() for k, v in model.state_dict().items()},
                     "optimizer_state": optimizer.state_dict(),
                     "scaler_state": scaler.state_dict(),
-                    "rng_state": {"torch": torch.get_rng_state()},
+                    "rng_state": {
+                        "torch": torch.get_rng_state(),
+                        "cuda": torch.cuda.get_rng_state(device) if device.type == "cuda" else None,
+                    },
                 },
                 keep=config.keep_checkpoints,
                 is_best=is_best,
@@ -946,7 +953,7 @@ def train(config: TrainConfig, *, resume: str = "auto") -> dict[str, Any]:
             improved = bool(config.val_every) and step % config.val_every == 0 and run_validation()
             if improved or (config.checkpoint_every and step % config.checkpoint_every == 0):
                 save(improved)
-        if step > first_step and validated_step != step:
+        if step > first_step:
             improved = run_validation()
             if improved or saved_step != step:
                 save(improved)
