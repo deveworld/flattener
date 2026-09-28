@@ -363,3 +363,42 @@ def test_a_fine_tune_start_carries_the_parent_data_spec(tmp_path):
     assert orient.release_problems(record(spec("child"), [bare])) == [
         "ship gate: unverified_data_spec"
     ]
+
+
+def _pages_source(tmp_path, rows):
+    root = tmp_path / "templates"
+    root.mkdir(exist_ok=True)
+    lines = [
+        {"path": name, "split": "train", "track": "release", "license_class": "own"}
+        for name in rows
+    ]
+    (root / "manifest.jsonl").write_text("".join(json.dumps(line) + "\n" for line in lines))
+    spec = json.loads(_build_spec(tmp_path).read_text())
+    source = {"name": "templates", "kind": "pages", "root": "templates", "track": "release"}
+    spec["sources"] = [{**source, "license": "own"}]
+    (tmp_path / "pages.json").write_text(json.dumps(spec))
+    return root, tmp_path / "pages.json"
+
+
+def test_page_images_are_read_upright_and_a_changed_source_stops_a_resume(tmp_path):
+    upright = np.full((80, 60), 230, np.uint8)
+    upright[:20] = 20  # a dark band at the top of the page
+    root, spec = _pages_source(tmp_path, ["a.jpg"])
+    exif = Image.Exif()
+    exif[0x0112] = 6  # stored turned; shown upright after a clockwise quarter turn
+    Image.fromarray(np.rot90(upright, 1)).save(root / "a.jpg", exif=exif.tobytes())
+    settings = {"long_side": 80}
+    gray, _, _ = build_data.make_page(
+        "pages",
+        {"path": str(root / "a.jpg"), "license_class": "own", "track": "release"},
+        np.random.default_rng(0),
+        settings,
+    )
+    assert gray[: gray.shape[0] // 4].mean() < gray[-gray.shape[0] // 4 :].mean()
+
+    Image.fromarray(upright).save(root / "b.png")
+    build_data.build(spec, tmp_path / "out", workers=1)
+    build_data.build(spec, tmp_path / "out", workers=1)  # an unchanged source resumes
+    _pages_source(tmp_path, ["a.jpg", "b.png"])
+    with pytest.raises(SystemExit, match="other input data"):
+        build_data.build(spec, tmp_path / "out", workers=1)

@@ -14,7 +14,8 @@ The build spec (``flattener-orient-build-1``, see ``examples/orient``) lists sou
   ``uniform``), for SmartDoc templates or scanner residual pages.
 
 Output: ``files/<source>/<split>/<id>.jpg`` (grayscale JPEG), ``parts/`` with one JSONL
-per finished chunk (an interrupted build resumes from them), then ``manifest.jsonl`` and
+per finished chunk (an interrupted build resumes from them when the spec and the planned
+items are unchanged; ``build-spec.json`` holds both hashes), then ``manifest.jsonl`` and
 ``orient-data.json`` (schema ``flattener-orient-data-1``, read by
 ``flattener.scan.orient_train``). The summary carries a dewarp-schema ``data_spec``
 naming every source and a per-split license manifest ``data_sources``; checkpoints copy
@@ -38,7 +39,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageOps
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -234,7 +235,8 @@ def make_page(kind: str, item: Any, rng: np.random.Generator, settings: dict[str
         return gray, box, fields
     if kind == "pages":
         with Image.open(item["path"]) as image:
-            gray = pages.resized_page(np.array(image.convert("L")), long_side)
+            upright = ImageOps.exif_transpose(image)
+            gray = pages.resized_page(np.array(upright.convert("L")), long_side)
         fields = {
             "document_group": item.get("document_group", item["path"]),
             "license_class": item["license_class"],
@@ -370,9 +372,9 @@ def build(
     hashed["limit"] = limit
     spec_sha = hashlib.sha256(canonical_json(hashed)).hexdigest()
     marker = output / "build-spec.json"
-    if marker.is_file() and json.loads(marker.read_text("utf-8")).get("sha256") != spec_sha:
+    previous = json.loads(marker.read_text("utf-8")) if marker.is_file() else {}
+    if previous and previous.get("sha256") != spec_sha:
         raise _error(f"{output} holds a build of another spec; use a new output directory")
-    write_json(marker, {"sha256": spec_sha, "spec": hashed})
     (output / "parts").mkdir(exist_ok=True)
 
     tasks, infos = [], []
@@ -402,6 +404,19 @@ def build(
                         "items": items[start : start + spec["chunk"]],
                     }
                 )
+
+    # The finished parts hold items planned from the data as it was; a source that has
+    # changed since (a longer download, an edited manifest) would mix two plans.
+    planned = [[task["key"], task["settings"], task["items"]] for task in tasks]
+    plan_sha = hashlib.sha256(
+        json.dumps(planned, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
+    if previous.get("plan_sha256") not in (None, plan_sha):
+        raise _error(
+            f"{output} was built from other input data (a source changed since); "
+            "use a new output directory"
+        )
+    write_json(marker, {"sha256": spec_sha, "plan_sha256": plan_sha, "spec": hashed})
 
     def part_path(key: str) -> Path:
         return output / "parts" / f"{key}.jsonl"
