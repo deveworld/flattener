@@ -48,7 +48,8 @@ save_scan(result, "out", "photo")  # out/photo.jpg, out/photo.scan.json
 
 ## 모델
 
-- 휨 보정: `~/.cache/flattener-sota-20260926/vast-runs/R4/step_00140625.pt`와 옆의 `.pt.json`입니다. UVDoc 구조에 파라미터 약 800만 개이고, 공개해도 되는 합성 페이지로 처음부터 학습한 release 트랙 가중치입니다.
+- 휨 보정: `~/.cache/flattener/scan-weights/dewarp-v1/step_00140625.pt`와 옆의 `.pt.json`입니다. UVDoc 구조에 파라미터 약 800만 개이고, 공개해도 되는 합성 페이지로 처음부터 학습한 release 트랙 가중치입니다. 원근 보정을 더 학습한 후보는 `dewarp-v1-perspective/`에 있습니다. 기울어진 사진의 벤치마크 점수는 더 좋지만, 펼친 책에서 옆 쪽까지 잡는 경우가 있어 기본값으로 쓰지 않습니다.
+- 세 모델을 함께 쓰는 번들: `~/.cache/flattener/scan-weights/bundle-v1.json`.
 - 페이지 찾기(페이지 게이트 v0): `python tools/locator_v0.py install`이 `$FLATTENER_CACHE_DIR/scan-weights`(기본 `~/.cache/flattener/scan-weights`)에 `page-gate-v0.pt`를 씁니다. `python tools/locator_v0.py reproduce`는 SmartDoc 사진 48장에서 기록된 IoU 0.951을 다시 잽니다.
 - 배포 검사: 기록된 트랙이 모두 release이고, 계보가 처음부터(scratch) 시작하고, 모든 학습 단계의 데이터 spec이 release 조건을 통과해야 배포할 수 있습니다. `python -m flattener.scan.shippable CKPT...`는 모두 통과하면 0, 하나라도 아니면 1, 사용 오류면 2로 끝납니다. 휨 보정 가중치에 씁니다. 페이지 게이트는 스캐너가 불러올 때 직접 판정합니다.
 - 방향 판별(OrientNet-1): `~/.cache/flattener/scan-weights/orient-v1/step_00015000.pt`와 옆의 `.pt.json`입니다. 파라미터 약 44만 개이고, 공개해도 되는 합성 페이지로 처음부터 학습했습니다. 합성 검증 정확도는 99.6%, KR-Real 실사진 63장 중 58장의 방향을 맞혔습니다. 임계값은 0.9입니다.

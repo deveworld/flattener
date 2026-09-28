@@ -26,7 +26,7 @@ RECORD_FOLDERS = ("scan-quarter", "scan-default")
 SCANNED = ("rectified", "rectified_with_warnings")
 WEIGHTS = os.environ.get(
     "KRREAL_SCAN_WEIGHTS",
-    str(Path.home() / ".cache/flattener-sota-20260926/vast-runs/R4/step_00140625.pt"),
+    str(Path.home() / ".cache/flattener/scan-weights/dewarp-v1/step_00140625.pt"),
 )
 GATE = os.environ.get(
     "KRREAL_SCAN_GATE",
