@@ -1,20 +1,19 @@
 """Evaluator calibration: four checks that the evaluator reproduces published DocUNet numbers.
 
-The checks are named G1-G4 in ``calibration.json`` and in the printed summary, and the
-constants and ``gate_g*`` functions below follow those names.
+Each check has a name in ``calibration.json`` and in the printed summary:
 
-G1  PaperEdge MATLAB match. PaperEdge outputs under ``130_raw`` against the per-image
-    MATLAB values that PaperEdge ships in ``adres.txt`` (mean differences).
-G2  UVDoc table from PaperEdge outputs. PaperEdge outputs under ``128_excl64`` +
-    ``uvdoc_view2_double`` against the PaperEdge row of UVDoc paper Table 2,
-    0.472 / 7.98 / 0.367, within rounding.
-G3  UVDoc table from UVDoc's published results. UVDoc ``DocUnet_results`` (128 images)
-    under the UVDoc convention against 0.544 / 6.83 / 0.315, within 0.002 / 0.03 / 0.003.
-G4  OCR score match. The DocTr OCR protocol on PaperEdge outputs with Tesseract 5.0.1
-    against the DocScanner table: Setting 1 (DocTr, 60 images) ED 375.60 / CER 0.1541
-    and Setting 2 (DewarpNet, 50 images) ED 777.76 / CER 0.2014, within 2 %. The report
-    must come from Tesseract 5.0.1 with the plain DocTr configuration and verified scans.
-    A build that passes this check is added to ``ocr.CALIBRATED_TESSERACT_BUILDS``; OCR
+``paperedge_matlab``  PaperEdge outputs under ``130_raw`` against the per-image MATLAB
+    values that PaperEdge ships in ``adres.txt`` (mean differences).
+``uvdoc_table_paperedge``  PaperEdge outputs under ``128_excl64`` + ``uvdoc_view2_double``
+    against the PaperEdge row of UVDoc paper Table 2, 0.472 / 7.98 / 0.367, within
+    rounding.
+``uvdoc_table_uvdoc``  UVDoc's published ``DocUnet_results`` (128 images) under the UVDoc
+    convention against 0.544 / 6.83 / 0.315, within 0.002 / 0.03 / 0.003.
+``ocr_table``  The DocTr OCR protocol on PaperEdge outputs with Tesseract 5.0.1 against
+    the DocScanner table: Setting 1 (DocTr, 60 images) ED 375.60 / CER 0.1541 and
+    Setting 2 (DewarpNet, 50 images) ED 777.76 / CER 0.2014, within 2 %. The report must
+    come from Tesseract 5.0.1 with the plain DocTr configuration and verified scans. A
+    build that passes this check is added to ``ocr.CALIBRATED_TESSERACT_BUILDS``; OCR
     reports are comparable only with those builds.
 
 Each check reads a report written by :func:`run_calibration`; existing reports are
@@ -68,14 +67,14 @@ RUNS: dict[str, dict[str, Any]] = {
     "paperedge-ocr": {"kind": "ocr", "source": "paperedge", "protocols": ("doctr",)},
 }
 
-G1_TOLERANCE = {"ms_ssim": 1e-5, "ld": 0.005, "ad": 0.001}
-G2_TARGET = {"ms_ssim": (0.472, 3), "ld": (7.98, 2), "ad": (0.367, 3)}
-G3_TARGET = {"ms_ssim": (0.544, 0.002), "ld": (6.83, 0.03), "ad": (0.315, 0.003)}
-G4_TARGET = {
+PAPEREDGE_MATLAB_TOLERANCE = {"ms_ssim": 1e-5, "ld": 0.005, "ad": 0.001}
+UVDOC_TABLE_PAPEREDGE = {"ms_ssim": (0.472, 3), "ld": (7.98, 2), "ad": (0.367, 3)}
+UVDOC_TABLE_UVDOC = {"ms_ssim": (0.544, 0.002), "ld": (6.83, 0.03), "ad": (0.315, 0.003)}
+OCR_TABLE_TARGET = {
     "setting1_doctr_60": {"ed": 375.60, "cer": 0.1541},
     "setting2_dewarpnet_50": {"ed": 777.76, "cer": 0.2014},
 }
-G4_RELATIVE_TOLERANCE = 0.02
+OCR_RELATIVE_TOLERANCE = 0.02
 # The calibration inputs as downloaded; the reports hash every image individually.
 ARCHIVES = {
     "paperedge": {
@@ -90,10 +89,10 @@ ARCHIVES = {
     },
 }
 SOURCES = {
-    "G1": "PaperEdge res_test/adres.txt (MATLAB per-image AD, MS-SSIM, LD)",
-    "G2": "UVDoc paper Table 2, PaperEdge row (https://arxiv.org/abs/2302.02887)",
-    "G3": "UVDoc paper Table 2, UVDoc row; https://igl.ethz.ch/projects/uvdoc/DocUnet_results.zip",
-    "G4": "DocScanner paper OCR table, PaperEdge row (https://arxiv.org/abs/2110.14968)",
+    "paperedge_matlab": "PaperEdge res_test/adres.txt (MATLAB per-image AD, MS-SSIM, LD)",
+    "uvdoc_table_paperedge": "UVDoc paper Table 2, PaperEdge row (https://arxiv.org/abs/2302.02887)",
+    "uvdoc_table_uvdoc": "UVDoc paper Table 2, UVDoc row; https://igl.ethz.ch/projects/uvdoc/DocUnet_results.zip",
+    "ocr_table": "DocScanner paper OCR table, PaperEdge row (https://arxiv.org/abs/2110.14968)",
 }
 
 
@@ -211,10 +210,14 @@ def _require_run(report: dict[str, Any], name: str) -> None:
             raise ValueError(f"{name}: references_verified is not true (scans unverified)")
 
 
-def gate_g1(once: dict[str, Any] | None, adres: dict[str, Any] | None) -> dict[str, Any]:
+def gate_paperedge_matlab(
+    once: dict[str, Any] | None, adres: dict[str, Any] | None
+) -> dict[str, Any]:
     description = "PaperEdge outputs, 130_raw, mean difference to MATLAB adres.txt"
     if once is None or adres is None:
-        return _not_run("G1", description, "paperedge-once.json or paperedge-adres.json missing")
+        return _not_run(
+            "paperedge_matlab", description, "paperedge-once.json or paperedge-adres.json missing"
+        )
     _require_run(once, "paperedge-once")
     rows = {row["id"]: row for row in once["rows"] if not row["rotated_180"]}
     ids = [f"{k}_{m}" for k, m, _ in docunet.convention_views("130_raw")]
@@ -244,15 +247,21 @@ def gate_g1(once: dict[str, Any] | None, adres: dict[str, Any] | None) -> dict[s
             "ms_ssim",
             measured["ms_ssim"],
             matlab["ms_ssim"],
-            tolerance=G1_TOLERANCE["ms_ssim"],
+            tolerance=PAPEREDGE_MATLAB_TOLERANCE["ms_ssim"],
             kind="absolute",
         ),
-        _check("ld", measured["ld"], matlab["ld"], tolerance=G1_TOLERANCE["ld"], kind="absolute"),
+        _check(
+            "ld",
+            measured["ld"],
+            matlab["ld"],
+            tolerance=PAPEREDGE_MATLAB_TOLERANCE["ld"],
+            kind="absolute",
+        ),
         _check(
             "ad",
             measured["ad_lsqr_4iter"],
             matlab["ad"],
-            tolerance=G1_TOLERANCE["ad"],
+            tolerance=PAPEREDGE_MATLAB_TOLERANCE["ad"],
             kind="absolute",
             ad_solver="lsqr_4iter",
         ),
@@ -260,14 +269,14 @@ def gate_g1(once: dict[str, Any] | None, adres: dict[str, Any] | None) -> dict[s
             "ad",
             measured["ad_exact_lstsq"],
             matlab["ad"],
-            tolerance=G1_TOLERANCE["ad"],
+            tolerance=PAPEREDGE_MATLAB_TOLERANCE["ad"],
             kind="absolute",
             ad_solver="exact_lstsq",
             gating=False,
         ),
     ]
     return _gate(
-        "G1",
+        "paperedge_matlab",
         description,
         checks,
         convention="130_raw",
@@ -320,13 +329,13 @@ def _docunet_gate(
     )
 
 
-def gate_g4(report: dict[str, Any] | None) -> dict[str, Any]:
+def gate_ocr_table(report: dict[str, Any] | None) -> dict[str, Any]:
     description = "DocTr OCR protocol on PaperEdge outputs vs DocScanner table (Tesseract 5.0.1)"
     if report is None:
-        return _not_run("G4", description, "paperedge-ocr.json missing")
+        return _not_run("ocr_table", description, "paperedge-ocr.json missing")
     _require_run(report, "paperedge-ocr")
     checks = []
-    for setting, targets in G4_TARGET.items():
+    for setting, targets in OCR_TABLE_TARGET.items():
         measured = report["summary"]["doctr"][setting]
         for metric, target in targets.items():
             checks.append(
@@ -334,7 +343,7 @@ def gate_g4(report: dict[str, Any] | None) -> dict[str, Any]:
                     metric,
                     measured[metric],
                     target,
-                    tolerance=G4_RELATIVE_TOLERANCE,
+                    tolerance=OCR_RELATIVE_TOLERANCE,
                     kind="relative",
                     setting=setting,
                 )
@@ -354,7 +363,7 @@ def gate_g4(report: dict[str, Any] | None) -> dict[str, Any]:
         }
     )
     return _gate(
-        "G4",
+        "ocr_table",
         description,
         checks,
         tesseract_version=tesseract.get("version_first_line"),
@@ -370,24 +379,24 @@ def evaluate_gates(reports_dir: str | os.PathLike[str]) -> list[dict[str, Any]]:
     once = _load(root / "paperedge-once.json")
     adres = _load(root / "paperedge-adres.json")
     return [
-        gate_g1(once, adres),
+        gate_paperedge_matlab(once, adres),
         _docunet_gate(
-            "G2",
+            "uvdoc_table_paperedge",
             "PaperEdge outputs, 128_excl64 + uvdoc_view2_double vs UVDoc Table 2",
             _load(root / "paperedge-uvdoc.json"),
             "paperedge-uvdoc",
-            G2_TARGET,
+            UVDOC_TABLE_PAPEREDGE,
             "rounding",
         ),
         _docunet_gate(
-            "G3",
+            "uvdoc_table_uvdoc",
             "UVDoc DocUnet_results, 128_excl64 + uvdoc_view2_double vs UVDoc Table 2",
             _load(root / "uvdoc-uvdoc.json"),
             "uvdoc-uvdoc",
-            G3_TARGET,
+            UVDOC_TABLE_UVDOC,
             "absolute",
         ),
-        gate_g4(_load(root / "paperedge-ocr.json")),
+        gate_ocr_table(_load(root / "paperedge-ocr.json")),
     ]
 
 

@@ -52,17 +52,17 @@ plan and checks the plan's map; ``render(source, planned)`` makes the image of a
 Stage names that extend another (``infer_pass_*``, ``render_*``) time parts of that
 stage, whose seconds include them. ``metadata["timing_stages"]`` keeps every stage record.
 
-Candidates, first one to pass wins: C1 the full path, C2 without deskew, C3 the other
-localizer's box (gate and outline swapped), C4 the current ``rectify`` (whole photo, one
-pass) with its nodes re-indexed by the quarter turn k (``quarter_turn_grid``), so its page
-is upright as well. Duplicates are skipped. A candidate passes when its render succeeds
-and the checks hold; when only its crop passes fail, its pass A is used
-(``rerun_discarded``, L1). A candidate after C1 that passes adds ``candidate_fallback``
-with C1's failure. When every candidate fails: with ``fallback="perspective"`` and a quad
-known for sure, the page quad is flattened by a homography (``curvature_not_corrected``,
-L2); otherwise the original comes back with the reason and guidance (L3,
-``on_error="original"``, the default; ``"return"`` gives no image and ``"raise"`` raises
-the failure). A plan or check that raises counts as that grid's failure.
+Candidates, first one to pass wins: ``default`` (the full path), ``no_deskew``,
+``other_box`` (the other localizer's box: gate and outline swapped) and ``whole_photo``
+(the current ``rectify``: whole photo, one pass) with its nodes re-indexed by the quarter
+turn k (``quarter_turn_grid``), so its page is upright as well. Duplicates are skipped. A
+candidate passes when its render succeeds and the checks hold; when only its crop passes
+fail, its pass A is used (``rerun_discarded``). A later candidate that passes adds
+``candidate_fallback`` with the first candidate's failure. When every candidate fails:
+with ``fallback="perspective"`` and a quad known for sure, the page quad is flattened by a
+homography (``curvature_not_corrected``); otherwise the original comes back with the
+reason and guidance (``on_error="original"``, the default; ``"return"`` gives no image
+and ``"raise"`` raises the failure). A plan or check that raises counts as that grid's failure.
 
 Overrides (``ScanOverrides``: region, quad, quarter, skip_dewarp, output size, aspect) go
 through the same stages and are recorded as ``manual`` provenance; ``skip_dewarp`` without
@@ -200,7 +200,8 @@ class ScanOptions:
     extent. ``fast_check``: check dewarp plans with
     ``scan.fast_check`` (the renderer's decisions from the grid, a small proxy render) and
     sample the full size in ``render``. ``preview``: long side of a preview image
-    sampled from the same map (``None``: no preview). ``chain``: try C2-C4 after C1 fails.
+    sampled from the same map (``None``: no preview). ``chain``: try the other candidates
+    after ``default`` fails.
     ``use_focal``: take the EXIF focal length into the aspect estimate. ``fill_rgb``: the
     color of output pixels outside the source; the plan keeps it with ``quantize``, so a
     stored plan renders the same image.
@@ -1198,24 +1199,24 @@ class Scanner:
         located: locating.Localization,
         options: ScanOptions,
     ) -> Iterator[_Candidate]:
-        """C1 to C4, made one at a time: C3's other box (which may need pass 0) is looked
-        up only when C1 and C2 have failed."""
+        """The candidates, made one at a time: the other box (which may need pass 0) is
+        looked up only when ``default`` and ``no_deskew`` have failed."""
         rerun = options.rerun
         yield _Candidate(
-            "C1", located.box, located.angle_deg, options.deskew, True, located.method, rerun
+            "default", located.box, located.angle_deg, options.deskew, True, located.method, rerun
         )
         if not options.chain:
             return
         if options.deskew:
-            yield _Candidate("C2", located.box, 0.0, False, True, located.method, rerun)
+            yield _Candidate("no_deskew", located.box, 0.0, False, True, located.method, rerun)
         if located.provenance == "manual":
             return
         size = src.info.size
         other = locating.alternative_box(located, size, self._pass0(src, memo, options))
         if other is not None:
             box, theta, method = other
-            yield _Candidate("C3", box, theta, options.deskew, True, method, rerun)
-        yield _Candidate("C4", None, 0.0, False, True, "rectify", 0, turn="nodes")
+            yield _Candidate("other_box", box, theta, options.deskew, True, method, rerun)
+        yield _Candidate("whole_photo", None, 0.0, False, True, "rectify", 0, turn="nodes")
 
     def _view(
         self,
@@ -1564,8 +1565,8 @@ class Scanner:
         quarter: int | None = None,
     ) -> NDArray[np.float64] | None:
         """The page quad (source pixels, reading order) when it is known for sure: a
-        manual quad (re-ordered by a ``quarter`` override), or the corner nodes of C1's
-        pass A when the gate mask agrees with them (coverage and precision)."""
+        manual quad (re-ordered by a ``quarter`` override), or the corner nodes of the first
+        candidate's pass A when the gate mask agrees with them (coverage and precision)."""
         if located.quad is not None:
             if quarter is None or located.quarter is None:
                 return located.quad
@@ -1664,7 +1665,7 @@ class Scanner:
         failed: list[str] = []
         chain = self._chain(src, memo, located, options)
         while True:
-            with clock.stage("detect"):  # C3's other box may need pass 0
+            with clock.stage("detect"):  # the other box may need pass 0
                 candidate = next(chain, None)
             if candidate is None:
                 break
@@ -1721,7 +1722,7 @@ class Scanner:
         reasons: list[Reason],
     ) -> dict[str, Any]:
         """Infer, verify, plan and check one candidate. Returns ``checked`` when a grid
-        passes (the last pass, else pass A: L1), otherwise ``failure`` (the first one). A
+        passes (the last pass, else pass A), otherwise ``failure`` (the first one). A
         ``FlattenerError`` from the plan or the check is that grid's failure."""
         src, clock = planned.source, planned.clock
         size = src.info.size
@@ -1749,7 +1750,7 @@ class Scanner:
         entry["passes"] = [record for _, record in passes]
         grids = [("final", passes[-1][0], len(passes))]
         if len(passes) > 1:
-            grids.append(("A", passes[0][0], 1))  # L1: pass A when the crop passes fail
+            grids.append(("A", passes[0][0], 1))  # pass A when the crop passes fail
         result: dict[str, Any] = {
             "first_grid": passes[0][0],
             "first_quarter": quarter,
@@ -1966,7 +1967,7 @@ class Scanner:
         orientation: _Orientation | None,
         quad: NDArray[np.float64] | None,
     ) -> PlannedScan:
-        """L2 (perspective, when asked for and the quad is sure) or L3 (the original)."""
+        """The perspective fallback (when asked for and the quad is sure) or the original."""
         record, options, src = planned.record, planned.options, planned.source
         reasons = [*reasons, failure]
         if options.fallback == "perspective" and quad is not None:
@@ -1984,7 +1985,7 @@ class Scanner:
                 checked = self._check(src, plan, options, planned.clock)
             record.metadata.setdefault("chain", []).append(
                 {
-                    "name": "L2",
+                    "name": "perspective_fallback",
                     "status": str(checked.result.status),
                     "reason": checked.result.reason_code,
                 }

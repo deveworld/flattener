@@ -85,7 +85,7 @@ def test_the_default_path_rectifies_a_skewed_page():
     assert model.calls == 2  # pass A and one crop pass; the confident gate needs no pass 0
     plan = result.plan
     assert _error_px(plan.grid) < 0.5
-    assert plan.region["localization"] == "gate" and plan.region["candidate"] == "C1"
+    assert plan.region["localization"] == "gate" and plan.region["candidate"] == "default"
     assert [view["pass"] for view in plan.views] == ["A", 1]
     assert plan.views[1]["rotated"] and plan.views[1]["deskew_skipped"] is None
     assert plan.output.size == (190, 150) and result.image.shape == (190, 150, 3)
@@ -166,7 +166,7 @@ def test_failing_passes_are_discarded_or_end_their_candidate():
     assert _codes(result) == ["orientation_uncertain", "rerun_discarded"]
     assert result.reasons[1].detail["failures"] == ["fold_or_degenerate"]
     assert [view["pass"] for view in result.plan.views] == ["A"]
-    assert _chain(result) == [("C1", "A", ["fold_or_degenerate"])]
+    assert _chain(result) == [("default", "A", ["fold_or_degenerate"])]
     # A crop pass 20 % larger than the page keeps the page covered but moves the nodes.
     scanner, _ = _scanner(hooks={1: shrink(1.2)})
     result = scanner.scan(ramp_scene(SIZE, TRUE))
@@ -185,7 +185,7 @@ def test_failing_passes_are_discarded_or_end_their_candidate():
     first = result.metadata["chain"][0]
     assert first["passes"][1]["skipped"] == "non_finite_outline"
     assert [item["failure"]["code"] for item in first["failures"]] == ["non_finite_grid"] * 2
-    assert result.status == Status.SUCCESS and result.plan.region["candidate"] == "C2"
+    assert result.status == Status.SUCCESS and result.plan.region["candidate"] == "no_deskew"
 
 
 def test_every_candidate_failing_returns_the_original_with_the_reason():
@@ -195,12 +195,19 @@ def test_every_candidate_failing_returns_the_original_with_the_reason():
     assert result.outcome == Outcome.ORIGINAL_RETURNED and result.used_fallback
     assert result.status == Status.INVALID_TRANSFORM
     assert result.reason_code == "fold_or_degenerate"  # the renderer's own reason
-    assert result.reasons[-1].detail["candidate"] == "C1"
+    assert result.reasons[-1].detail["candidate"] == "default"
     assert result.image.tobytes() == image.tobytes() and result.plan is None
     guidance = [item.to_dict() for item in result.guidance]
     assert guidance[-1]["message_ko"] == "다시 찍거나 영역을 지정해 주세요"
-    assert [name for name, _, _ in _chain(result)] == ["C1", "C2", "C3", "C4"]
-    assert model.calls == 7  # C1 2, C2 2, pass 0, C3 2; C4 reuses pass 0
+    assert [name for name, _, _ in _chain(result)] == [
+        "default",
+        "no_deskew",
+        "other_box",
+        "whole_photo",
+    ]
+    assert (
+        model.calls == 7
+    )  # 2 each for the first three candidates and pass 0, reused by whole_photo
     returned = scanner.scan(image, ScanOptions(on_error="return"))
     assert returned.outcome == Outcome.FAILED and returned.image is None
     with pytest.raises(FlattenerError) as error:
@@ -208,7 +215,7 @@ def test_every_candidate_failing_returns_the_original_with_the_reason():
     assert error.value.reason_code == "fold_or_degenerate"
     assert error.value.metadata["scan"]["outcome"] == "original_returned"
     single = scanner.scan(image, ScanOptions(chain=False))
-    assert [name for name, _, _ in _chain(single)] == ["C1"]
+    assert [name for name, _, _ in _chain(single)] == ["default"]
 
 
 def test_the_perspective_fallback_needs_a_sure_quad_and_stands_upright():
@@ -309,7 +316,7 @@ def test_a_zoomed_piece_of_the_page_returns_the_original(monkeypatch):
     result = scanner.scan(image)
     assert result.outcome == Outcome.ORIGINAL_RETURNED and result.status == Status.MODEL_ERROR
     assert result.reason_code == "page_cut_off"
-    assert _chain(result) == [("C1", None, ["page_cut_off"])]  # the other candidates wait
+    assert _chain(result) == [("default", None, ["page_cut_off"])]  # the other candidates wait
     assert result.guidance[-1].message_ko == (
         "페이지 끝이 사진 밖으로 잘렸어요. 조금 떨어져서 페이지 전체가 보이게 다시 찍어 주세요"
     )
@@ -577,16 +584,21 @@ def test_models_load_through_the_ship_gate(tmp_path, monkeypatch):
 
 
 def test_the_whole_photo_candidate_turns_its_nodes_upright():
-    # C1 to C3 fail (calls 0-3 and 5-6; call 4 is pass 0, which C4 reuses).
+    # The first three candidates fail (calls 0-3 and 5-6); call 4 is pass 0, which
+    # whole_photo reuses.
     hooks = dict.fromkeys((0, 1, 2, 3, 5, 6), twist)
     page = Page((170, 125), (150, 190), 90.0 + 7.0)
     scanner, model = _scanner(page, orienter=FakeOrienter(page, SIZE), hooks=hooks)
     result = scanner.scan(ramp_scene(SIZE, page))
-    assert result.plan.region["candidate"] == "C4" and result.status == Status.SUCCESS
+    assert result.plan.region["candidate"] == "whole_photo" and result.status == Status.SUCCESS
     assert result.outcome == Outcome.RECTIFIED_WITH_WARNINGS
     assert _codes(result) == ["candidate_fallback"]
     fallback = result.reasons[0].detail
-    assert fallback["candidate"] == "C4" and fallback["failed"] == ["C1", "C2", "C3"]
+    assert fallback["candidate"] == "whole_photo" and fallback["failed"] == [
+        "default",
+        "no_deskew",
+        "other_box",
+    ]
     assert fallback["failure"]["code"] == "fold_or_degenerate"
     assert result.guidance[0].code == "candidate_fallback"
     # The whole-photo pass is set upright by re-indexing its nodes.
@@ -597,8 +609,8 @@ def test_the_whole_photo_candidate_turns_its_nodes_upright():
     chain = result.metadata["chain"]
     assert chain[-1]["turn"] == "nodes" and chain[-1]["orientation_post"]["action"] is None
 
-    # A quarter turn first found on C4's flat preview re-indexes the nodes as well.
-    class LatePost(FakeOrienter):  # sure only from the fourth flat preview (C4's) on
+    # A quarter turn first found on whole_photo's flat preview re-indexes the nodes as well.
+    class LatePost(FakeOrienter):  # sure only from the fourth flat preview (whole_photo's) on
         def predict(self, image, geometry=None):
             self.post = sum(kind == "post" for kind, _ in self.calls) >= 3
             return super().predict(image, geometry)
@@ -606,9 +618,14 @@ def test_the_whole_photo_candidate_turns_its_nodes_upright():
     page = Page((170, 125), (150, 190), -90.0 + 7.0)
     scanner, _ = _scanner(page, orienter=LatePost(page, SIZE, pre=False), hooks=hooks)
     result = scanner.scan(ramp_scene(SIZE, page))
-    assert [name for name, _, _ in _chain(result)] == ["C1", "C2", "C3", "C4"]
+    assert [name for name, _, _ in _chain(result)] == [
+        "default",
+        "no_deskew",
+        "other_box",
+        "whole_photo",
+    ]
     entry = result.metadata["chain"][-1]
-    assert entry["name"] == "C4" and entry["accepted"] == "final"
+    assert entry["name"] == "whole_photo" and entry["accepted"] == "final"
     assert entry["orientation_post"]["action"] == "reindex_quarter_3"
     assert result.plan.quarter == 3 and _error_px(result.plan.grid, page) < 1.0
 
@@ -626,9 +643,11 @@ def test_an_orientation_settled_after_dewarping_carries_to_the_next_candidate():
     result = scanner.scan(ramp_scene(SIZE, page))
     first, second = result.metadata["chain"][:2]
     assert first["accepted"] is None and first["orientation_post"]["action"] == "flip_180"
-    assert second["name"] == "C2" and second["quarter"] == 2 and second["accepted"] == "final"
+    assert (
+        second["name"] == "no_deskew" and second["quarter"] == 2 and second["accepted"] == "final"
+    )
     assert result.plan.quarter == 2 and _error_px(result.plan.grid, page) < 0.5
-    assert result.qa["orientation"]["settled_by"] == "C1"
+    assert result.qa["orientation"]["settled_by"] == "default"
     assert _codes(result) == ["candidate_fallback"]
 
 

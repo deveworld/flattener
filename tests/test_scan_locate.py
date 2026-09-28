@@ -90,7 +90,7 @@ def test_weak_scores_go_through_the_consensus_rule():
     assert found.method == "union" and found.metrics["consensus_coverage"] < 0.95
     mask_box = expand_box(locate.mask_bounds(found.mask, SIZE), SIZE)
     assert found.box[0] <= mask_box[0] and found.box[2] >= mask_box[2]
-    # The other localizer for candidate C3.
+    # The other localizer for the other_box candidate.
     other = alternative_box(found, SIZE, lambda: _outline(small))
     assert other is not None and other[2] == "gate"
 

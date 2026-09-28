@@ -138,7 +138,7 @@ def test_report_is_comparable_only_with_a_calibrated_build(tmp_path, monkeypatch
     )
     assert other["comparable"] is False
     assert other["comparability"]["tesseract_build"] is None
-    assert other["comparability"]["tesseract_build_failed_g4"] is None
+    assert other["comparability"]["tesseract_build_failed_calibration"] is None
     assert other["comparability"]["tesseract_version_matches"] is True
 
 

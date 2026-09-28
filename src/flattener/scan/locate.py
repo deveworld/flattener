@@ -678,8 +678,9 @@ def alternative_box(
     source_size: tuple[int, int],
     pass0: Callable[[], NDArray[np.float64]] | None,
 ) -> tuple[Box, float, str] | None:
-    """The other localizer's box and angle (candidate C3): the outline for a gate or mask
-    box, the mask for an outline or union box; ``None`` when there is no other one."""
+    """The other localizer's box and angle (the ``other_box`` candidate): the outline for a
+    gate or mask box, the mask for an outline or union box; ``None`` when there is no other
+    one."""
     if located.box is None or located.provenance == "manual":
         return None
     if located.method in ("gate", "fills_frame", "mask") and pass0 is not None:

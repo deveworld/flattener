@@ -244,8 +244,8 @@ REASONS: dict[str, ReasonSpec] = {
             "candidate_fallback",
             Status.SUCCESS,
             Severity.WARNING,
-            "C1 failed and a later candidate (C2 to C4) passed; detail names the candidate "
-            "and C1's failure.",
+            "The first candidate failed and a later one passed; detail names the candidate "
+            "and the first failure.",
             (Action.SET_REGION,),
             "결과를 확인하고, 필요하면 영역을 지정해 주세요",
             "Check the result and set the page region if needed",

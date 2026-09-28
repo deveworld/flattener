@@ -1,4 +1,4 @@
-"""The four evaluator calibration checks (G1-G4 in calibration.json) on synthetic reports,
+"""The four evaluator calibration checks (named in calibration.json) on synthetic reports,
 with no images and no SIFT flow."""
 
 import json
@@ -44,23 +44,25 @@ EXCL = [(k, m) for k, m in ALL if k != 64]
 def test_g1_compares_means_with_both_solvers():
     values = _values(0.47, 8.5, 0.39, ALL)
     adres = {"rows": {f"{k}_{m}": v for (k, m), v in values.items()}, "file_mean_row": {}}
-    ok = calibration.gate_g1(_docunet_report("paperedge-once", values), adres)
+    ok = calibration.gate_paperedge_matlab(_docunet_report("paperedge-once", values), adres)
     assert ok["status"] == "pass" and len(ok["checks"]) == 4
     assert {c.get("ad_solver") for c in ok["checks"] if c["metric"] == "ad"} == {
         "lsqr_4iter", "exact_lstsq"
     }  # fmt: skip
-    near = calibration.gate_g1(
+    near = calibration.gate_paperedge_matlab(
         _docunet_report("paperedge-once", values, shift={"ld": 0.004, "exact": 0.005}), adres
     )
     assert near["pass"]  # exact_lstsq is informational
     assert [c["pass"] for c in near["checks"]] == [True, True, True, False]
-    far = calibration.gate_g1(_docunet_report("paperedge-once", values, shift={"ld": 0.006}), adres)
+    far = calibration.gate_paperedge_matlab(
+        _docunet_report("paperedge-once", values, shift={"ld": 0.006}), adres
+    )
     assert far["status"] == "fail"
-    assert calibration.gate_g1(None, adres)["status"] == "not_run"
+    assert calibration.gate_paperedge_matlab(None, adres)["status"] == "not_run"
     wrong = _docunet_report("paperedge-once", values)
     wrong["config"]["ref_resize"] = "uvdoc_view2_double"
     with pytest.raises(ValueError):
-        calibration.gate_g1(wrong, adres)
+        calibration.gate_paperedge_matlab(wrong, adres)
 
 
 def test_g2_uses_rounding_and_g3_uses_absolute_tolerances(tmp_path):
@@ -69,14 +71,18 @@ def test_g2_uses_rounding_and_g3_uses_absolute_tolerances(tmp_path):
     bad = _values(0.4726, 7.98, 0.367, EXCL)
     write_json_atomic(tmp_path / "uvdoc-uvdoc.json", _docunet_report("uvdoc-uvdoc", bad))
     gates = {gate["gate"]: gate for gate in calibration.evaluate_gates(tmp_path)}
-    assert gates["G1"]["status"] == "not_run" and gates["G4"]["status"] == "not_run"
-    assert gates["G2"]["status"] == "pass"
-    assert gates["G2"]["checks"][0]["tolerance"] == pytest.approx(0.0005)
-    assert gates["G2"]["checks"][1]["tolerance"] == pytest.approx(0.005)
-    assert gates["G3"]["status"] == "fail"  # 0.4726 vs 0.544 +- 0.002
+    assert (
+        gates["paperedge_matlab"]["status"] == "not_run"
+        and gates["ocr_table"]["status"] == "not_run"
+    )
+    assert gates["uvdoc_table_paperedge"]["status"] == "pass"
+    assert gates["uvdoc_table_paperedge"]["checks"][0]["tolerance"] == pytest.approx(0.0005)
+    assert gates["uvdoc_table_paperedge"]["checks"][1]["tolerance"] == pytest.approx(0.005)
+    assert gates["uvdoc_table_uvdoc"]["status"] == "fail"  # 0.4726 vs 0.544 +- 0.002
+    report = _docunet_report("paperedge-uvdoc", _values(0.4724, 7.98, 0.3664, EXCL))
     rounding = calibration._docunet_gate(
-        "G2", "x", _docunet_report("paperedge-uvdoc", _values(0.4724, 7.98, 0.3664, EXCL)),
-        "paperedge-uvdoc", calibration.G2_TARGET, "rounding",
+        "uvdoc_table_paperedge", "x", report,
+        "paperedge-uvdoc", calibration.UVDOC_TABLE_PAPEREDGE, "rounding",
     )  # fmt: skip
     assert [c["pass"] for c in rounding["checks"]] == [True, True, False, False]
 
@@ -92,7 +98,7 @@ def _ocr_report(scale, version="tesseract v5.0.1.20220118"):
         "summary": {
             "doctr": {
                 setting: {metric: target * scale for metric, target in targets.items()}
-                for setting, targets in calibration.G4_TARGET.items()
+                for setting, targets in calibration.OCR_TABLE_TARGET.items()
             }
         },
         "tesseract": {"version_first_line": version},
@@ -100,16 +106,16 @@ def _ocr_report(scale, version="tesseract v5.0.1.20220118"):
 
 
 def test_g4_needs_the_relative_tolerance_tesseract_501_and_the_plain_doctr_setup():
-    assert calibration.gate_g4(_ocr_report(1.019))["status"] == "pass"
-    assert calibration.gate_g4(_ocr_report(0.979))["status"] == "fail"
-    gate = calibration.gate_g4(_ocr_report(1.0))
+    assert calibration.gate_ocr_table(_ocr_report(1.019))["status"] == "pass"
+    assert calibration.gate_ocr_table(_ocr_report(0.979))["status"] == "fail"
+    gate = calibration.gate_ocr_table(_ocr_report(1.0))
     assert gate["tesseract_version"] == "tesseract v5.0.1.20220118"
     assert gate["checks"][-1]["metric"] == "tesseract_version" and gate["checks"][-1]["pass"]
     assert "'tesseract v5.0.1.20220118' must be 5.0.1 -> ok" in calibration.format_gates([gate])
-    other = calibration.gate_g4(_ocr_report(1.0, version="tesseract 5.5.3"))
+    other = calibration.gate_ocr_table(_ocr_report(1.0, version="tesseract 5.5.3"))
     assert other["status"] == "fail"
     assert [check["pass"] for check in other["checks"]] == [True, True, True, True, False]
-    assert calibration.gate_g4(_ocr_report(1.0, version=None))["status"] == "fail"
+    assert calibration.gate_ocr_table(_ocr_report(1.0, version=None))["status"] == "fail"
     for key, value in (
         ("protocols", ["doctr", "uvdoc"]),
         ("tesseract_config", {"doctr": "--psm 6"}),
@@ -118,7 +124,7 @@ def test_g4_needs_the_relative_tolerance_tesseract_501_and_the_plain_doctr_setup
         report = _ocr_report(1.0)
         report["config"][key] = value
         with pytest.raises(ValueError, match=key):
-            calibration.gate_g4(report)
+            calibration.gate_ocr_table(report)
 
 
 def test_calibrate_reads_adres_reuses_reports_and_writes_relative_paths(tmp_path):
@@ -148,4 +154,4 @@ def test_calibrate_reads_adres_reuses_reports_and_writes_relative_paths(tmp_path
     assert entry["evidence"] == written["evidence"] == calibration.CALIBRATION_EVIDENCE
     assert [gate["status"] for gate in summary["gates"]] == ["pass", *["not_run"] * 3]
     assert summary["all_pass"] is False
-    assert "G1: PASS" in calibration.format_gates(summary["gates"])
+    assert "paperedge_matlab: PASS" in calibration.format_gates(summary["gates"])

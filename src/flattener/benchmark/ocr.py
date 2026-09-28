@@ -101,8 +101,7 @@ CALIBRATED_TESSERACT_BUILDS: dict[str, dict[str, Any]] = {
     },
 }
 # Builds that ran the OCR score check and missed it. Reports name them under
-# ``comparability.tesseract_build_failed_g4`` (G4 is that check's name in
-# calibration.json).
+# ``comparability.tesseract_build_failed_calibration``.
 FAILED_TESSERACT_BUILDS: dict[str, dict[str, Any]] = {
     "conda-forge-5.0.1-h84e3e21_0-linux64": {
         "version_first_line": "tesseract 5.0.1",
@@ -632,7 +631,9 @@ def evaluate_ocr(
             "calibrated_tesseract_version": CALIBRATED_TESSERACT_VERSION,
             "references_verified": verify_references,
             "tesseract_build": build,
-            "tesseract_build_failed_g4": calibrated_build(engine_metadata, FAILED_TESSERACT_BUILDS),
+            "tesseract_build_failed_calibration": calibrated_build(
+                engine_metadata, FAILED_TESSERACT_BUILDS
+            ),
             "tesseract_version_matches": is_calibrated_tesseract(
                 engine_metadata.get("version_first_line")
             ),
