@@ -209,6 +209,21 @@ def test_splits_are_by_source_and_stay_put():
     assert {s: again[s] for s in splits} == splits
 
 
+def test_a_photo_with_gps_data_is_never_a_public_candidate(tmp_path):
+    _jpeg(tmp_path / "photos" / "kr1-p1-flat-d01-001.jpg")
+    _jpeg(tmp_path / "photos" / "kr1-p1-flat-d01-002.jpg", gps=True)
+    (tmp_path / "sources.csv").write_text("source_id,kind,public,note\nd01,document,yes,\n")
+    manifest = kitlib.build_manifest(tmp_path)
+    visibility = {photo["file"]: photo["visibility"] for photo in manifest["photos"]}
+    assert visibility == {
+        "kr1-p1-flat-d01-001.jpg": "public_candidate",
+        "kr1-p1-flat-d01-002.jpg": "private",
+    }
+    assert [w for w in manifest["warnings"] if "GPS" in w] == [
+        "kr1-p1-flat-d01-002.jpg: carries GPS data; turn off location tags on the phone"
+    ]
+
+
 def test_cli_writes_the_shot_list_and_refuses_tracked_roots(tmp_path, capsys):
     assert krreal.main(["shotlist", "--root", str(tmp_path)]) == 0
     with open(tmp_path / "shotlist.csv", encoding="utf-8-sig", newline="") as stream:

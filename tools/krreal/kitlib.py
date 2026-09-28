@@ -465,6 +465,7 @@ def build_manifest(root: Path, *, kit: dict[str, Any] | None = None) -> dict[str
             problems.append(f"{path.name}: shot {name.seq} of {name.phone_id} repeats")
         seen_shot[shot] = path.name
         public = sources.get(name.source_id, {}).get("public", "").lower() in ("yes", "y", "1")
+        public = public and not info["gps_present"]  # a photo with GPS data stays private
         entry = {
             "file": path.name,
             "sha256": info["sha256"],

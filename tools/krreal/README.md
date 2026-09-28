@@ -4,7 +4,7 @@
 
 - 사진, 라벨, 전사, manifest는 모두 `outputs/krreal/v1/`(git이 무시하는 폴더)에 둡니다. 키트의 명령은 git이 추적하는 폴더를 거부합니다.
 - 사진은 학습, 체크포인트 선택에 쓰지 않습니다. dev 분할(출처의 40%)은 임계값 조정에, test 분할(60%)은 마일스톤마다 한 번 보고에 씁니다.
-- 공개할 수 있는 것은 퍼블릭 도메인 인쇄물을 찍은 사진뿐입니다. 선택 파일 `outputs/krreal/v1/sources.csv`(열: `source_id,kind,public,note`)에서 `public`을 `yes`로 적은 출처만 manifest에 `public_candidate`로 표시됩니다. 나머지는 `private`입니다.
+- 공개할 수 있는 것은 퍼블릭 도메인 인쇄물을 찍은 사진뿐입니다. 선택 파일 `outputs/krreal/v1/sources.csv`(열: `source_id,kind,public,note`)에서 `public`을 `yes`로 적은 출처의 사진 중 GPS 정보가 없는 사진만 manifest에 `public_candidate`로 표시됩니다. 나머지는 `private`입니다.
 
 ## 파일
 
