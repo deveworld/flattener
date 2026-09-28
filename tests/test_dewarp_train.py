@@ -27,6 +27,7 @@ from flattener.dewarp.train import (
     TrainConfig,
     _check_resume,
     _initialize,
+    axis_alignment_loss,
     code_record,
     compute_losses,
     improves,
@@ -416,3 +417,35 @@ def test_invalid_targets_are_left_out_of_losses_and_validation():
         assert view["not_evaluable"] == 1, name
         assert view["per_source_epe_px"]["a"] == pytest.approx(view["epe_px"]), name
         assert _missing(view["per_source_epe_px"]["b"]), name  # source b has no valid GT
+
+
+def test_the_axis_loss_charges_bent_rows_and_columns_but_not_moved_ones():
+    rows, cols = 9, 7
+    y, x = torch.meshgrid(
+        torch.linspace(-0.8, 0.8, rows), torch.linspace(-0.6, 0.6, cols), indexing="ij"
+    )
+    angle = torch.tensor(0.3)  # a turned page: the loss works in page coordinates
+    target = torch.stack([x * angle.cos() - y * angle.sin(), x * angle.sin() + y * angle.cos()])[
+        None
+    ]
+    valid = torch.ones(1, 1, rows, cols)
+    assert axis_alignment_loss(target, target, valid) == pytest.approx(0.0, abs=1e-10)
+    moved = target + torch.tensor([0.05, -0.03]).view(1, 2, 1, 1)  # every node alike
+    assert axis_alignment_loss(moved, target, valid) == pytest.approx(0.0, abs=1e-9)
+    bent = target.clone()
+    normal = torch.stack([-angle.sin(), angle.cos()])  # the page's down direction
+    bent[0, :, 4, 3] += 0.04 * normal  # the middle of one row pushed down the page
+    loss = axis_alignment_loss(bent.requires_grad_(), target, valid)
+    assert loss > 1e-5
+    loss.backward()
+    assert torch.isfinite(bent.grad).all()
+    valid[0, 0, 4, 3] = 0  # an invalid node does not count
+    assert axis_alignment_loss(bent.detach(), target, valid) == pytest.approx(0.0, abs=1e-9)
+    config = TrainConfig(data_spec="s", output_dir="o", track="research", model=TINY, loss_axis=1.0)
+    batch = {
+        "grid2d": target,
+        "valid": torch.ones(1, 1, rows, cols),
+        "has_grid3d": torch.tensor([False]),
+    }
+    losses = compute_losses(config, 0, batch, bent.detach(), None)
+    assert losses["loss_axis"] > 0 and losses["loss"] > losses["loss_grid2d"] * 5.0
