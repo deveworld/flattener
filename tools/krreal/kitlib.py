@@ -205,7 +205,7 @@ def photo_warnings(info: dict[str, Any]) -> list[str]:
 
 
 def ensure_ignored(root: Path) -> None:
-    """Refuse a data root inside the git work tree unless git ignores it."""
+    """Refuse a data root or output folder inside the git work tree unless git ignores it."""
     root = Path(root).resolve()
     probe = root
     while not probe.exists():
@@ -230,7 +230,7 @@ def ensure_ignored(root: Path) -> None:
     )
     if ignored.returncode == 1:
         raise SystemExit(
-            f"{root} is inside the git work tree and not ignored; keep photos under outputs/"
+            f"{root} is inside the git work tree and not ignored; keep KR-Real data under outputs/"
         )
 
 

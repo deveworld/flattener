@@ -2,7 +2,8 @@
 
 The photos are private evaluation data. They stay under a git-ignored data root
 (default ``outputs/krreal/v1``); every command that writes refuses a root that git
-would track. Nothing here collects or uploads photos.
+would track, and ``manifest --out`` refuses such a folder too. Nothing here collects or
+uploads photos.
 
   shotlist     write the 60-shot plan (shotlist.csv) to fill in while copying photos
   ingest       copy the phone files named in shotlist.csv into photos/ under kit names
@@ -225,8 +226,9 @@ def cmd_check(args: argparse.Namespace) -> int:
 
 def cmd_manifest(args: argparse.Namespace) -> int:
     kitlib.ensure_ignored(args.root)
-    manifest = kitlib.build_manifest(args.root)
     out = args.out or args.root / "manifest.json"
+    kitlib.ensure_ignored(out.parent)  # the manifest lists devices and capture times
+    manifest = kitlib.build_manifest(args.root)
     kitlib.write_json(out, manifest)
     summary = manifest["summary"]
     print(f"{manifest['set']} manifest: {out}")

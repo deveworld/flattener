@@ -237,6 +237,19 @@ def test_cli_writes_the_shot_list_and_refuses_tracked_roots(tmp_path, capsys):
         kitlib.ensure_ignored(KIT_DIR / "photos-here")
 
 
+def test_the_manifest_goes_only_to_a_folder_git_ignores(tmp_path, capsys):
+    _jpeg(tmp_path / "photos" / "kr1-p1-flat-d01-001.jpg")
+    out = tmp_path / "elsewhere" / "manifest.json"
+    assert krreal.main(["manifest", "--root", str(tmp_path), "--out", str(out)]) == 0
+    assert json.loads(out.read_text(encoding="utf-8"))["photos"][0]["device"]["model"]
+    if shutil.which("git") is None:
+        pytest.skip("git is not installed")
+    tracked = KIT_DIR / "manifest-here" / "manifest.json"
+    with pytest.raises(SystemExit, match="not ignored"):
+        krreal.main(["manifest", "--root", str(tmp_path), "--out", str(tracked)])
+    assert not tracked.parent.exists()
+
+
 # The labeler's JavaScript ------------------------------------------------------------
 
 NODE = shutil.which("node")
