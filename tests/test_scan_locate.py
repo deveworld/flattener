@@ -129,6 +129,7 @@ def test_manual_region_and_quad():
     for bad in (
         (1, 2, 3),
         [[0, 0], [10, 0], [0, 10], [10, 10]],  # crossing
+        page.corners()[[0, 3, 2, 1]],  # counter-clockwise: a mirrored page
         [[900, 900], [950, 900], [950, 950], [900, 950]],  # outside
     ):
         with pytest.raises(FlattenerError):

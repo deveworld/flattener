@@ -723,7 +723,8 @@ def region_bounds(region: Any, source_size: tuple[int, int]) -> Bounds:
 
 def check_quad(quad: Any, source_size: tuple[int, int]) -> NDArray[np.float64]:
     """A manual quad as (4, 2) source pixels in reading order: finite, convex, not
-    self-crossing and at least partly inside the image."""
+    self-crossing, clockwise on screen and at least partly inside the image. The same
+    corners given counter-clockwise describe a mirrored page, so they are refused."""
     array = np.asarray(quad, dtype=np.float64)
     if array.shape == (8,):
         array = array.reshape(4, 2)
@@ -734,7 +735,11 @@ def check_quad(quad: Any, source_size: tuple[int, int]) -> NDArray[np.float64]:
         edges[:, 0] * np.roll(edges, -1, axis=0)[:, 1]
         - edges[:, 1] * np.roll(edges, -1, axis=0)[:, 0]
     )
-    if not ((turns > 0).all() or (turns < 0).all()):
+    if (turns < 0).all():
+        raise _input_error(
+            "quad goes counter-clockwise; give top-left, top-right, bottom-right, bottom-left"
+        )
+    if not (turns > 0).all():
         raise _input_error("quad must be convex, in order around the page")
     height, width = source_size
     low, high = array.min(axis=0), array.max(axis=0)
