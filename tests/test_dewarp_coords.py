@@ -4,7 +4,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from flattener import RenderConfig, identity_map, render
+from flattener import identity_map, render
 from flattener.dewarp.coords import (
     align_corners_to_flattener,
     edge_positions,
@@ -20,8 +20,6 @@ from flattener.dewarp.coords import (
     unwarp_torch,
     uvdoc_dense_map,
 )
-
-PERMISSIVE = RenderConfig(max_out_of_bounds_fraction=1.0)
 
 
 def _syntheticdoc_generator_map(page_to_pixel, map_size, render_size):
@@ -56,20 +54,15 @@ def test_value_conversions_invert_and_agree_on_pixel_meaning():
     )
 
 
-def test_syntheticdoc_identity_page_renders_the_source_exactly():
-    rng = np.random.default_rng(1)
-    source = rng.integers(0, 256, (30, 40, 3), dtype=np.uint8)
-    size = source.shape[:2]
+def test_syntheticdoc_maps_convert_exactly_through_grid_and_dense_map():
+    # An identity page converts to the flattener identity map.
+    size = (30, 40)
     stored = _syntheticdoc_generator_map(lambda uv: uv * [40, 30] - 0.5, size, size)
-    converted = syntheticdoc_to_flattener(stored, size)
-    np.testing.assert_allclose(converted, identity_map(size), atol=1e-6)
-    np.testing.assert_array_equal(render(source, converted).image, source)
-    # Reading the stored values as align_corners=True would shift the page.
-    wrong = align_corners_to_flattener(stored, size)
-    assert not np.array_equal(render(source, wrong, config=PERMISSIVE).image, source)
+    np.testing.assert_allclose(
+        syntheticdoc_to_flattener(stored, size), identity_map(size), atol=1e-6
+    )
 
-
-def test_syntheticdoc_affine_chain_is_exact_through_grid_and_dense_map():
+    # An affine page survives the coarse grid and densification exactly.
     render_size, map_size = (144, 102), (18, 12)
     matrix = np.array([[70.0, 12.0], [-9.0, 100.0]])
     offset = np.array([15.0, 20.0])

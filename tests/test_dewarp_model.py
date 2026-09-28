@@ -2,6 +2,7 @@
 
 import importlib.util
 import os
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -30,22 +31,16 @@ def _uvdoc_repo() -> Path:
     return repo
 
 
-def test_upstream_configuration_has_upstream_parameter_count():
+def test_parameter_count_and_output_shapes():
     assert count_parameters(UVDocNet(UVDOC_CONFIG)) == {"total": 8_003_463, "trainable": 8_003_463}
-
-
-@pytest.mark.parametrize("grid_size", [(4, 3), (9, 7)])
-def test_output_shapes_for_natural_and_resized_grids(grid_size):
-    config = DewarpModelConfig(input_size=(64, 48), grid_size=grid_size, num_filter=4)
-    model = UVDocNet(config).eval()
-    with torch.no_grad():
-        grid2d, grid3d = model(torch.rand(2, 3, 64, 48))
-    assert grid2d.shape == (2, 2, *grid_size) and grid3d.shape == (2, 3, *grid_size)
-    no3d = UVDocNet(
-        DewarpModelConfig(input_size=(64, 48), grid_size=grid_size, num_filter=4, with_3d=False)
-    ).eval()
-    with torch.no_grad():
-        assert no3d(torch.rand(1, 3, 64, 48))[1] is None
+    # The natural grid of this input and a resized one; the 3-D head can be left out.
+    for grid_size in ((4, 3), (9, 7)):
+        config = DewarpModelConfig(input_size=(64, 48), grid_size=grid_size, num_filter=4)
+        with torch.no_grad():
+            grid2d, grid3d = UVDocNet(config).eval()(torch.rand(2, 3, 64, 48))
+            assert grid2d.shape == (2, 2, *grid_size) and grid3d.shape == (2, 3, *grid_size)
+            no3d = UVDocNet(replace(config, with_3d=False)).eval()
+            assert no3d(torch.rand(1, 3, 64, 48))[1] is None
 
 
 def test_upstream_format_weights_load_into_matching_and_2d_only_models(tmp_path):

@@ -30,23 +30,22 @@ from flattener.regions.segmentation import preprocess_mask as pinned_preprocess_
 SMALL = ContextSegmenterConfig(input_size=(17, 13), channels=(2, 3, 4, 5))
 
 
-def _model(config=SMALL, seed=5):
+def _model():
     with torch.random.fork_rng(devices=[]):
-        torch.manual_seed(seed)
-        return ContextPageSegmenter(config).eval()
+        torch.manual_seed(5)
+        return ContextPageSegmenter(SMALL).eval()
 
 
-def _pilot(path, model, config=SMALL, **changes):
+def _pilot(path, model):
     payload = {
         "schema": PILOT_SCHEMA,
-        "model_config": asdict(config),
+        "model_config": asdict(SMALL),
         "epoch": 3,
         "best_epoch": 2,
         "best_score": 0.5,
         "model_state": model.state_dict(),
         "protocol": {"seed": 1, "epochs": 3, "device": {"device": "xpu:0"}},
     }
-    payload.update(changes)
     torch.save(payload, path)
     path.with_name(path.name + ".sha256").write_text(
         hashlib.sha256(path.read_bytes()).hexdigest() + "\n"
@@ -54,39 +53,28 @@ def _pilot(path, model, config=SMALL, **changes):
     return path
 
 
-def test_v0_architecture_has_the_recorded_parameter_count():
+def _reason(call):
+    with pytest.raises(FlattenerError) as caught:
+        call()
+    assert caught.value.status == Status.MODEL_ERROR
+    return caught.value.reason_code
+
+
+def _probability(box, shape=(96, 72), value=0.98):
+    probability = np.full(shape, 0.02, np.float32)
+    top, left, bottom, right = box
+    probability[top:bottom, left:right] = value
+    return probability
+
+
+def test_architecture_has_the_recorded_size_and_operation_order():
     config = ContextSegmenterConfig(input_size=(192, 144))
     model = ContextPageSegmenter(config)
     assert parameter_count(config) == sum(p.numel() for p in model.parameters()) == 140_545
     assert asdict(config)["model_version"] == MODEL_VERSION == "region-context-unet-2.0"
     assert all(p.dtype == torch.float32 and p.device.type == "cpu" for p in model.parameters())
 
-
-def test_preprocessing_is_the_pinned_segmentation_preprocessing():
-    image = np.random.default_rng(3).integers(0, 256, (60, 80, 3), dtype=np.uint8)[::-1]
-    mask = image[:, :, 0] > 128
-    before = image.copy()
-    pinned = SegmenterConfig(input_size=SMALL.input_size)
-    assert torch.equal(preprocess_image(image, SMALL), pinned_preprocess_image(image, pinned))
-    assert torch.equal(preprocess_mask(mask, SMALL), pinned_preprocess_mask(mask, pinned))
-    np.testing.assert_array_equal(image, before)
-
-
-def test_preprocess_preserves_whole_extent_and_caller_memory():
-    image = np.zeros((40, 20, 3), np.uint8)
-    image[:20, :, 0] = 255
-    image[20:, :, 2] = 255
-    original = image.copy()
-    config = SegmenterConfig(input_size=(17, 13), channels=(2, 4, 6))
-    output = pinned_preprocess_image(image[::-1], config)
-    assert output.shape == (3, 17, 13)
-    assert output.dtype == torch.float32 and output.device.type == "cpu"
-    assert output[2, 0].mean() > 0.99 and output[0, -1].mean() > 0.99
-    output.fill_(0.7)
-    np.testing.assert_array_equal(image, original)
-
-
-def test_forward_follows_the_archived_operation_order_and_keeps_rng():
+    # The forward pass follows the archived operation order and leaves the RNG alone.
     model = _model()
     image = torch.rand(2, 3, *SMALL.input_size)
     rng = torch.get_rng_state().clone()
@@ -105,6 +93,28 @@ def test_forward_follows_the_archived_operation_order_and_keeps_rng():
         assert torch.equal(model(image), expected)
         assert torch.equal(model._forward_trusted(image), expected)
     assert torch.equal(rng, torch.get_rng_state())
+
+
+def test_preprocessing_is_the_pinned_segmentation_preprocessing():
+    image = np.random.default_rng(3).integers(0, 256, (60, 80, 3), dtype=np.uint8)[::-1]
+    mask = image[:, :, 0] > 128
+    before = image.copy()
+    pinned = SegmenterConfig(input_size=SMALL.input_size)
+    assert torch.equal(preprocess_image(image, SMALL), pinned_preprocess_image(image, pinned))
+    assert torch.equal(preprocess_mask(mask, SMALL), pinned_preprocess_mask(mask, pinned))
+    np.testing.assert_array_equal(image, before)
+
+    # The whole image is resized in RGB order, without a crop, into a new tensor.
+    halves = np.zeros((40, 20, 3), np.uint8)
+    halves[:20, :, 0] = 255
+    halves[20:, :, 2] = 255
+    original = halves.copy()
+    output = preprocess_image(halves[::-1], SMALL)
+    assert output.shape == (3, *SMALL.input_size)
+    assert output.dtype == torch.float32 and output.device.type == "cpu"
+    assert output[2, 0].mean() > 0.99 and output[0, -1].mean() > 0.99
+    output.fill_(0.7)
+    np.testing.assert_array_equal(halves, original)
 
 
 def test_region_context_checkpoint_round_trip(tmp_path):
@@ -129,39 +139,22 @@ def test_region_context_checkpoint_round_trip(tmp_path):
     np.testing.assert_array_equal(probability, expected)
     logits = torch.from_numpy(loaded.predict_logits(image))
     np.testing.assert_array_equal(logits.sigmoid().numpy(), probability)
-    assert np.all((probability >= 0) & (probability <= 1))
 
 
-def test_pilot_checkpoint_loads_with_an_unknown_initialization(tmp_path):
-    loaded = load_context_segmenter(_pilot(tmp_path / "best.pt", _model()))
+def test_pilot_checkpoint_has_an_unknown_initialization_and_needs_its_sidecar(tmp_path):
+    path = _pilot(tmp_path / "best.pt", _model())
+    loaded = load_context_segmenter(path)
     assert loaded.metadata["checkpoint_schema"] == PILOT_SCHEMA
     assert (loaded.metadata["epoch"], loaded.metadata["best_epoch"]) == (3, 2)
     assert loaded.metadata["provenance"]["initialization"] == "unknown"
     assert loaded.metadata["provenance"]["device"] == {"device": "xpu:0"}
 
-
-def _reason(call):
-    with pytest.raises(FlattenerError) as caught:
-        call()
-    assert caught.value.status == Status.MODEL_ERROR
-    return caught.value.reason_code
-
-
-def test_checkpoint_needs_a_matching_sidecar(tmp_path):
-    path = _pilot(tmp_path / "best.pt", _model())
     sidecar = tmp_path / "best.pt.sha256"
     sidecar.write_text("0" * 64 + "\n")
     assert _reason(lambda: load_context_segmenter(path)) == "checkpoint_hash_mismatch"
     sidecar.unlink()
     assert _reason(lambda: load_context_segmenter(path)) == "missing_sidecar"
     assert _reason(lambda: load_context_segmenter(tmp_path / "none.pt")) == "missing_checkpoint"
-
-
-def _probability(box, shape=(96, 72), value=0.98):
-    probability = np.full(shape, 0.02, np.float32)
-    top, left, bottom, right = box
-    probability[top:bottom, left:right] = value
-    return probability
 
 
 def test_centered_page_keeps_the_detected_box():
@@ -171,32 +164,30 @@ def test_centered_page_keeps_the_detected_box():
     assert gate.region.left < 180 and gate.region.right > 540
     assert gate.confident and gate.area_fraction == pytest.approx(0.25)
     assert gate.metadata["reasons"] == [] and gate.metadata["fills_frame"] is False
+    # Weaker scores still pass detection, without confidence.
+    assert not gate_page_region(_probability((24, 18, 72, 54), value=0.8), (960, 720)).confident
 
 
-@pytest.mark.parametrize(
-    "box, borders",
-    [
-        ((0, 0, 96, 72), ("top", "right", "bottom", "left")),  # the default 0.95 cap rejects it
+def test_page_fills_frame_is_a_success_with_the_whole_image():
+    for box, borders in (
+        ((0, 0, 96, 72), ("top", "right", "bottom", "left")),  # past the default 0.95 area cap
         ((2, 2, 94, 70), ()),  # 90.5% of the frame, no border
         ((0, 20, 96, 72), ("top", "right", "bottom")),  # 72% touching three borders
-    ],
-)
-def test_page_fills_frame_is_a_success_with_the_whole_image(box, borders):
-    gate = gate_page_region(_probability(box), (960, 720))
-    assert gate.fills_frame and gate.reasons == ("page_fills_frame",)
-    assert gate.touched_borders == borders
-    assert gate.region == PageRegion(0, 0, 720, 960)
-    assert gate.metadata["region"] == asdict(PageRegion(0, 0, 720, 960))
-
-
-def test_weak_scores_pass_detection_without_confidence():
-    gate = gate_page_region(_probability((24, 18, 72, 54), value=0.8), (960, 720))
-    assert not gate.confident
+    ):
+        gate = gate_page_region(_probability(box), (960, 720))
+        assert gate.fills_frame and gate.reasons == ("page_fills_frame",), box
+        assert gate.touched_borders == borders
+        assert gate.region == PageRegion(0, 0, 720, 960)
+        assert gate.metadata["region"] == asdict(PageRegion(0, 0, 720, 960))
 
 
 def test_rejections_keep_their_status_and_reason():
     empty = np.zeros((96, 72), np.float32)
     assert _reason(lambda: gate_page_region(empty, (960, 720))) == "page_not_found"
+    speck = _probability((40, 30, 41, 31))
+    assert _reason(lambda: gate_page_region(speck, (960, 720))) == "page_area_rejected"
     two = _probability((10, 4, 50, 30))
     two[10:50, 40:66] = 0.98
     assert _reason(lambda: gate_page_region(two, (960, 720))) == "ambiguous_page_region"
+    unsure = _probability((24, 18, 72, 54), value=0.6)
+    assert _reason(lambda: gate_page_region(unsure, (960, 720))) == "uncertain_page_region"
