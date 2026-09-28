@@ -77,6 +77,8 @@ SOURCE_KEYS = {
     "stored_margin",
     "root",
     "document_prob",
+    "form_prob",
+    "sparse_prob",
 }
 
 
@@ -249,7 +251,12 @@ def make_page(kind: str, item: Any, rng: np.random.Generator, settings: dict[str
     if kind == "documents":
         page_id = f"{settings['source']}-{settings['split']}-{item}"
         gray, box, layout = pages.document_page(
-            page_id, rng, long_side, settings.get("document_prob", 0.35)
+            page_id,
+            rng,
+            long_side,
+            settings.get("document_prob", 0.35),
+            settings.get("form_prob", 0.0),
+            settings.get("sparse_prob", 0.0),
         )
         return gray, box, {**own, "document_group": page_id, "origin": {"layout": layout}}
     gray, box, layout = pages.text_free_page(rng, long_side)
@@ -393,6 +400,8 @@ def build(
                 "jpeg_quality": spec["jpeg_quality"],
                 "stored_margin": source.get("stored_margin", 0.15),
                 "document_prob": source.get("document_prob", 0.35),
+                "form_prob": source.get("form_prob", 0.0),
+                "sparse_prob": source.get("sparse_prob", 0.0),
             }
             for start in range(0, len(items), spec["chunk"]):
                 tasks.append(

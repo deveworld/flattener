@@ -11,7 +11,8 @@ fixes the pixels for a fixed Pillow/FreeType build.
   its up vector (mean of the grid's column vectors, bottom row to top row) points up.
 * ``document_page``: an own page, either ``flattener.synthetic.documents`` (imported,
   unchanged) or a composed page of procedural Hangul/Latin text, formulas, tables and
-  figures in the bundled Noto Sans KR.
+  figures in the bundled Noto Sans KR; with ``form_prob`` and ``sparse_prob`` also a
+  ruled form (``form_page``) or a nearly empty page (``sparse_page``).
 * ``text_free_page``: blank, figure-only or ruled paper.
 """
 
@@ -306,6 +307,104 @@ def composed_page(rng: np.random.Generator, size: tuple[int, int]) -> NDArray[np
     return np.array(image)
 
 
+def _paper(rng: np.random.Generator, size: tuple[int, int]):
+    height, width = size
+    image = Image.new("L", (width, height), int(rng.integers(230, 256)))
+    return image, ImageDraw.Draw(image), int(rng.integers(0, 60))
+
+
+def _foot(rng, draw, size: tuple[int, int], face, ink: int, left: int, bottom: int) -> None:
+    """A page count in the middle of the foot and, often, an office name at the right."""
+    height, width = size
+    count = f"{int(rng.integers(1, 20))} / {int(rng.integers(20, 40))}"
+    draw.text(((width - face.getlength(count)) / 2, bottom - face.size), count, font=face, fill=ink)
+    if rng.random() < 0.8:
+        name = _fit_line(face, words(rng, "ko"), width * 0.25)
+        draw.text(
+            (width - left - face.getlength(name), bottom - face.size), name, font=face, fill=ink
+        )
+
+
+def form_page(rng: np.random.Generator, size: tuple[int, int]) -> NDArray[np.uint8]:
+    """A ruled form such as a school or office record: a date and a title at the top, a
+    table down the page with short labels in a narrow left column and dense Hangul text in
+    the wide cells, and a page count and an office name at the foot."""
+    height, width = size
+    image, draw, ink = _paper(rng, size)
+    left = round(width * rng.uniform(0.05, 0.09))
+    right = width - left
+    top = round(height * rng.uniform(0.04, 0.07))
+    bottom = height - round(height * rng.uniform(0.05, 0.08))
+    body = font(max(8, round(height * rng.uniform(0.009, 0.014))))
+    small = font(max(8, round(body.size * 0.9)))
+    rule = max(1, body.size // 10)
+    year, month, day = (
+        int(rng.integers(1990, 2031)),
+        int(rng.integers(1, 13)),
+        int(rng.integers(1, 29)),
+    )
+    date = f"{year}.{month:02d}.{day:02d}"
+    draw.text((right - small.getlength(date), top), date, font=small, fill=ink)
+    if rng.random() < 0.6:
+        draw.text(
+            (left, top), _fit_line(small, words(rng, "ko"), width * 0.4), font=small, fill=ink
+        )
+    y = top + small.size * 2.2
+    title_font = font(round(body.size * rng.uniform(1.3, 1.8)), 600)
+    title = _fit_line(title_font, words(rng, "ko"), width * 0.45)
+    draw.text(((width - title_font.getlength(title)) / 2, y), title, font=title_font, fill=ink)
+    y += title_font.size * 2.0
+    table_bottom = bottom - small.size * 3
+    label_width = round((right - left) * rng.uniform(0.1, 0.2))
+    draw.rectangle((left, y, right, table_bottom), outline=ink, width=rule)
+    draw.line((left + label_width, y, left + label_width, table_bottom), fill=ink, width=rule)
+    leading = body.size * rng.uniform(1.35, 1.6)
+    row_top = y
+    while row_top < table_bottom - 2 * leading:
+        row_bottom = min(table_bottom, row_top + int(rng.integers(2, 14)) * leading + leading)
+        label = _fit_line(body, words(rng, "ko"), label_width - 6)
+        draw.text((left + 4, row_top + leading * 0.4), label, font=body, fill=ink)
+        line_y = row_top + leading * 0.4
+        while line_y + leading < row_bottom:
+            text = _fit_line(body, words(rng, "ko"), right - left - label_width - 10)
+            draw.text((left + label_width + 5, line_y), text, font=body, fill=ink)
+            line_y += leading
+        if row_bottom < table_bottom:
+            draw.line((left, row_bottom, right, row_bottom), fill=ink, width=rule)
+        row_top = row_bottom
+    _foot(rng, draw, size, small, ink, left, bottom)
+    return np.array(image)
+
+
+def sparse_page(rng: np.random.Generator, size: tuple[int, int]) -> NDArray[np.uint8]:
+    """A nearly empty page: a running head or a date, one short spaced-out phrase (an
+    end-of-text note or a section title) and a foot; the rest is blank paper."""
+    height, width = size
+    image, draw, ink = _paper(rng, size)
+    left = round(width * rng.uniform(0.05, 0.1))
+    top = round(height * rng.uniform(0.04, 0.08))
+    bottom = height - round(height * rng.uniform(0.05, 0.09))
+    small = font(max(8, round(height * rng.uniform(0.009, 0.014))))
+    if rng.random() < 0.8:
+        head = _fit_line(small, words(rng, "ko"), width * rng.uniform(0.15, 0.4))
+        x = left if rng.random() < 0.5 else width - left - small.getlength(head)
+        draw.text((x, top), head, font=small, fill=ink)
+        if rng.random() < 0.3:
+            y = top + small.size * 1.6
+            draw.line((left, y, width - left, y), fill=ink, width=max(1, small.size // 10))
+    big = font(round(height * rng.uniform(0.018, 0.04)), 500)
+    phrase = " ".join(
+        hangul_word(rng)[: int(rng.integers(2, 5))] for _ in range(int(rng.integers(1, 3)))
+    )
+    if rng.random() < 0.6:
+        phrase = " ".join(phrase.replace(" ", ""))  # spaced syllables, as in a closing note
+    y = height * rng.uniform(0.2, 0.7)
+    draw.text(((width - big.getlength(phrase)) / 2, y), phrase, font=big, fill=ink)
+    if rng.random() < 0.85:
+        _foot(rng, draw, size, small, ink, left, bottom)
+    return np.array(image)
+
+
 def _block(
     rng, image: Image.Image, draw: ImageDraw.ImageDraw, box, ink: int, text_size: int
 ) -> None:
@@ -351,10 +450,22 @@ def page_size(
 
 
 def document_page(
-    page_id: str, rng: np.random.Generator, long_side: int = 1024, document_prob: float = 0.35
+    page_id: str,
+    rng: np.random.Generator,
+    long_side: int = 1024,
+    document_prob: float = 0.35,
+    form_prob: float = 0.0,
+    sparse_prob: float = 0.0,
 ) -> tuple[NDArray[np.uint8], list[float], str]:
-    """An own text page; returns the page, its box and its layout name."""
+    """An own text page; returns the page, its box and its layout name. Without
+    ``form_prob`` and ``sparse_prob`` the draws are those of earlier builds."""
     size = page_size(rng, long_side)
+    if form_prob or sparse_prob:
+        roll = rng.random()
+        if roll < form_prob:
+            return form_page(rng, size), list(FULL_BOX), "form"
+        if roll < form_prob + sparse_prob:
+            return sparse_page(rng, size), list(FULL_BOX), "sparse"
     if rng.random() < document_prob:
         seed = int(rng.integers(0, 2**63))
         try:
