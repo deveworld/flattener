@@ -733,6 +733,8 @@ def test_a_spread_splits_into_two_pages_in_reading_order():
     for number, page in enumerate((left, right), start=1):
         assert page.status == Status.SUCCESS and page.metadata["page"]["page"] == number
         assert "two_pages" in _codes(page) and page.plan.output.height > page.plan.output.width
+        # The fake model sees the whole spread in a page's crop too, so the split grid stays.
+        assert page.metadata["page"]["reflatten"]["status"] == "kept_split_grid"
     # The ramp's red channel grows with x: the left page shows the left half of the spread.
     assert left.image[..., 0].mean() + 40 < right.image[..., 0].mean()
     first, second = scanner.scan_pages(image, ScanOptions(pages=2, page_order="rtl"))

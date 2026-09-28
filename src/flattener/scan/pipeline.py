@@ -1095,14 +1095,42 @@ class Scanner:
             for number, (low, high) in enumerate(halves, start=1)
         ]
 
+    def _reflatten(
+        self, planned: PlannedScan, grid: NDArray, number: int
+    ) -> tuple[NDArray | None, dict[str, Any]]:
+        """A split page run through the model again on a crop of its own, so the fold's
+        curl is flattened as the page's edge. The new grid counts only while its median
+        node drift from the split grid stays within ``VERIFY["max_drift"]``: a grid that
+        runs into the facing page moves a whole side."""
+        src, options, clock, plan = planned.source, planned.options, planned.clock, planned.plan
+        size = src.info.size
+        box = locating.outline_box(grid, size)
+        if box is None:
+            return None, {"status": "no_box"}
+        candidate = _Candidate(f"page_{number}", box, plan.angle_deg, options.deskew, True,
+                               "split", 0)  # fmt: skip
+        with clock.stage("infer"):
+            passes = self._infer(src, self._memo(src), candidate, plan.quarter, options, clock)
+        refined = passes[-1][0]
+        if not np.isfinite(refined).all():
+            return None, {"status": "non_finite"}
+        drift = median_drift(grid, refined, size)
+        if drift > VERIFY["max_drift"]:
+            return None, {"status": "kept_split_grid", "drift": round(drift, 4)}
+        return refined, {"status": "used", "drift": round(drift, 4)}
+
     def _page(
         self, planned: PlannedScan, grid: NDArray, number: int, found: dict[str, Any]
     ) -> PlannedScan:
-        """One page of a split spread: its plan, checked render and record."""
+        """One page of a split spread: its plan, checked render and record. The page is
+        flattened again on its own crop (``_reflatten``) when that stays on the page."""
         src, options, overrides, clock = (
             planned.source, planned.options, planned.overrides, planned.clock
         )  # fmt: skip
         plan = planned.plan
+        refined, reflatten = self._reflatten(planned, grid, number)
+        if refined is not None:
+            grid = refined
         request = overrides.output_size if overrides.output_size is not None else options.output
         aspect = overrides.aspect if overrides.aspect is not None else options.aspect
         focal = src.info.focal_px() if options.use_focal else None
@@ -1118,7 +1146,12 @@ class Scanner:
         record = copy.copy(planned.record)
         record.metadata = dict(planned.record.metadata)
         detail = {"page": number, "of": 2, "fold": round(float(found["u"]), 4)}
-        record.metadata["page"] = {**detail, "order": options.page_order, "fold_found": found}
+        record.metadata["page"] = {
+            **detail,
+            "order": options.page_order,
+            "fold_found": found,
+            "reflatten": reflatten,
+        }
         record.reasons = [*planned.record.reasons, reason("two_pages", **detail)]
         record.plan = page_plan
         page = PlannedScan(page_plan, None, src, record, options, overrides, clock=clock)
