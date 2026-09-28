@@ -24,11 +24,13 @@
 quality 95 with 4:4:4 chroma (``subsampling=0``); PNG is lossless. The source's ICC
 profile and a known DPI can be embedded. Every file is written to a temporary file in
 the target directory, flushed to disk and moved into place, so a reader sees either the
-old file or the new one. Without ``overwrite`` an existing target is an ``output_exists``
-error, and a new file is linked into place only while its name is still free. The image
-is committed first and rolled back if the record cannot be written. A result without an
-image removes an earlier image of the same name (with ``overwrite``), so the record and
-the files agree. Use one writer per output directory.
+old file or the new one. Files get the permissions of the umask. Without ``overwrite``
+an existing target is an ``output_exists`` error, and a new file is moved into place
+only while its name is still free: by a hard link, or on file systems without hard
+links (FAT, exFAT, some network shares) by an exclusive create that the file then
+replaces. The image is committed first and rolled back if the record cannot be
+written. A result without an image removes an earlier image of the same name (with
+``overwrite``), so the record and the files agree. Use one writer per output directory.
 """
 
 from __future__ import annotations
@@ -37,6 +39,8 @@ import hashlib
 import io
 import json
 import os
+import secrets
+import shutil
 import tempfile
 import time
 import warnings
@@ -341,9 +345,21 @@ def _check_target(target: Path, overwrite: bool) -> bool:
     return True
 
 
+def _temporary(directory: Path, name: str) -> tuple[int, str]:
+    """A new file ``.<name>.<random>.tmp`` in ``directory``, opened for writing. Its
+    permissions follow the umask (``tempfile.mkstemp`` files are owner-only)."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+    while True:
+        path = directory / f".{name}.{secrets.token_hex(4)}.tmp"
+        try:
+            return os.open(path, flags, 0o666), str(path)
+        except FileExistsError:
+            continue
+
+
 def _stage(directory: Path, name: str, write: Callable[[BinaryIO], None]) -> Path:
     """Write a temporary file in ``directory`` and flush it to disk."""
-    handle, temporary = tempfile.mkstemp(prefix=f".{name}.", suffix=".tmp", dir=directory)
+    handle, temporary = _temporary(directory, name)
     try:
         with os.fdopen(handle, "wb") as stream:
             write(stream)
@@ -353,6 +369,25 @@ def _stage(directory: Path, name: str, write: Callable[[BinaryIO], None]) -> Pat
         Path(temporary).unlink(missing_ok=True)
         raise
     return Path(temporary)
+
+
+def _place_new(staged: Path, target: Path) -> None:
+    """Move ``staged`` to ``target`` only while that name is free (``FileExistsError``
+    otherwise): by a hard link, or by an exclusive create of ``target`` that ``staged``
+    then replaces where the file system has no hard links."""
+    try:
+        os.link(staged, target)
+    except FileExistsError:
+        raise
+    except OSError:
+        os.close(os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666))
+        try:
+            os.replace(staged, target)
+        except BaseException:
+            target.unlink(missing_ok=True)
+            raise
+    else:
+        staged.unlink()
 
 
 class _Transaction:
@@ -373,7 +408,10 @@ class _Transaction:
         os.close(handle)
         backup = Path(name)
         backup.unlink()
-        os.link(target, backup)
+        try:
+            os.link(target, backup)
+        except OSError:  # no hard links on this file system
+            shutil.copy2(target, backup)
         self.temporary.append(backup)
         return backup
 
@@ -383,8 +421,7 @@ class _Transaction:
             os.replace(staged, target)
         else:
             backup = None
-            os.link(staged, target)  # fails if the name was taken meanwhile
-            staged.unlink()
+            _place_new(staged, target)  # fails if the name was taken meanwhile
         self.done.append((target, backup))
 
     def remove(self, target: Path) -> None:
@@ -438,7 +475,7 @@ def save_image(
         if overwrite:
             os.replace(staged, target)
         else:
-            os.link(staged, target)  # fails if the name was taken meanwhile
+            _place_new(staged, target)  # fails if the name was taken meanwhile
     except FileExistsError as exc:
         raise _io_error("output_exists", f"Output already exists: {target}") from exc
     except OSError as exc:

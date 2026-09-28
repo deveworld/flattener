@@ -182,14 +182,14 @@ def test_failed_record_rolls_back_the_image(tmp_path, monkeypatch):
     assert caught.value.metadata["save_transaction"]["rolled_back"] is True
     assert {path.name: path.read_bytes() for path in tmp_path.iterdir()} == before
 
-    real_link = os.link
+    real_place = scan_io._place_new
 
-    def failing_link(source, target):
+    def failing_place(staged, target):
         if str(target).endswith(".scan.json"):
-            raise OSError("link failed")
-        return real_link(source, target)
+            raise OSError("place failed")
+        return real_place(staged, target)
 
-    monkeypatch.setattr(os, "link", failing_link)
+    monkeypatch.setattr(scan_io, "_place_new", failing_place)
     fresh = tmp_path / "fresh"
     with pytest.raises(FlattenerError):
         scan_io.save_scan(make_result(smooth_rgb(8, 8)), fresh, "photo")
@@ -213,3 +213,32 @@ def test_record_without_image_removes_a_stale_image(tmp_path):
     with pytest.raises(FlattenerError) as caught:
         scan_io.read_scan_record(tmp_path / "broken.scan.json")
     assert caught.value.reason_code == "invalid_scan_record"
+
+
+def test_saving_works_without_hard_links(tmp_path, monkeypatch):
+    def no_links(source, target):
+        raise PermissionError(1, "Operation not permitted", str(source), None, str(target))
+
+    monkeypatch.setattr(os, "link", no_links)  # as on FAT and exFAT drives
+    first = make_result(smooth_rgb(40, 30))
+    assert scan_io.save_scan(first, tmp_path, "photo")["image"] == str(tmp_path / "photo.jpg")
+    with pytest.raises(FlattenerError) as caught:
+        scan_io.save_scan(make_result(smooth_rgb(8, 8)), tmp_path, "photo")
+    assert caught.value.reason_code == "output_exists"
+    scan_io.save_scan(make_result(smooth_rgb(8, 8)), tmp_path, "photo", overwrite=True)
+    with Image.open(tmp_path / "photo.jpg") as saved:
+        assert saved.size == (8, 8)
+    page = scan_io.save_image(tmp_path / "page.png", smooth_rgb(8, 8))
+    assert np.array_equal(np.asarray(Image.open(page)), smooth_rgb(8, 8))
+    assert temporary_files(tmp_path) == []
+
+
+def test_saved_files_follow_the_umask(tmp_path):
+    previous = os.umask(0o022)
+    try:
+        artifacts = scan_io.save_scan(make_result(smooth_rgb(8, 8)), tmp_path, "photo")
+        page = scan_io.save_image(tmp_path / "page.jpg", smooth_rgb(8, 8))
+    finally:
+        os.umask(previous)
+    for path in [*artifacts.values(), page]:
+        assert os.stat(path).st_mode & 0o777 == 0o644
