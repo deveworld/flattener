@@ -167,6 +167,13 @@ REASONS: dict[str, ReasonSpec] = {
             _CHOOSE_EN,
         ),
         ReasonSpec(
+            "two_pages",
+            Status.SUCCESS,
+            Severity.INFO,
+            "An open-book spread split at its fold; each page is its own result, numbered "
+            "in reading order (detail: page, of, fold, order).",
+        ),
+        ReasonSpec(
             "two_page_candidate",
             Status.MODEL_ERROR,
             Severity.FAILURE,

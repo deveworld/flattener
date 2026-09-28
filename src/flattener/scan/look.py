@@ -13,6 +13,12 @@ of the ink profile across the lines (rows, or columns for a sideways page). A fu
 shows 25 or more lines and blank margins; a close-up whose page runs out of the photo
 shows a few large lines cut by two or more edges of the flattened page.
 
+``fold(image)``: the fold of an open-book spread. A spread of two portrait pages is wider
+than tall, and down its middle runs a column with no text between two pages of text. Text
+shows as horizontal strokes (the luminance change down each column); the fold is the
+middle of the stretch with the least of it in the middle band (``FOLD_BAND``), and it counts
+when both sides carry at least ``FOLD_TEXT_RATIO`` times as much.
+
 ``paper_colour``, ``page_coloured`` and ``crop_edge_share`` work on a small copy of the
 photo: the paper colour of a grid is the median colour of the ink-free pixels inside its
 outline, and a pixel is page-coloured when every channel lies within ``TOLERANCE`` of it.
@@ -32,6 +38,9 @@ EDGE_BAND = 0.04  # outer band of each edge, share of the page size
 EDGE_SEGMENTS = 20  # an edge is split into this many parts; a part with 2 % ink has ink
 TOLERANCE = 0.08  # page-coloured: every channel (0-1) within this of the paper colour
 STRIP = 0.015  # strip inside a crop edge, share of the image's short side
+FOLD_BAND = (0.35, 0.65)  # where the fold of a spread may lie, share of the width
+FOLD_MIN_ASPECT = 1.0  # width / height of a spread of two portrait pages
+FOLD_TEXT_RATIO = 2.5  # text on both sides against the fold column
 
 
 def luminance(image: NDArray[np.uint8]) -> NDArray[np.float32]:
@@ -123,6 +132,35 @@ def text(image: NDArray[np.uint8]) -> dict[str, object]:
         parts = np.array_split(band, EDGE_SEGMENTS, axis=1)
         edges[side] = float(np.mean([part.mean() >= 0.02 for part in parts]))
     return {"lines": lines, "periodicity": strength, "edges": edges}
+
+
+def fold(image: NDArray[np.uint8]) -> dict[str, float] | None:
+    """The fold of a flat spread preview: ``u`` (0-1 across the width), the aspect and the
+    text ratio; ``None`` when the preview is not a spread."""
+    lum = luminance(image)
+    height, width = lum.shape
+    aspect = width / height
+    if aspect < FOLD_MIN_ASPECT or width < 40:
+        return None
+    strokes = _smooth(np.abs(np.diff(lum, axis=0)).mean(axis=0), max(3, width // 50))
+    low, high = (round(share * width) for share in FOLD_BAND)
+    band = strokes[low:high]
+    lowest = int(np.argmin(band))
+    # The middle of the stretch around the minimum that stays near it (a blank gutter).
+    near = band <= band[lowest] + 0.25 * (float(np.median(strokes)) - band[lowest])
+    start, stop = lowest, lowest
+    while start > 0 and near[start - 1]:
+        start -= 1
+    while stop < len(band) - 1 and near[stop + 1]:
+        stop += 1
+    column = low + (start + stop) // 2
+    pad, outer = round(0.05 * width), round(0.1 * width)
+    left = strokes[outer : max(outer + 1, column - pad)].mean()
+    right = strokes[column + pad : max(column + pad + 1, width - outer)].mean()
+    ratio = float(min(left, right) / max(strokes[column], 1e-6))
+    if ratio < FOLD_TEXT_RATIO:
+        return None
+    return {"u": (column + 0.5) / width, "aspect": aspect, "text_ratio": ratio}
 
 
 def paper_colour(image: NDArray[np.uint8], inside: NDArray[np.bool_]) -> NDArray | None:

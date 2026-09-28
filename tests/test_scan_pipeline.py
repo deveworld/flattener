@@ -701,3 +701,41 @@ def test_a_stored_plan_needs_its_source_and_keeps_its_models(tmp_path):
     assert result.evidence["model_provenance"] == "own_checkpoint"
     own = release.render(image, release.plan(image, ScanOptions(orient="none")).plan)
     assert own.shippable and not own.research
+
+
+def _text_block(height, width, rng):
+    """A block of dark text-like strokes on white paper."""
+    block = np.full((height, width), 240, np.uint8)
+    for row in range(4, height - 4, 7):
+        block[row : row + 2, 2 : width - 2] = rng.integers(20, 80)
+    return block
+
+
+def test_the_fold_of_a_spread_is_where_the_text_stops_between_two_pages():
+    rng = np.random.default_rng(0)
+    spread = np.full((200, 280), 240, np.uint8)
+    spread[20:180, 15:125] = _text_block(160, 110, rng)
+    spread[20:180, 160:270] = _text_block(160, 110, rng)
+    found = look.fold(np.dstack([spread] * 3))
+    assert found is not None and 0.46 < found["u"] < 0.54
+    page = spread[:, 15:155]  # one page, two columns and taller than wide
+    assert look.fold(np.dstack([page] * 3)) is None
+    blank = np.full((200, 280, 3), 240, np.uint8)  # wide, but no text on either side
+    assert look.fold(blank) is None
+
+
+def test_a_spread_splits_into_two_pages_in_reading_order():
+    spread = Page((165, 122), (260, 180), 4.0)
+    scanner, _ = _scanner(spread)
+    image = ramp_scene(SIZE, spread)
+    assert len(scanner.scan_pages(ramp_scene(SIZE, TRUE))) == 1  # a single page stays one
+    left, right = scanner.scan_pages(image, ScanOptions(pages=2))  # no text: split at the middle
+    for number, page in enumerate((left, right), start=1):
+        assert page.status == Status.SUCCESS and page.metadata["page"]["page"] == number
+        assert "two_pages" in _codes(page) and page.plan.output.height > page.plan.output.width
+    # The ramp's red channel grows with x: the left page shows the left half of the spread.
+    assert left.image[..., 0].mean() + 40 < right.image[..., 0].mean()
+    first, second = scanner.scan_pages(image, ScanOptions(pages=2, page_order="rtl"))
+    assert first.image[..., 0].mean() > second.image[..., 0].mean()
+    whole = scanner.scan_pages(image, ScanOptions(pages=1))
+    assert len(whole) == 1 and whole[0].plan.output.width > whole[0].plan.output.height

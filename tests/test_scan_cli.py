@@ -234,3 +234,14 @@ def test_setup_errors_exit_2_before_anything_is_written(tmp_path, photo, capsys,
     assert photo.read_bytes() == before
     assert "is an input photo" in json.loads(capsys.readouterr().err)["message"]
     assert sorted(path.name for path in tmp_path.iterdir()) == ["photo.png"]
+
+
+def test_a_split_spread_saves_its_pages_as_p1_and_p2(tmp_path, photo, capsys, monkeypatch):
+    _install(monkeypatch)
+    out = tmp_path / "out"
+    assert cli.main([str(photo), "--out", str(out), "--weights", "w", "--pages", "2"]) == 0
+    lines = _lines(capsys)
+    assert [line["page"] for line in lines] == [1, 2]
+    names = sorted(path.name for path in out.iterdir())
+    assert names == ["photo-p1.jpg", "photo-p1.scan.json", "photo-p2.jpg", "photo-p2.scan.json"]
+    assert read_scan_record(out / "photo-p2.scan.json").metadata["page"]["page"] == 2

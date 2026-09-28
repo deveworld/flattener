@@ -180,6 +180,8 @@ VERIFY: dict[str, Any] = {
     "post_preview_long_side": 768,
 }
 CACHE_SIZE = 4
+PAGE_CHOICES = ("auto", 1, 2)
+PAGE_ORDERS = ("ltr", "rtl")
 
 
 def _option_error(message: str) -> FlattenerError:
@@ -204,7 +206,10 @@ class ScanOptions:
     after ``default`` fails.
     ``use_focal``: take the EXIF focal length into the aspect estimate. ``fill_rgb``: the
     color of output pixels outside the source; the plan keeps it with ``quantize``, so a
-    stored plan renders the same image.
+    stored plan renders the same image. ``pages`` (for ``Scanner.split``): ``"auto"``
+    splits an open-book spread at its fold (``look.fold``), ``2`` always splits (at the
+    middle when no fold is found), ``1`` keeps one image. ``page_order``: ``"ltr"`` numbers
+    the left page first, ``"rtl"`` the right one.
     """
 
     passes: str | int = "auto"
@@ -224,6 +229,8 @@ class ScanOptions:
     chain: bool = True
     use_focal: bool = True
     fill_rgb: tuple[int, int, int] = (255, 255, 255)
+    pages: str | int = "auto"
+    page_order: str = "ltr"
 
     def __post_init__(self) -> None:
         if self.passes not in PASS_CHOICES or isinstance(self.passes, bool):
@@ -265,6 +272,10 @@ class ScanOptions:
             raise _option_error("fill_rgb must be three integers in 0..255")
         _check_output(self.output)
         _check_aspect(self.aspect)
+        if isinstance(self.pages, bool) or self.pages not in PAGE_CHOICES:
+            raise _option_error(f"pages must be one of {PAGE_CHOICES}, got {self.pages!r}")
+        if self.page_order not in PAGE_ORDERS:
+            raise _option_error(f"page_order must be one of {PAGE_ORDERS}")
 
     @property
     def rerun(self) -> int:
@@ -642,6 +653,17 @@ def _dense(plan: ScanPlan, size: tuple[int, int] | None = None) -> NDArray[np.fl
     if plan.kind == "perspective":
         return homography_map(plan.homography, size, plan.inset, plan.border)
     return dense_map(plan.grid, size, inset=plan.inset, border=plan.border, nodes=plan.nodes)
+
+
+def split_grid(grid: NDArray, low: float, high: float) -> NDArray[np.float64]:
+    """The part of an edge-aligned grid between column positions ``low`` and ``high``
+    (-1 to 1), resampled linearly onto as many columns."""
+    array = np.asarray(grid, dtype=np.float64)
+    columns = array.shape[1]
+    t = (np.linspace(low, high, columns) + 1.0) / 2.0 * (columns - 1)
+    left = np.clip(np.floor(t).astype(int), 0, columns - 2)
+    weight = (t - left)[None, :, None]
+    return array[:, left] * (1.0 - weight) + array[:, left + 1] * weight
 
 
 def preview_size(output_size: tuple[int, int], long_side: int) -> tuple[int, int]:
@@ -1036,6 +1058,89 @@ class Scanner:
         """``render(plan(...))``."""
         planned = self.plan(source, options, overrides)
         return self._finish(planned)
+
+    def scan_pages(
+        self,
+        source: Any,
+        options: ScanOptions | None = None,
+        overrides: ScanOverrides | None = None,
+    ) -> list[ScanResult]:
+        """The results of ``split(plan(...))``: one, or two for an open-book spread."""
+        return [self._finish(page) for page in self.split(self.plan(source, options, overrides))]
+
+    def split(self, planned: PlannedScan) -> list[PlannedScan]:
+        """The pages of a planned scan (``ScanOptions.pages``). A spread splits at its fold
+        on the flat preview into two plans over the two halves of the grid, each sized,
+        checked and recorded on its own (reason ``two_pages``); a page whose check fails
+        falls back alone. Other scans, perspective plans and grids with ``uvdoc`` nodes
+        stay one."""
+        options, plan = planned.options, planned.plan
+        if options.pages == 1 or plan is None or plan.kind != "dewarp":
+            return [planned]
+        if plan.nodes != "flattener":
+            return [planned]
+        src, clock = planned.source, planned.clock
+        with clock.stage("verify"):
+            found = look.fold(_preview(src, plan, look.SIZE))
+        if found is None:
+            if options.pages == "auto":
+                return [planned]
+            found = {"u": 0.5, "aspect": None, "text_ratio": None}
+        cut = (1.0 - plan.inset[0] + plan.border) * (2.0 * found["u"] - 1.0)
+        halves = [(-1.0, cut), (cut, 1.0)]
+        if options.page_order == "rtl":
+            halves.reverse()
+        return [
+            self._page(planned, split_grid(plan.grid, low, high), number, found)
+            for number, (low, high) in enumerate(halves, start=1)
+        ]
+
+    def _page(
+        self, planned: PlannedScan, grid: NDArray, number: int, found: dict[str, Any]
+    ) -> PlannedScan:
+        """One page of a split spread: its plan, checked render and record."""
+        src, options, overrides, clock = (
+            planned.source, planned.options, planned.overrides, planned.clock
+        )  # fmt: skip
+        plan = planned.plan
+        request = overrides.output_size if overrides.output_size is not None else options.output
+        aspect = overrides.aspect if overrides.aspect is not None else options.aspect
+        focal = src.info.focal_px() if options.use_focal else None
+        with clock.stage("plan"):
+            output = plan_output(
+                grid, src.info.size, output=request, aspect=aspect, focal_px=focal,
+                inset=plan.inset,
+            )  # fmt: skip
+            output = _with_border(output, plan.inset, plan.border, request)
+            page_plan = replace(
+                plan, grid=grid, output=output, region={**plan.region, "page": number}
+            )
+        record = copy.copy(planned.record)
+        record.metadata = dict(planned.record.metadata)
+        detail = {"page": number, "of": 2, "fold": round(float(found["u"]), 4)}
+        record.metadata["page"] = {**detail, "order": options.page_order, "fold_found": found}
+        record.reasons = [*planned.record.reasons, reason("two_pages", **detail)]
+        record.plan = page_plan
+        page = PlannedScan(page_plan, None, src, record, options, overrides, clock=clock)
+        with clock.stage("render"):
+            checked = self._check(src, page_plan, options, clock)
+        if checked.ok:
+            page.checked = checked
+            if options.preview is not None:
+                page.preview = _preview(src, page_plan, options.preview)
+            return page
+        failure = reason(
+            checked.result.reason_code or "invalid_transform", status=checked.result.status
+        )
+        record.reasons.append(failure)
+        record.guidance = collect_guidance(record.reasons)
+        record.status, record.reason_code = failure.status, failure.code
+        record.message = f"returned the original: {failure.code}"
+        record.outcome = Outcome.ORIGINAL_RETURNED
+        record.plan = None
+        page.plan = None
+        page.rejected.append(page_plan)
+        return page
 
     def rectifier(self, options: ScanOptions | None = None, *, force_render: bool = False):
         """``rectify_batch``'s ``rectifier`` for this scanner (pair it with

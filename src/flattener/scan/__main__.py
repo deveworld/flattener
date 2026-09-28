@@ -4,8 +4,11 @@ Each photo gives ``DIR/<stem>.jpg`` (JPEG quality 95, 4:4:4, the source's ICC pr
 ``--format png``) and ``DIR/<stem>.scan.json``, the scan record with its plan, reasons,
 guidance, timings and model records. A photo that falls back keeps its failure status in
 the record; with the default ``--on-error original`` the saved image is the original.
-One JSON line per photo goes to stdout. An output name that is one of the input photos
-is a usage error, so a scan never replaces a photo it reads.
+One JSON line per photo goes to stdout. An open-book spread is split at its fold into
+``DIR/<stem>-p1`` and ``<stem>-p2`` in reading order, one line each (``--pages auto``, the
+default; ``--pages 1`` keeps one image, ``--page-order rtl`` numbers the right page
+first). An output name that is one of the input photos is a usage error, so a scan never
+replaces a photo it reads.
 
 Weights: ``--bundle B`` (a ``flattener-scan-bundle-1`` JSON file) or ``--weights W`` with
 optional ``--gate G`` and ``--orient-weights O``. Weights that fail the ship gate load only
@@ -80,6 +83,14 @@ def _region(text: str) -> tuple[float, ...]:
 def _quad(text: str) -> list[list[float]]:
     values = _numbers(text, 8, "--quad")
     return [values[i : i + 2] for i in range(0, 8, 2)]
+
+
+def _pages(text: str) -> str | int:
+    if text == "auto":
+        return text
+    if text in ("1", "2"):
+        return int(text)
+    raise argparse.ArgumentTypeError(f"--pages takes auto, 1 or 2, got {text!r}")
 
 
 def _passes(text: str) -> str | int:
@@ -171,6 +182,18 @@ def parser() -> argparse.ArgumentParser:
     )
     processing.add_argument("--no-chain", action="store_true", help="try the first candidate only")
     processing.add_argument(
+        "--pages",
+        type=_pages,
+        default="auto",
+        help="auto: split an open-book spread at its fold; 1: one image; 2: always split",
+    )
+    processing.add_argument(
+        "--page-order",
+        choices=("ltr", "rtl"),
+        default="ltr",
+        help="number the left page (ltr) or the right page (rtl) first",
+    )
+    processing.add_argument(
         "--fast-check",
         action="store_true",
         help="take the render checks from the grid (and a small proxy), then sample once",
@@ -220,6 +243,8 @@ def _options(args: argparse.Namespace) -> ScanOptions:
         on_error=args.on_error,
         fast_check=args.fast_check,
         chain=not args.no_chain,
+        pages=args.pages,
+        page_order=args.page_order,
     )
 
 
@@ -270,6 +295,11 @@ def _same_file(path: Path, others: list[tuple[str, tuple[int, int] | None]]) -> 
     return any(real == other or (key is not None and key == ino) for other, ino in others)
 
 
+def _page_stems(args: argparse.Namespace, stem: str) -> list[str]:
+    """Every output stem a photo may use: its own and, unless ``--pages 1``, its pages'."""
+    return [stem] if args.pages == 1 else [stem, f"{stem}-p1", f"{stem}-p2"]
+
+
 def _check_inputs_kept(args: argparse.Namespace, stems: list[str], fmt: str) -> None:
     """Refuse an output name that is an input photo: the scan would replace the photo,
     or a later photo would be read after an earlier scan replaced it."""
@@ -281,7 +311,7 @@ def _check_inputs_kept(args: argparse.Namespace, stems: list[str], fmt: str) -> 
             continue  # a photo that cannot be read fails on its own line
         key = (info.st_dev, info.st_ino) if info.st_ino else None
         inputs.append((os.path.normcase(os.path.realpath(path)), key))
-    for stem in stems:
+    for stem in (name for stem in stems for name in _page_stems(args, stem)):
         try:
             targets = list(output_paths(args.out, stem, fmt).values())
         except FlattenerError:
@@ -405,23 +435,29 @@ def main(argv: Sequence[str] | None = None) -> int:
     scanned = True
     load_written = False
     for path, stem in zip(args.images, stems, strict=True):
-        line: dict[str, Any] = {"input": str(path)}
-        debug = _debug_path(args.out, stem) if args.debug else None
+        saved: list[tuple[str, Any, dict[str, str]]] = []
         try:
-            if debug is not None and not args.overwrite and (debug.exists() or debug.is_symlink()):
-                raise FlattenerError(Status.IO_ERROR, "output_exists", f"{debug} exists")
+            if args.debug and not args.overwrite:
+                for name in _page_stems(args, stem):
+                    debug = _debug_path(args.out, name)
+                    if debug.exists() or debug.is_symlink():
+                        raise FlattenerError(Status.IO_ERROR, "output_exists", f"{debug} exists")
             planned = scanner.plan(path, options, overrides)  # decoding is the read stage
             source = planned.source
-            result = scanner.render(source, planned)
-            result.input = str(path)
-            written = save_scan(
-                result,
-                args.out,
-                stem,
-                fmt=fmt,
-                icc_profile=source.icc_profile,
-                overwrite=args.overwrite,
-            )
+            pages = scanner.split(planned)
+            for number, page in enumerate(pages, start=1):
+                name = stem if len(pages) == 1 else f"{stem}-p{number}"
+                result = scanner.render(source, page)
+                result.input = str(path)
+                written = save_scan(
+                    result,
+                    args.out,
+                    name,
+                    fmt=fmt,
+                    icc_profile=source.icc_profile,
+                    overwrite=args.overwrite,
+                )
+                saved.append((name, result, written))
         except Exception as error:  # one photo's failure never stops the batch
             scanned = False
             if isinstance(error, FlattenerError):
@@ -431,41 +467,52 @@ def main(argv: Sequence[str] | None = None) -> int:
                 status = Status.IO_ERROR if io else Status.MODEL_ERROR
                 code = "unexpected_io_error" if io else "unexpected_error"
                 message = f"{type(error).__name__}: {error}"
-            line.update(status=str(status), reason_code=code)
+            line = {"input": str(path), "status": str(status), "reason_code": code}
             line.update(outcome=Outcome.FAILED.value, message=message)
+            if saved:
+                line["files"] = [written for _, _, written in saved]
             print(json.dumps(line, ensure_ascii=False))
             continue
-        if debug is not None:
-            try:
-                picture = _debug_image(source.image, result)
-                written["debug"] = save_image(
-                    debug, picture, quality=DEBUG_QUALITY, overwrite=args.overwrite
-                )
-            except Exception as error:  # the scan itself is saved
-                line["debug_error"] = f"{type(error).__name__}: {error}"
-        ok = _scanned(result, args.no_dewarp)
-        scanned = scanned and ok
-        line.update(
-            outcome=result.outcome.value,
-            status=result.status.value,
-            reason_code=result.reason_code,
-            reasons=[item.code for item in result.reasons],
-            research=result.research,
-            files=written,
-            seconds=result.timings.get("total"),
-        )
-        print(json.dumps(line, ensure_ascii=False))
+        for number, (name, result, written) in enumerate(saved, start=1):
+            line: dict[str, Any] = {"input": str(path)}
+            if len(saved) > 1:
+                line["page"] = number
+            if args.debug:
+                try:
+                    picture = _debug_image(source.image, result)
+                    written["debug"] = save_image(
+                        _debug_path(args.out, name),
+                        picture,
+                        quality=DEBUG_QUALITY,
+                        overwrite=args.overwrite,
+                    )
+                except Exception as error:  # the scan itself is saved
+                    line["debug_error"] = f"{type(error).__name__}: {error}"
+            scanned = scanned and _scanned(result, args.no_dewarp)
+            line.update(
+                outcome=result.outcome.value,
+                status=result.status.value,
+                reason_code=result.reason_code,
+                reasons=[item.code for item in result.reasons],
+                research=result.research,
+                files=written,
+                seconds=result.timings.get("total"),
+            )
+            print(json.dumps(line, ensure_ascii=False))
         if args.timing is not None:
+            result = saved[0][1]
             full = source.info.full_size
             cache = result.metadata.get("cache") or {"hits": {}, "misses": {}}
             timings = result.timings
+            save = sum(page.timings.get("save", 0.0) for _, page, _ in saved)
             row = {
                 "input": str(path),
                 "bucket": megapixel_bucket(*full),
                 "full_size": list(full),
                 "size": list(source.info.size),
+                "pages": len(saved),
                 "timings": timings,
-                "end_to_end": timings.get("total", 0.0) + timings.get("save", 0.0),
+                "end_to_end": timings.get("total", 0.0) + save,
                 "cache": cache,
                 "cached": any(cache["hits"].values()),
                 "outcome": result.outcome.value,

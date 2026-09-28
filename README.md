@@ -40,7 +40,7 @@ save_scan(result, "out", "photo")  # out/photo.jpg, out/photo.scan.json
 
 ## 결과와 실패
 
-- 사진마다 `<stem>.jpg`(JPEG 품질 95, 4:4:4)와 기록 `<stem>.scan.json`을 씁니다. PNG는 `--format png`입니다. `--debug`는 페이지 윤곽을 그린 사진을, `--timing F.jsonl`은 사진별 단계 시간을 한 줄씩 씁니다.
+- 사진마다 `<stem>.jpg`(JPEG 품질 95, 4:4:4)와 기록 `<stem>.scan.json`을 씁니다. 펼친 책의 두 쪽이 찍힌 사진은 접힌 곳에서 나눠 `<stem>-p1`, `<stem>-p2`로 따로 씁니다. 번호는 왼쪽 쪽부터이고, `--page-order rtl`이면 오른쪽 쪽부터입니다. `--pages 1`은 나누지 않고, `--pages 2`는 항상 나눕니다. PNG는 `--format png`입니다. `--debug`는 페이지 윤곽을 그린 사진을, `--timing F.jsonl`은 사진별 단계 시간을 한 줄씩 씁니다.
 - `outcome`은 `rectified`, `rectified_with_warnings`, `perspective`, `original_returned`, `failed` 중 하나입니다. 사유 코드와 한/영 안내가 기록에 남습니다.
 - 모든 후보가 실패하면 `--fallback original`(기본값)은 원본을 돌려주고, `--fallback perspective`는 페이지 꼭짓점이 확실할 때 원근만 보정합니다. `--on-error original`(기본값)은 실패한 사진의 원본을 저장하고, `--on-error return`은 이미지를 저장하지 않습니다.
 - 방향 판별 가중치가 없으면 EXIF를 적용한 사진 방향을 그대로 쓰고 `orientation_uncertain` 경고를 남깁니다.
