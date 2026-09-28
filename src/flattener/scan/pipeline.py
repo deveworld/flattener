@@ -1617,7 +1617,8 @@ class Scanner:
         tried: list[dict[str, Any]] = []
         metadata["chain"] = tried
         seen: set[tuple] = set()
-        first_grid = None
+        first_grid, first_quarter = None, 0
+        stopped = False
         first_failure: Reason | None = None
         failed: list[str] = []
         chain = self._chain(src, memo, located, options)
@@ -1636,8 +1637,8 @@ class Scanner:
                 planned, memo, candidate, located, orientation, options, overrides, reasons
             )
             tried.append(outcome["record"])
-            if first_grid is None:
-                first_grid = outcome.get("first_grid")
+            if first_grid is None and outcome.get("first_grid") is not None:
+                first_grid, first_quarter = outcome["first_grid"], outcome["first_quarter"]
             if outcome.get("checked") is not None:
                 if first_failure is not None:
                     reasons.append(
@@ -1653,12 +1654,18 @@ class Scanner:
             if first_failure is None or outcome.get("stop"):
                 first_failure = outcome["failure"]
             if outcome.get("stop"):
+                stopped = True
                 break  # the page runs out of the photo; no candidate can bring it back
             if outcome["orientation"].settled_by is not None:
                 # A quarter turn settled on a flat preview holds for the later candidates.
                 orientation = outcome["orientation"]
         failure = first_failure or reason("unstable_geometry", why="no_candidate")
-        quad = self._certain_quad(located, first_grid, size, overrides.quarter)
+        quad = None
+        if not stopped:  # a cut-off page has no corners to flatten
+            quad = self._certain_quad(located, first_grid, size, overrides.quarter)
+        if quad is not None and located.quad is None:
+            # The grid's nodes follow its own quarter turn; the plan records the latest one.
+            quad = turn_quad(quad, orientation.quarter - first_quarter)
         return self._fallback(planned, memo, reasons, failure, located, orientation, quad)
 
     def _try(
@@ -1702,7 +1709,11 @@ class Scanner:
         grids = [("final", passes[-1][0], len(passes))]
         if len(passes) > 1:
             grids.append(("A", passes[0][0], 1))  # L1: pass A when the crop passes fail
-        result: dict[str, Any] = {"first_grid": passes[0][0], "orientation": orientation}
+        result: dict[str, Any] = {
+            "first_grid": passes[0][0],
+            "first_quarter": quarter,
+            "orientation": orientation,
+        }
         failures: list[tuple[Reason, dict[str, Any]]] = []
         for label, grid, count in grids:
             checks: dict[str, Any] = {}

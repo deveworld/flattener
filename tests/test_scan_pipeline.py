@@ -276,6 +276,10 @@ def test_a_zoomed_piece_of_the_page_returns_the_original(monkeypatch):
     assert result.guidance[-1].message_ko == (
         "페이지 끝이 사진 밖으로 잘렸어요. 조금 떨어져서 페이지 전체가 보이게 다시 찍어 주세요"
     )
+    # A cut-off page has no corners to flatten, so the perspective fallback is skipped too.
+    perspective = scanner.scan(image, ScanOptions(fallback="perspective"))
+    assert perspective.outcome == Outcome.ORIGINAL_RETURNED
+    assert perspective.reason_code == "page_cut_off" and perspective.plan is None
     # A region the user sets is flattened as asked.
     forced = scanner.scan(image, overrides=ScanOverrides(region=(80, 20, 262, 232)))
     assert forced.status == Status.SUCCESS and forced.plan is not None
@@ -683,6 +687,33 @@ def test_the_page_gate_ships_only_through_the_ship_gate_rules():
     record = Scanner(oracle_dewarper(TRUE, SIZE), gate=fake).models[1]
     assert not record["shippable"] and record["category"] == "research"
     assert record["gate_reasons"] == ["data_license_not_release", "not_release_track"]
+
+
+class _LateOrienter(FakeOrienter):
+    """Unsure before dewarping and on the first flat preview, sure on later previews."""
+
+    def predict(self, image, geometry=None):
+        self.post = geometry is None and any(kind == "post" for kind, _ in self.calls)
+        return super().predict(image, geometry)
+
+
+def _fold_second_row(grid):
+    """Swap node rows 1 and 2: cells near the top fold, the corners and the middle stay."""
+    folded = grid.copy()
+    folded[1], folded[2] = grid[2], grid[1]
+    return folded
+
+
+@pytest.mark.parametrize("angle", [90.0 + 7.0, 180.0 + 7.0, 270.0 + 7.0])
+def test_the_perspective_fallback_follows_the_latest_quarter_turn(angle):
+    page = Page((170, 125), (150, 190), angle)
+    orienter = _LateOrienter(page, SIZE, pre=False)
+    scanner, _ = _scanner(page, orienter=orienter, always=_fold_second_row)
+    result = scanner.scan(ramp_scene(SIZE, page), ScanOptions(fallback="perspective"))
+    assert result.outcome == Outcome.PERSPECTIVE and result.plan.quarter == page.quarter()
+    assert result.plan.output.height > result.plan.output.width  # the page stands upright
+    top_left = result.image[1, 1, :2] / 255.0 * np.array([SIZE[1], SIZE[0]])
+    np.testing.assert_allclose(top_left, page.corners()[0], atol=4.0)
 
 
 def test_border_and_inset_apply_to_perspective_plans():
