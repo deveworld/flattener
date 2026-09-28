@@ -4,7 +4,8 @@ Each photo gives ``DIR/<stem>.jpg`` (JPEG quality 95, 4:4:4, the source's ICC pr
 ``--format png``) and ``DIR/<stem>.scan.json``, the scan record with its plan, reasons,
 guidance, timings and model records. A photo that falls back keeps its failure status in
 the record; with the default ``--on-error original`` the saved image is the original.
-One JSON line per photo goes to stdout.
+One JSON line per photo goes to stdout. An output name that is one of the input photos
+is a usage error, so a scan never replaces a photo it reads.
 
 Weights: ``--bundle B`` (a ``flattener-scan-bundle-1`` JSON file) or ``--weights W`` with
 optional ``--gate G`` and ``--orient-weights O``. Weights that fail the ship gate load only
@@ -16,18 +17,24 @@ with ``--research``, and every record then says ``research: true``.
 ``--timing F.jsonl`` appends one row per photo: the stage seconds of the scan (decoding
 included), ``end_to_end`` (the scan plus saving), the stage cache hits and misses
 (``cached`` is true when a model output came from the cache; ``--no-cache`` turns the
-cache off for repeated timing runs) and, on the first row, the model load.
+cache off for repeated timing runs) and, on the first row, the model load. The file is
+opened before the first photo; a row that cannot be written is reported on stderr.
+
+``--debug`` writes ``<stem>.debug.jpg`` after the scan; if that fails, the line gets
+``debug_error`` and the scan keeps its outcome.
 
 Exit status: 0 when every photo was scanned (rectified, with or without warnings; a
 ``--no-dewarp`` perspective result counts as scanned), 1 when any photo fell back or
-failed, 2 on a usage error (bad options, unreadable weights). A photo that raises an
-unexpected error gets a ``failed`` line and the batch goes on.
+failed, 2 on a usage error (bad options, an unavailable device, unreadable weights, an
+output that would replace an input). A photo that raises an unexpected error gets a
+``failed`` line and the batch goes on.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -39,7 +46,7 @@ from PIL import Image, ImageDraw
 
 from ..contracts import FlattenerError, Status
 from ..dewarp.predict import parse_inset
-from .io import FORMATS, image_format, save_scan
+from .io import FORMATS, image_format, output_paths, save_image, save_scan
 from .locate import outline_polygon
 from .output_policy import PAPER_NAMES
 from .pipeline import (
@@ -53,6 +60,7 @@ from .records import EXIT_FALLBACK, EXIT_SCANNED, EXIT_USAGE, SCANNED_OUTCOMES, 
 from .timing import append_jsonl, megapixel_bucket
 
 DEBUG_LONG_SIDE = 1024
+DEBUG_QUALITY = 90
 
 
 def _numbers(text: str, count: int, name: str) -> list[float]:
@@ -228,6 +236,58 @@ def _overrides(args: argparse.Namespace) -> ScanOverrides:
     )
 
 
+def _usage(message: str) -> FlattenerError:
+    return FlattenerError(Status.INPUT_ERROR, "usage", message)
+
+
+def _check_device(name: str) -> None:
+    """Refuse an unknown device name, or a device type torch cannot reach here."""
+    try:
+        device = torch.device(name)
+    except RuntimeError as error:
+        raise _usage(f"--device: {error}") from None
+    available = getattr(getattr(torch, device.type, None), "is_available", None)
+    if device.type != "cpu" and callable(available) and not available():
+        raise _usage(f"--device {name}: no {device.type} device is available")
+
+
+def _debug_path(out: Path, stem: str) -> Path:
+    return Path(out) / f"{stem}.debug.jpg"
+
+
+def _same_file(path: Path, others: list[tuple[str, tuple[int, int] | None]]) -> bool:
+    try:
+        info = path.stat()
+    except OSError:
+        return False
+    real = os.path.normcase(os.path.realpath(path))
+    key = (info.st_dev, info.st_ino) if info.st_ino else None
+    return any(real == other or (key is not None and key == ino) for other, ino in others)
+
+
+def _check_inputs_kept(args: argparse.Namespace, stems: list[str], fmt: str) -> None:
+    """Refuse an output name that is an input photo: the scan would replace the photo,
+    or a later photo would be read after an earlier scan replaced it."""
+    inputs = []
+    for path in args.images:
+        try:
+            info = path.stat()
+        except OSError:
+            continue  # a photo that cannot be read fails on its own line
+        key = (info.st_dev, info.st_ino) if info.st_ino else None
+        inputs.append((os.path.normcase(os.path.realpath(path)), key))
+    for stem in stems:
+        try:
+            targets = list(output_paths(args.out, stem, fmt).values())
+        except FlattenerError:
+            continue  # an unusable stem fails when its photo is saved
+        if args.debug:
+            targets.append(_debug_path(args.out, stem))
+        for target in targets:
+            if _same_file(target, inputs):
+                raise _usage(f"{target} is an input photo; choose another --out")
+
+
 def _load(args: argparse.Namespace) -> Scanner:
     if (args.bundle is None) == (args.weights is None):
         raise FlattenerError(
@@ -308,18 +368,38 @@ def main(argv: Sequence[str] | None = None) -> int:
         fmt = image_format(args.format)
         if args.threads is not None:
             if args.threads < 1:
-                raise FlattenerError(Status.INPUT_ERROR, "usage", "--threads must be at least 1")
+                raise _usage("--threads must be at least 1")
             torch.set_num_threads(args.threads)
-        scanner = _load(args)
+        _check_device(args.device)
+        if args.timing is not None:
+            try:
+                args.timing.open("a", encoding="utf-8").close()
+            except OSError as error:
+                raise _usage(f"--timing: {error}") from None
+        stems = _stems(args.images)
+        _check_inputs_kept(args, stems, fmt)
+        try:
+            scanner = _load(args)
+        except FlattenerError:
+            raise
+        except Exception as error:  # a corrupt or incompatible checkpoint
+            raise FlattenerError(
+                Status.MODEL_ERROR,
+                "load_failed",
+                f"could not load the weights: {type(error).__name__}: {error}",
+            ) from error
     except FlattenerError as error:
         failure = {"status": str(error.status), "reason_code": error.reason_code}
         print(json.dumps({**failure, "message": error.message}), file=sys.stderr)
         return EXIT_USAGE
     scanned = True
     load_written = False
-    for path, stem in zip(args.images, _stems(args.images), strict=True):
+    for path, stem in zip(args.images, stems, strict=True):
         line: dict[str, Any] = {"input": str(path)}
+        debug = _debug_path(args.out, stem) if args.debug else None
         try:
+            if debug is not None and not args.overwrite and (debug.exists() or debug.is_symlink()):
+                raise FlattenerError(Status.IO_ERROR, "output_exists", f"{debug} exists")
             planned = scanner.plan(path, options, overrides)  # decoding is the read stage
             source = planned.source
             result = scanner.render(source, planned)
@@ -332,12 +412,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 icc_profile=source.icc_profile,
                 overwrite=args.overwrite,
             )
-            if args.debug:
-                debug = Path(args.out) / f"{stem}.debug.jpg"
-                if debug.exists() and not args.overwrite:
-                    raise FlattenerError(Status.IO_ERROR, "output_exists", f"{debug} exists")
-                Image.fromarray(_debug_image(source.image, result)).save(debug, quality=90)
-                written["debug"] = str(debug)
         except Exception as error:  # one photo's failure never stops the batch
             scanned = False
             if isinstance(error, FlattenerError):
@@ -351,6 +425,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             line.update(outcome=Outcome.FAILED.value, message=message)
             print(json.dumps(line, ensure_ascii=False))
             continue
+        if debug is not None:
+            try:
+                picture = _debug_image(source.image, result)
+                written["debug"] = save_image(
+                    debug, picture, quality=DEBUG_QUALITY, overwrite=args.overwrite
+                )
+            except Exception as error:  # the scan itself is saved
+                line["debug_error"] = f"{type(error).__name__}: {error}"
         ok = _scanned(result, args.no_dewarp)
         scanned = scanned and ok
         line.update(
@@ -384,7 +466,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             if not load_written:
                 row["model_load"] = scanner.info.get("load")
                 load_written = True
-            append_jsonl(args.timing, row)
+            try:
+                append_jsonl(args.timing, row)
+            except OSError as error:
+                print(json.dumps({"input": str(path), "timing_error": str(error)}), file=sys.stderr)
     return EXIT_SCANNED if scanned else EXIT_FALLBACK
 
 

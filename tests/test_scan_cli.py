@@ -4,6 +4,7 @@ import json
 
 import numpy as np
 import pytest
+import torch
 from PIL import Image
 from scan_fakes import FakeGate, Page, oracle_dewarper, ramp_scene, twist
 
@@ -217,3 +218,55 @@ def test_an_unexpected_error_fails_one_photo_and_the_batch_goes_on(
     assert first["outcome"] == "failed" and first["status"] == "model_error"
     assert first["reason_code"] == "unexpected_error" and "RuntimeError" in first["message"]
     assert second["outcome"] == "rectified_with_warnings"
+
+
+def test_an_output_that_is_an_input_photo_is_a_usage_error(tmp_path, photo, capsys, monkeypatch):
+    _install(monkeypatch)
+    before = photo.read_bytes()
+    args = [str(photo), "--out", str(tmp_path), "--weights", "w", "--format", "png"]
+    assert cli.main([*args, "--overwrite"]) == 2
+    assert photo.read_bytes() == before
+    assert "is an input photo" in json.loads(capsys.readouterr().err)["message"]
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["photo.png"]
+
+
+def test_weights_and_devices_that_cannot_load_exit_2(tmp_path, photo, capsys, monkeypatch):
+    def broken(*args, **kwargs):
+        raise RuntimeError("invalid load key")
+
+    monkeypatch.setattr(cli.Scanner, "from_files", broken)
+    args = [str(photo), "--out", str(tmp_path / "out"), "--weights", "w"]
+    assert cli.main(args) == 2
+    error = json.loads(capsys.readouterr().err)
+    assert error["reason_code"] == "load_failed" and "invalid load key" in error["message"]
+    _install(monkeypatch)
+    assert cli.main([*args, "--device", "toaster"]) == 2
+    assert json.loads(capsys.readouterr().err)["reason_code"] == "usage"
+    if not torch.cuda.is_available():
+        assert cli.main([*args, "--device", "cuda"]) == 2
+        assert "no cuda device" in json.loads(capsys.readouterr().err)["message"]
+    assert not (tmp_path / "out").exists()
+
+
+def test_timing_debug_and_their_errors(tmp_path, photo, capsys, monkeypatch):
+    _install(monkeypatch)
+    out = tmp_path / "out"
+    args = [str(photo), "--out", str(out), "--weights", "w"]
+    assert cli.main([*args, "--timing", str(tmp_path / "missing" / "t.jsonl")]) == 2
+    assert not out.exists()
+
+    out.mkdir()
+    (out / "photo.debug.jpg").write_bytes(b"left over")
+    assert cli.main([*args, "--debug"]) == 1
+    (line,) = _lines(capsys)
+    assert (line["outcome"], line["reason_code"]) == ("failed", "output_exists")
+    assert sorted(path.name for path in out.iterdir()) == ["photo.debug.jpg"]
+
+    def no_debug(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(cli, "save_image", no_debug)
+    assert cli.main([*args, "--debug", "--overwrite"]) == 0
+    (line,) = _lines(capsys)
+    assert line["outcome"] == "rectified_with_warnings" and "disk full" in line["debug_error"]
+    assert "debug" not in line["files"] and (out / "photo.jpg").is_file()
