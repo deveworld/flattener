@@ -433,13 +433,15 @@ def score_doctr(
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """DocTr aggregation: per-view means over ``documents``, then the mean of both views."""
     rows = []
-    per_view: dict[int, dict[str, list[float]]] = {view: {"ed": [], "cer": []} for view in VIEWS}
+    per_view: dict[int, dict[str, list[float | None]]] = {
+        view: {"ed": [], "cer": []} for view in VIEWS
+    }
     for document in documents:
         reference = references[document]
         for view in VIEWS:
             prediction = predictions[(document, view)]
             distance = levenshtein(reference, prediction)
-            cer = distance / len(reference) if reference else float("nan")
+            cer = distance / len(reference) if reference else None
             per_view[view]["ed"].append(float(distance))
             per_view[view]["cer"].append(cer)
             rows.append(
@@ -455,14 +457,15 @@ def score_doctr(
             )
     views = {
         str(view): {
-            "cer": mean(values["cer"]),
+            "cer": mean(values["cer"]) if None not in values["cer"] else None,
             "ed": mean(values["ed"]),
             "n": len(values["ed"]),
         }
         for view, values in per_view.items()
     }
+    cers = [views[str(view)]["cer"] for view in VIEWS]
     summary = {
-        "cer": mean([views[str(view)]["cer"] for view in VIEWS]),
+        "cer": mean(cers) if None not in cers else None,
         "ed": mean([views[str(view)]["ed"] for view in VIEWS]),
         "n": sum(item["n"] for item in views.values()),
         "views": views,
@@ -480,11 +483,7 @@ def score_uvdoc(
         for view in VIEWS:
             prediction = predictions[(document, view)]
             stripped = reference.strip()
-            cer = (
-                levenshtein(stripped, prediction.strip()) / len(stripped)
-                if stripped
-                else float("nan")
-            )
+            cer = levenshtein(stripped, prediction.strip()) / len(stripped) if stripped else None
             rows.append(
                 {
                     "cer": cer,
@@ -496,9 +495,9 @@ def score_uvdoc(
                     "reference_chars": len(reference),
                 }
             )
-    cers = [row["cer"] for row in rows if row["cer"] == row["cer"]]
+    cers = [row["cer"] for row in rows if row["cer"] is not None]
     summary = {
-        "cer": mean(cers),
+        "cer": mean(cers) if cers else None,
         "ed": mean([float(row["ed"]) for row in rows]),
         "n": len(rows),
         "n_nan_cer": len(rows) - len(cers),

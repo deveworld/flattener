@@ -61,6 +61,22 @@ def test_uvdoc_score_strips_for_cer_but_not_for_ed():
     assert summary["ed"] == pytest.approx(4.0)
 
 
+@pytest.mark.parametrize(
+    "score,second,expected_cer",
+    [
+        (ocr.score_doctr, "page", None),
+        (ocr.score_uvdoc, "page", 0.0),
+        (ocr.score_uvdoc, "", None),
+    ],
+)
+def test_empty_reference_cer_serializes_as_null(score, second, expected_cer):
+    references = {1: "", 9: second}
+    predictions = {(k, m): "page" for k in references for m in (1, 2)}
+    summary, rows = score(references, predictions, tuple(references))
+    assert rows[0]["cer"] is None and summary["cer"] == expected_cer
+    json.dumps({"summary": summary, "rows": rows}, allow_nan=False)
+
+
 def test_prepare_like_pytesseract_composites_alpha_on_white_and_keeps_format():
     pixels = np.zeros((2, 3, 4), dtype=np.uint8)
     pixels[0, 0] = (10, 20, 30, 255)

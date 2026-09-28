@@ -413,7 +413,7 @@ def score_ocr(
         distance = ocr.levenshtein(reference, prediction)
         rows.append(
             {
-                "cer": distance / len(reference) if reference else float("nan"),
+                "cer": distance / len(reference) if reference else None,
                 "ed": distance,
                 "id": str(k),
                 "k": k,
@@ -421,7 +421,7 @@ def score_ocr(
                 "reference_chars": len(reference),
             }
         )
-    cers = [row["cer"] for row in rows if row["cer"] == row["cer"]]
+    cers = [row["cer"] for row in rows if row["cer"] is not None]
     summary = {
         "cer": mean(cers) if cers else None,
         "ed": mean([float(row["ed"]) for row in rows]),

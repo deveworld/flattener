@@ -179,3 +179,14 @@ def test_photos_left_unrectified_stop_the_run_before_scoring(tmp_path, monkeypat
     items[200] = {"output": "201.png", "action": "written"}
     record, _ = tool.predict(args, tmp_path, {})
     assert record["counts"]["items"] == 300
+
+
+def test_summary_lines_show_an_empty_reference_cer_as_na():
+    views = {
+        "setting1_doctr_60": {"ed": 3.0, "cer": None},
+        "setting2_dewarpnet_50": {"ed": 2.0, "cer": 0.25},
+    }
+    docunet = docunet_tool.ocr_text({"summary": {"doctr": views}, "comparable": False})
+    assert docunet == "ocr S1 ed=3.00 cer=n/a S2 ed=2.00 cer=0.2500 (not comparable)"
+    dir300 = dir300_tool.ocr_text({"summary": {"ed": 1.5, "cer": None}, "comparable": False})
+    assert dir300 == "ocr 90 ed=1.50 cer=n/a (not comparable)"

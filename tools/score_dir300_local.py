@@ -274,7 +274,7 @@ def run_ocr(args, cache: Path, env: dict[str, str], out_dir: Path) -> tuple[dict
 
 def ocr_text(report: dict) -> str:
     summary = report["summary"]
-    text = f"ocr 90 ed={summary['ed']:.2f} cer={summary['cer']:.4f}"
+    text = f"ocr 90 ed={summary['ed']:.2f} cer={local.cer_text(summary['cer'])}"
     build = (report.get("comparability") or {}).get("tesseract_build")
     return text + (f" ({build})" if report.get("comparable") else " (not comparable)")
 

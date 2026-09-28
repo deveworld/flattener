@@ -119,8 +119,9 @@ def test_evaluate_reads_the_prediction_record_and_refuses_gaps(tmp_path):
 def test_ocr_scoring_divides_by_the_reference_length():
     summary, rows = dir300.score_ocr({5: "abcd", 7: ""}, {5: "abXd", 7: "zz"}, (5, 7))
     assert [row["ed"] for row in rows] == [1, 2]
-    assert rows[0]["cer"] == 0.25 and math.isnan(rows[1]["cer"])
+    assert rows[0]["cer"] == 0.25 and rows[1]["cer"] is None
     assert summary == {"cer": 0.25, "ed": 1.5, "n": 2, "n_nan_cer": 1}
+    json.dumps({"summary": summary, "rows": rows}, allow_nan=False)
 
 
 class _FakeEngine:

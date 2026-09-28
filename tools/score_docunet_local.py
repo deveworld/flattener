@@ -501,10 +501,16 @@ def run_ocr(args, cache: Path, env: dict[str, str], out_dir: Path) -> tuple[dict
     return json.loads(report_path.read_text(encoding="utf-8")), "scored"
 
 
+def cer_text(cer: float | None) -> str:
+    """A CER for the summary line; ``n/a`` when a reference text was empty."""
+    return "n/a" if cer is None else f"{cer:.4f}"
+
+
 def ocr_text(report: dict) -> str:
     doctr = report["summary"]["doctr"]
     s1, s2 = doctr["setting1_doctr_60"], doctr["setting2_dewarpnet_50"]
-    text = f"ocr S1 ed={s1['ed']:.2f} cer={s1['cer']:.4f} S2 ed={s2['ed']:.2f} cer={s2['cer']:.4f}"
+    text = f"ocr S1 ed={s1['ed']:.2f} cer={cer_text(s1['cer'])}"
+    text += f" S2 ed={s2['ed']:.2f} cer={cer_text(s2['cer'])}"
     build = (report.get("comparability") or {}).get("tesseract_build")
     return text + (f" ({build})" if report.get("comparable") else " (not comparable)")
 
