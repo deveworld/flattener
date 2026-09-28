@@ -683,3 +683,15 @@ def test_the_page_gate_ships_only_through_the_ship_gate_rules():
     record = Scanner(oracle_dewarper(TRUE, SIZE), gate=fake).models[1]
     assert not record["shippable"] and record["category"] == "research"
     assert record["gate_reasons"] == ["data_license_not_release", "not_release_track"]
+
+
+def test_border_and_inset_apply_to_perspective_plans():
+    scanner, _ = _scanner()
+    image = ramp_scene(SIZE, TRUE)
+    skip = ScanOverrides(skip_dewarp=True, quad=TRUE.corners().tolist())
+    plain = scanner.scan(image, overrides=skip).plan
+    border = scanner.scan(image, ScanOptions(border=0.2), overrides=skip).plan
+    inset = scanner.scan(image, ScanOptions(inset=0.1), overrides=skip).plan
+    assert (border.border, inset.inset) == (0.2, (0.1, 0.1))
+    assert border.output.height / plain.output.height == pytest.approx(1.2, rel=0.02)
+    assert inset.output.height / plain.output.height == pytest.approx(0.9, rel=0.02)

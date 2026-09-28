@@ -596,11 +596,19 @@ def homography_grid(homography: NDArray, grid_size: tuple[int, int] = (45, 31)) 
     return homography_values(homography, u, v)
 
 
-def homography_map(homography: NDArray, output_size: tuple[int, int]) -> NDArray[np.float32]:
-    """Dense backward map (float32) of a perspective plan at output pixel centers."""
+def homography_map(
+    homography: NDArray,
+    output_size: tuple[int, int],
+    inset: tuple[float, float] = (0.0, 0.0),
+    border: float = 0.0,
+) -> NDArray[np.float32]:
+    """Dense backward map (float32) of a perspective plan at output pixel centers. As in
+    ``placement.dense_map``, output coordinate u shows page position (1 - e + b) u on
+    each axis for inset e and border b."""
     height, width = output_size
-    u = (2.0 * np.arange(width) + 1.0) / width - 1.0
-    v = (2.0 * np.arange(height) + 1.0) / height - 1.0
+    ex, ey = inset
+    u = ((2.0 * np.arange(width) + 1.0) / width - 1.0) * (1.0 - ex + border)
+    v = ((2.0 * np.arange(height) + 1.0) / height - 1.0) * (1.0 - ey + border)
     uu, vv = np.meshgrid(u, v)
     with np.errstate(divide="ignore", invalid="ignore"):
         return homography_values(homography, uu, vv).astype(np.float32)
@@ -626,7 +634,7 @@ def turn_quad(quad: NDArray[np.float64], quarter: int) -> NDArray[np.float64]:
 def _dense(plan: ScanPlan, size: tuple[int, int] | None = None) -> NDArray[np.float32]:
     size = plan.output.size if size is None else size
     if plan.kind == "perspective":
-        return homography_map(plan.homography, size)
+        return homography_map(plan.homography, size, plan.inset, plan.border)
     return dense_map(plan.grid, size, inset=plan.inset, border=plan.border, nodes=plan.nodes)
 
 
@@ -1484,10 +1492,12 @@ class Scanner:
         size = src.info.size
         homography = quad_homography(quad, size)
         grid = homography_grid(homography)
+        inset = resolve_inset(options.inset)
         request = overrides.output_size if overrides.output_size is not None else options.output
         aspect = overrides.aspect if overrides.aspect is not None else options.aspect
         focal = src.info.focal_px() if options.use_focal else None
-        output = plan_output(grid, size, output=request, aspect=aspect, focal_px=focal)
+        output = plan_output(grid, size, output=request, aspect=aspect, focal_px=focal, inset=inset)
+        output = _with_border(output, inset, float(options.border), request)
         return ScanPlan(
             source=src.info,
             output=output,
@@ -1496,6 +1506,8 @@ class Scanner:
             region={"method": method, "quad": quad.tolist(), "localization": located.method},
             angle_deg=locating.quad_angle(quad),
             quarter=0 if orientation is None else orientation.quarter,
+            inset=inset,
+            border=float(options.border),
             quantize=options.quantize,
             fill_rgb=tuple(options.fill_rgb),
             models=tuple(self.models),

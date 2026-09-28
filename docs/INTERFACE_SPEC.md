@@ -98,7 +98,7 @@ v0 가중치는 위치 추정 연구의 `best.pt`(파라미터 140,545개, 입�
 
 `flattener.scan.pipeline.Scanner`의 결과 `ScanResult`는 기존 `Status` 값만 씁니다. 스캐너의 판정은 `reason_code` 문자열로 나타내고, 코드마다 상태, 심각도(`info`, `warning`, `failure`), 한/영 안내가 `scan.records.REASONS`에 있습니다. `outcome`은 `rectified`, `rectified_with_warnings`, `perspective`, `original_returned`, `failed`입니다. 대체 결과(원근 보정, 원본 반환)는 실패 상태와 사유를 유지하고 `used_fallback=True`입니다. 렌더러의 검사 사유(`fold_or_degenerate` 등)는 그대로 기록합니다.
 
-스캔 계획 `ScanPlan`의 격자는 원본 기준 flattener 값이고 노드는 가장자리 정렬, 페이지가 똑바로 선 순서입니다. 원근 계획의 homography는 출력 위치 `(u, v, 1)`(u, v ∈ [-1, 1])를 원본 flattener 값의 동차 좌표로 보냅니다. 두 경우 모두 조밀 맵은 원본을 한 번 샘플링합니다. `plan_sha256`은 계획의 정규 JSON sha256이고, 같은 값의 미리보기와 저장 결과는 같은 기하를 씁니다.
+스캔 계획 `ScanPlan`의 격자는 원본 기준 flattener 값이고 노드는 가장자리 정렬, 페이지가 똑바로 선 순서입니다. 원근 계획의 homography는 출력 위치 `(u, v, 1)`(u, v ∈ [-1, 1])를 원본 flattener 값의 동차 좌표로 보냅니다. `--inset` e와 `--border` b는 두 계획에 똑같이 적용되어, 출력 u는 페이지 위치 (1 − e + b)·u를 보여 줍니다. 두 경우 모두 조밀 맵은 원본을 한 번 샘플링합니다. `plan_sha256`은 계획의 정규 JSON sha256이고, 같은 값의 미리보기와 저장 결과는 같은 기하를 씁니다.
 
 단계는 read(EXIF 1회, 16MP를 넘는 JPEG는 draft decode) → detect(페이지 게이트, 필요할 때만 사진 전체를 한 번 추론한 결과와의 합의 규칙) → orient(OrientNet) → infer(첫 추론과 크롭 재추론 1회, deskew. 크롭 재추론이 페이지를 4% 넘게 옮기면 한 번 더) → verify(평면 미리보기 방향 확인, 게이트 영역과 비교, 작은 평면 미리보기의 종이·글줄 검사, 패스 사이 노드 이동 ≤ 페이지 대각선의 4%) → plan(출력 크기 auto) → render(`flattener.render` 1회) → save입니다.
 
