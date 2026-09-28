@@ -108,10 +108,6 @@ def parse_name(file_name: str, kit: dict[str, Any] | None = None) -> PhotoName:
     return PhotoName(file_name, phone, stratum, source, int(seq))
 
 
-def strata_by_code(kit: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    return {stratum["code"]: stratum for stratum in kit["strata"]}
-
-
 def planned_counts(kit: dict[str, Any]) -> dict[str, int]:
     """Pilot photos per stratum: the shots of every phone in the shot list."""
     return {
