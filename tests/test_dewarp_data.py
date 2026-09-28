@@ -238,6 +238,42 @@ def test_release_track_refuses_research_sources(tmp_path):
     assert [license_key(c) for c in ("CC BY-NC-SA 4.0", "cc0-1.0")] == ["by-nc-sa", "cc0"]
 
 
+def test_sources_refuse_benchmark_folders(tmp_path):
+    from flattener.benchmark.uvdoc import MANIFEST_SCHEMA
+
+    bench = tmp_path / "uvdoc-bench"  # as `python -m flattener.benchmark uvdoc-prepare` leaves it
+    for folder in ("img", "grid2d", "grid3d", "metadata_sample"):
+        (bench / folder).mkdir(parents=True)
+    Image.fromarray(_image((64, 48))).save(bench / "img/00000.png")
+    manifest = {"schema": MANIFEST_SCHEMA, "benchmark": "uvdoc"}
+    (bench / "manifest.json").write_text(json.dumps(manifest))
+    uvdoc = {"name": "bench", "kind": "uvdoc", "root": str(bench), "track": "research"}
+    with pytest.raises(FlattenerError, match="manifest.json") as error:
+        _build(_spec(tmp_path, [uvdoc]))
+    assert error.value.reason_code == "benchmark_data"
+    # A copy inside a benchmark folder or under outputs/benchmarks, and folders with the
+    # eval-only record of fetch_research.py or DIR300's provenance.json.
+    marked = {
+        bench / "converted": None,
+        tmp_path / "outputs" / "benchmarks" / "docunet": None,
+        tmp_path / "eval" / "uvdoc_benchmark": ("TRACK.json", {"track": "eval-only"}),
+        tmp_path / "dir300": ("provenance.json", {"training_use": False}),
+    }
+    for index, (root, marker) in enumerate(marked.items()):
+        _write_converted(root, track="research")
+        if marker is not None:
+            (root / marker[0]).write_text(json.dumps(marker[1]))
+        source = {"name": f"m{index}", "kind": "converted", "root": str(root), "track": "research"}
+        with pytest.raises(FlattenerError) as error:
+            _build(_spec(tmp_path, [source], name=f"m{index}"))
+        assert error.value.reason_code == "benchmark_data", root
+    plain = tmp_path / "research" / "uvdoc_final"
+    _write_converted(plain, track="research")
+    (plain / "TRACK.json").write_text(json.dumps({"track": "research"}))
+    source = {"name": "plain", "kind": "converted", "root": str(plain), "track": "research"}
+    assert len(_build(_spec(tmp_path, [source], name="plain"))) == 3
+
+
 def _write_compact(root, *, track="release", count=2):
     """A tiny copy in the layout written by tools/syntheticdoc/compact.py."""
     root.mkdir(parents=True)

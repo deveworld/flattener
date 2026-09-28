@@ -137,6 +137,7 @@ v0 가중치는 위치 추정 연구의 `best.pt`(파라미터 140,545개, 입�
 UVDoc 벤치마크(실사진 50장)는 UVDoc 공개 코드(`uvdocBenchmark_pred.py`, `evalScriptUVDoc.m`, MIT)의 규약을 따릅니다.
 
 - `uvdoc-prepare UVDoc_benchmark.zip`은 압축 파일(https://igl.ethz.ch/projects/uvdoc/UVDoc_benchmark.zip)의 SHA-256을 확인하고 `outputs/benchmarks/uvdoc-bench/`에 푼 뒤 `manifest.json`을 씁니다.
+- 휨 보정 학습 자료의 폴더가 `outputs/benchmarks/` 안에 있거나, 그 폴더나 상위 폴더에 벤치마크 `manifest.json`이 있으면 학습은 `benchmark_data` 오류로 멈춥니다.
 - `uvdoc-predict`는 사진 `img/{id}.png`로 격자를 예측하고, 그 격자를 휘어 놓은 텍스처 `warped_textures/{id}.png`에 적용해 `OUT/uwp_texture/`에 씁니다. 쌍선형 보간, 원본 바깥은 0, `floor(x*255)` 저장까지 공개 코드와 같습니다.
 - `uvdoc`은 `uwp_texture`를 평평한 텍스처 `texture_sample/{id}.png`와 DocUNet과 같은 MATLAB 에뮬레이션으로 비교하고 50장 평균을 냅니다. 비교 기준은 UVDoc README erratum의 50장 값(MS-SSIM 0.785, AD 0.119)입니다.
 - 평가기 검증: UVDoc 공개 결과 이미지는 MS-SSIM 0.7854, AD 0.1186, LD 6.812로 erratum 값과 AADD 표 S1의 LD 6.810에 맞습니다.

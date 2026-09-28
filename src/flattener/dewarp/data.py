@@ -6,7 +6,8 @@ stay private). Doc3D, the UVDoc dataset and the raw SyntheticDoc layout are
 research-only kinds. A release-track dataset accepts release sources only, and a
 converted release source accepts only samples labelled release with an allowlisted
 license class. Source roots may name environment variables (``${FLATTENER_DATA}/...``);
-the spec hash uses the unexpanded text.
+the spec hash uses the unexpanded text. A source whose root holds benchmark data
+(``benchmark_marker``) stops with ``benchmark_data`` on either track.
 
 Items hold the model input as uint8 ``image`` (3, H, W), the target 2-D grid in the
 flattener convention (edge-aligned nodes, align_corners=False values relative to the
@@ -126,6 +127,16 @@ COMPACT_SETTINGS_KEYS = (
     "resample",
     "backward_map",
 )
+# Files that mark a benchmark copy, which no source may read: the manifest.json of
+# ``python -m flattener.benchmark uvdoc-prepare`` and of the DocUNet and SmartDoc copies,
+# the eval-only records of tools/research_data/fetch_research.py and DIR300's
+# provenance.json.
+BENCHMARK_FILES = (
+    ("manifest.json", lambda data: str(data.get("schema", "")).startswith("flattener-benchmark-")),
+    ("MANIFEST.json", lambda data: data.get("track") == "eval-only"),
+    ("TRACK.json", lambda data: data.get("track") == "eval-only"),
+    ("provenance.json", lambda data: data.get("training_use") is False),
+)
 VIEW_CROPS = ("page", "full_frame", "small_page")
 VIEW_ROTATIONS = (0, 90, 180, 270)  # counter-clockwise degrees
 _TURNS = {
@@ -168,6 +179,25 @@ def release_license_ok(license_class: str) -> bool:
 
 def canonical_json(value: Any) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+
+
+def benchmark_marker(root: str | Path) -> str | None:
+    """What marks ``root`` as benchmark data, or ``None``. A root inside an
+    ``outputs/benchmarks`` folder is benchmark data, and so is a root that is or lies
+    inside a folder with one of ``BENCHMARK_FILES``."""
+    root = Path(root).resolve()
+    if ("outputs", "benchmarks") in zip(root.parts, root.parts[1:]):
+        return "inside outputs/benchmarks"
+    for folder in (root, *root.parents):
+        for name, marks in BENCHMARK_FILES:
+            path = folder / name
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if isinstance(data, dict) and marks(data):
+                return str(path)
+    return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -512,6 +542,12 @@ class _Source:
     def __init__(self, spec: SourceSpec, root: Path, grid_size: tuple[int, int]) -> None:
         if not root.is_dir():
             raise _error("missing_data", f"source {spec.name!r}: root {root} is not a directory")
+        marker = benchmark_marker(root)
+        if marker is not None:
+            raise _error(
+                "benchmark_data",
+                f"source {spec.name!r}: root {root} holds benchmark data ({marker})",
+            )
         self.spec, self.root, self.grid_size = spec, root, grid_size
         self.hashes: dict[str, tuple[str, ...]] = {}
         self.settings: dict[str, Any] | None = None  # copy settings that shape the targets
