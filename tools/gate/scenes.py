@@ -8,9 +8,12 @@ page of an open book is drawn along the page's left or right edge; it counts as 
 since the scanner flattens a spread whole and splits it afterwards.
 
 Desk objects are drawn into the background and are never page: laptops and keyboards,
-screens (dark or light), book covers, mugs and cables. Thumbs over the page edge are cut
-out of the mask. Page, objects and background share one illumination field, cast shadow
-and white balance; the finished scene may be blurred, noisy and JPEG-compressed.
+screens (dark or light), book covers, white furniture, mugs and cables. So are other
+documents under the page (``under``): the page on top of a stack is the one to scan. A
+plain light wall or table (``plain_prob``) stands in for the indoor surfaces that look
+like blank paper. Thumbs over the page edge are cut out of the mask. Page, objects and
+background share one illumination field, cast shadow and white balance; the finished
+scene may be blurred, noisy and JPEG-compressed.
 Without a page the scene is a negative (empty mask).
 """
 
@@ -28,7 +31,7 @@ from PIL import Image, ImageDraw, ImageFilter
 from flattener.dewarp import composite as cp
 
 ASPECTS = {"3:4": (3, 4), "4:3": (4, 3), "9:16": (9, 16), "16:9": (16, 9), "1:1": (1, 1)}
-OBJECTS = ("laptop", "keyboard", "screen", "cover", "mug", "cable")
+OBJECTS = ("laptop", "keyboard", "screen", "cover", "panel", "mug", "cable")
 
 
 @dataclass(frozen=True)
@@ -50,6 +53,9 @@ class SceneConfig:
         }
     )  # fmt: skip
     thumb_prob: float = 0.35
+    under_prob: float = 0.0
+    under_area: tuple[float, float] = (0.8, 2.5)
+    plain_prob: float = 0.0
     book_prob: float = 0.2
     book_prob_spread: float = 0.7
     blur_prob: float = 0.3
@@ -82,7 +88,7 @@ class SceneConfig:
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> SceneConfig:
         data = dict(data or {})
-        for name in ("closeup_zoom", "object_count", "jpeg_quality"):
+        for name in ("closeup_zoom", "object_count", "jpeg_quality", "under_area"):
             if name in data:
                 data[name] = tuple(data[name])
         return cls(**data)
@@ -229,6 +235,48 @@ def cover(rng: np.random.Generator) -> Image.Image:
     return image
 
 
+def panel(rng: np.random.Generator) -> Image.Image:
+    """White furniture or a box side: a light panel with door gaps and a handle."""
+    width = 800
+    height = int(width * rng.uniform(0.5, 1.6))
+    level = _gray(rng, 175, 250, 4)
+    image = _noise(rng, (width, height), level, 2.0).convert("RGBA")
+    draw = ImageDraw.Draw(image)
+    gap = tuple(max(0, v - int(rng.uniform(25, 70))) for v in level)
+    for _ in range(int(rng.integers(1, 3))):
+        if rng.random() < 0.5:
+            x = rng.uniform(0.2, 0.8) * width
+            draw.line((x, 0, x, height), fill=gap, width=4)
+        else:
+            y = rng.uniform(0.2, 0.8) * height
+            draw.line((0, y, width, y), fill=gap, width=4)
+    if rng.random() < 0.5:
+        x, y = rng.uniform(0.1, 0.9) * width, rng.uniform(0.1, 0.9) * height
+        draw.rounded_rectangle((x, y, x + 20, y + 120), radius=8, fill=_gray(rng, 60, 200))
+    return image
+
+
+def plain_surface(
+    rng: np.random.Generator, out_hw: tuple[int, int], bank: cp.BackgroundBank | None
+) -> NDArray[np.float32]:
+    """A light, nearly grey wall or table under smooth light; sometimes a floor below it
+    (a texture under a slanted line)."""
+    height, width = out_hw
+    level = rng.uniform(150, 245)
+    colour = level + rng.uniform(-8, 8, 3)
+    shade = cp.smooth_field(rng.uniform(0.82, 1.08, (3, 3)), out_hw)
+    surface = colour[None, None, :].astype(np.float32) * shade[..., None]
+    surface += rng.normal(0, 1.5, (height, width, 1)).astype(np.float32)
+    if bank is not None and len(bank) and rng.random() < 0.5:
+        floor = bank.draw(rng, out_hw)
+        left, right = rng.uniform(0.3, 0.95, 2) * height
+        ys = np.arange(height, dtype=np.float32)[:, None]
+        line = left + (right - left) * np.arange(width, dtype=np.float32)[None, :] / width
+        below = (ys > line).astype(np.float32)[..., None]
+        surface += below * (floor - surface)
+    return surface
+
+
 def mug(rng: np.random.Generator) -> Image.Image:
     width = 500
     image = Image.new("RGBA", (width, width), (0, 0, 0, 0))
@@ -263,6 +311,8 @@ def _draw_object(rng: np.random.Generator, kind: str) -> tuple[Image.Image, floa
         return screen(rng), 0.4, 1.2
     if kind == "cover":
         return cover(rng), 0.25, 0.7
+    if kind == "panel":
+        return panel(rng), 0.3, 1.0
     if kind == "mug":
         return mug(rng), 0.12, 0.3
     return cable(rng), 0.4, 1.2
@@ -410,6 +460,49 @@ def _hull(points: NDArray) -> NDArray:
 # --------------------------------------------------------------------------- scene
 
 
+def _draw_page(surface, image, transform, outline_px, out_hw, rng, settings) -> NDArray:
+    """Warp a page through ``transform`` onto ``surface``; return its placed outline."""
+    placed = cp.apply_homography(transform, outline_px)
+    box = cp.polygon_box(placed, out_hw)
+    if box is not None:
+        left, top, right, bottom = box
+        step = math.sqrt(abs(cp.polygon_area(outline_px)) / max(abs(cp.polygon_area(placed)), 1e-9))
+        pixels = cp.warp_homography(image, transform, out_hw, step=step, box=box)
+        alpha = cp.page_alpha(placed, box, rng.uniform(0.0, settings.edge_trim))[..., None]
+        region = surface[top:bottom, left:right]
+        gain = np.float32(rng.uniform(*settings.page_gain))
+        region += alpha * (pixels.astype(np.float32) * gain - region)
+    return placed
+
+
+def under_documents(surface, documents, placed, out_hw, config, rng, settings) -> int:
+    """Other documents under the page (outline ``placed``): each larger or smaller than
+    it, turned a little and shifted, so that the page covers part of it; sometimes on a
+    page stack of its own. They are not page."""
+    centre = placed.mean(axis=0)
+    span = np.ptp(placed, axis=0)
+    edge = placed[len(placed) // 8] - placed[0]
+    angle = math.atan2(edge[1], edge[0])
+    drawn = 0
+    for image, grid in documents:
+        nodes_px = grid_nodes(grid, (image.size[1], image.size[0]))
+        outline_px = cp.outline(nodes_px)
+        ratio = rng.uniform(*config.under_area)
+        scale = math.sqrt(
+            ratio * abs(cp.polygon_area(placed)) / max(abs(cp.polygon_area(outline_px)), 1e-9)
+        )
+        own = outline_px[len(outline_px) // 8] - outline_px[0]
+        turn = angle - math.atan2(own[1], own[0]) + math.radians(rng.normal(0, 15))
+        shift = rng.uniform(-0.45, 0.45, 2) * span
+        transform = cp.similarity(scale, turn, outline_px.mean(axis=0), centre + shift)
+        other = cp.apply_homography(transform, outline_px)
+        if rng.random() < 0.5:
+            book_block(surface, [other], rng)
+        _draw_page(surface, image, transform, outline_px, out_hw, rng, settings)
+        drawn += 1
+    return drawn
+
+
 def grid_nodes(grid: NDArray, size: tuple[int, int]) -> NDArray[np.float64]:
     """Grid values (flattener, w.r.t. an image of ``size`` = (height, width)) in px."""
     height, width = size
@@ -435,17 +528,21 @@ def scene(
     page: tuple[Image.Image, NDArray] | None,
     bank: cp.BackgroundBank | None = None,
     neighbor: tuple[Image.Image, NDArray] | None = None,
+    under: list[tuple[Image.Image, NDArray]] | None = None,
 ) -> tuple[NDArray[np.uint8], NDArray[np.bool_], dict[str, Any]]:
     """One scene: (H, W, 3) uint8 image, (H, W) page mask and what was drawn.
 
-    ``page`` and ``neighbor`` are (image, grid) with the grid in flattener values of the
-    image; ``page`` None gives a negative. ``neighbor`` is drawn only with
-    ``config.neighbor_prob``."""
+    ``page``, ``neighbor`` and each of ``under`` are (image, grid) with the grid in
+    flattener values of the image; ``page`` None gives a negative. ``neighbor`` is drawn
+    only with ``config.neighbor_prob``, ``under`` only with ``config.under_prob``."""
     settings = cp.CompositeConfig.from_value(config.composite)
     out_hw = frame_size(rng, config)
     height, width = out_hw
     surface = cp._background(settings, bank, rng, out_hw)
-    info: dict[str, Any] = {"frame": [height, width], "objects": []}
+    info: dict[str, Any] = {"frame": [height, width], "objects": [], "plain": False}
+    if config.plain_prob > 0 and rng.random() < config.plain_prob:
+        surface = plain_surface(rng, out_hw, bank)
+        info["plain"] = True
     count = int(rng.choice(len(config.object_count), p=np.divide(
         config.object_count, sum(config.object_count))))  # fmt: skip
     for _ in range(count):
@@ -475,6 +572,9 @@ def scene(
         info.update(closeup=True, zoom=round(zoom, 3))
     placed = cp.apply_homography(transform, outline)
     corners = cp.apply_homography(transform, cp._corners(nodes_px))
+    info["under"] = 0
+    if under and config.under_prob > 0 and rng.random() < config.under_prob:
+        info["under"] = under_documents(surface, under, placed, out_hw, config, rng, settings)
     fold = None
     info.update(neighbor=False, book=False)
     if neighbor is not None and rng.random() < config.neighbor_prob:

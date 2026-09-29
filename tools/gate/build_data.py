@@ -154,6 +154,10 @@ def plan_source(spec: dict[str, Any], source: dict[str, Any], limit: int | None)
                 {"page": record, "neighbor": records[int(other)]}
                 for record, other in zip(chosen, others, strict=True)
             ]
+            if scenes.SceneConfig.from_dict(spec.get("scene")).under_prob > 0:
+                rng = np.random.default_rng(_seed(spec["name"], source["name"], split, "under"))
+                for item, other in zip(plan[split], rng.integers(len(records), size=len(chosen))):
+                    item["under"] = records[int(other)]
         info.update(
             dewarp_spec=dewarp.to_dict(), dewarp_spec_sha256=dewarp.sha256, dewarp_sources=described
         )
@@ -222,16 +226,20 @@ def make_scene(kind: str, item: Any, rng: np.random.Generator, settings: dict[st
     bank = _bank(settings["background_dir"])
     if kind == "syntheticdoc_scene":
         page, neighbor = _render(item["page"]), _render(item["neighbor"])
-        image, mask, info = scenes.scene(rng, config, page, bank, neighbor)
+        under = [_render(item["under"])] if "under" in item else None
+        image, mask, info = scenes.scene(rng, config, page, bank, neighbor, under)
+        used = [item[key] for key in ("page", "neighbor", "under") if key in item]
         fields = {
             "license_class": item["page"]["license_class"],
             "track": item["page"]["track"],
             "origin": {
-                "sample_id": item["page"]["sample_id"],
-                "neighbor_id": item["neighbor"]["sample_id"],
+                name: item[key]["sample_id"]
+                for key, name in (("page", "sample_id"), ("neighbor", "neighbor_id"),
+                                  ("under", "under_id"))
+                if key in item
             },
-        }
-        if item["neighbor"]["license_class"] != item["page"]["license_class"]:
+        }  # fmt: skip
+        if any(record["license_class"] != item["page"]["license_class"] for record in used):
             fields["license_class"] = "clean"
         return image, mask, fields | {"scene": info}
     own = {"license_class": "own", "track": settings["track"]}
@@ -239,7 +247,10 @@ def make_scene(kind: str, item: Any, rng: np.random.Generator, settings: dict[st
         page_id = f"{settings['source']}-{settings['split']}-{item}"
         page, layout = _own_page(page_id, rng, settings)
         neighbor, _ = _own_page(page_id + "-facing", rng, settings)
-        image, mask, info = scenes.scene(rng, config, page, bank, neighbor)
+        under = None
+        if config.under_prob > 0:
+            under = [_own_page(page_id + "-under", rng, settings)[0]]
+        image, mask, info = scenes.scene(rng, config, page, bank, neighbor, under)
         return image, mask, own | {"origin": {"layout": layout}, "scene": info}
     image, mask, info = scenes.scene(rng, config, None, bank)
     return image, mask, own | {"scene": info}

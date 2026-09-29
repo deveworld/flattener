@@ -1,0 +1,50 @@
+{
+  "schema": "flattener-gate-build-1",
+  "name": "gate-release-v1.1",
+  "track": "release",
+  "jpeg_quality": 92,
+  "chunk": 250,
+  "background_dir": "${FLATTENER_CACHE}/backgrounds/polyhaven-768",
+  "scene": {
+    "under_prob": 0.3,
+    "plain_prob": 0.25,
+    "objects": {
+      "laptop": 0.25, "keyboard": 0.08, "screen": 0.17, "cover": 0.15, "panel": 0.2,
+      "mug": 0.07, "cable": 0.08
+    }
+  },
+  "sources": [
+    {
+      "name": "sd-scene",
+      "kind": "syntheticdoc_scene",
+      "track": "release",
+      "license": "clean",
+      "dewarp_spec": "../dewarp/data-release.json",
+      "count": {"train": 60000, "val": 1000}
+    },
+    {
+      "name": "own-scene",
+      "kind": "documents_scene",
+      "track": "release",
+      "license": "own",
+      "count": {"train": 24000, "val": 500},
+      "form_prob": 0.2,
+      "sparse_prob": 0.1
+    },
+    {
+      "name": "no-page",
+      "kind": "negative_scene",
+      "track": "release",
+      "license": "own",
+      "count": {"train": 5000, "val": 250}
+    },
+    {
+      "name": "smartdoc",
+      "kind": "smartdoc_capture",
+      "track": "release",
+      "license": "CC-BY-4.0",
+      "root": "${FLATTENER_SMARTDOC}",
+      "families": {"train": [1, 2, 3], "val": [4]}
+    }
+  ]
+}

@@ -327,6 +327,13 @@ def test_a_zoomed_piece_of_the_page_returns_the_original(monkeypatch):
     # A region the user sets is flattened as asked.
     forced = scanner.scan(image, overrides=ScanOverrides(region=(80, 20, 262, 232)))
     assert forced.status == Status.SUCCESS and forced.plan is not None
+    # The gate's page fills the frame and the grid holds a third of it: a close-up too.
+    monkeypatch.setattr(look, "text", lambda image: {"lines": None, "edges": edges})
+    scanner, _ = _scanner()
+    scanner.gate.pages = [Page((160, 120), (400, 300))]
+    result = scanner.scan(image)
+    assert result.reason_code == "page_cut_off" and result.reasons[-1].detail["check"] == "close_up"
+    assert result.metadata["localization"]["method"] == "fills_frame"
 
 
 def test_without_a_gate_the_outline_is_used_unverified():

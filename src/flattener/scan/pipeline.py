@@ -37,8 +37,10 @@ plan and checks the plan's map; ``render(source, planned)`` makes the image of a
   grid fails (``unstable_geometry``, check ``page_continues``) and the chain goes on to
   the whole-photo outline. A grid whose preview shows a few large text lines cut by two
   or more of its edges is a close-up whose page runs out of the photo: ``page_cut_off``
-  ends the chain. Against a manual quad, coverage below 0.95 fails. The median node
-  drift between the last two passes must stay within 4 % of the page diagonal.
+  ends the chain. So does a grid holding less than 45 % of a gate page that fills the
+  frame (the page runs past the photo on every side the grid does not reach). Against a
+  manual quad, coverage below 0.95 fails. The median node drift between the last two
+  passes must stay within 4 % of the page diagonal.
 * ``plan``: ``scan.output_policy.plan_output`` (auto size, standard-ratio snap) and a
   ``ScanPlan`` with its ``plan_sha256``.
 * ``render``: the dense map of the plan (``render_map``; the grid nodes placed as the
@@ -158,6 +160,9 @@ QUANTIZE_MODES = ("round", "truncate")
 VERIFY: dict[str, Any] = {
     "min_coverage": 0.95,  # below this the gate mask reaches past the page: a warning
     "fragment_side_excess": 0.05,  # mask past every side above this: a piece of the page
+    # A gate page filling the frame with a grid holding less of it than this: a close-up
+    # whose page runs out of the photo (the grid is a piece of it).
+    "close_up_min_coverage": 0.45,
     # A grid the gate mask reaches past must look like paper (scan.look.paper).
     "page_max_saturation": 0.28,
     "page_max_dark": 0.35,
@@ -1911,7 +1916,20 @@ class Scanner:
                     excess = checks.get("excess")
                     # A manual quad is the page; only the gate's mask is a hint.
                     strict = located.provenance == "manual"
-                    if excess and (strict or min(excess.values()) > VERIFY["fragment_side_excess"]):
+                    if (
+                        located.method == "fills_frame"
+                        and checks.get("coverage", 1.0) < VERIFY["close_up_min_coverage"]
+                    ):
+                        bad = reason(
+                            "page_cut_off",
+                            status=Status.MODEL_ERROR,
+                            severity=Severity.FAILURE,
+                            check="close_up",
+                            **checks,
+                        )
+                    elif excess and (
+                        strict or min(excess.values()) > VERIFY["fragment_side_excess"]
+                    ):
                         bad = reason("unstable_geometry", check="coverage", **checks)
                     elif checks.get("drift", 0.0) > VERIFY["max_drift"]:
                         bad = reason("unstable_geometry", check="drift", **checks)
