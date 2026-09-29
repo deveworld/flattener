@@ -12,7 +12,7 @@
       "kind": "syntheticdoc_scene",
       "track": "release",
       "license": "clean",
-      "dewarp_spec": "../dewarp/data-release-raw.json",
+      "dewarp_spec": "../dewarp/data-release.json",
       "count": {"train": 60000, "val": 1000}
     },
     {
