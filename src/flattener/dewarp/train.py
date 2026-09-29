@@ -465,17 +465,24 @@ def axis_alignment_loss(
     along the columns, over valid nodes. Moving a whole row or column costs nothing here;
     bending it does. The shifts are measured in image units (flattener values, as the
     grid loss), each scaled by the local length of its page axis, so a small page on a
-    large background weighs no more per pixel than a large one. Grids are (N, 2, Gh, Gw)."""
+    large background weighs no more per pixel than a large one, and clipped at 0.5.
+    Nodes next to an invalid one, or where the target's page axes are nearly parallel,
+    are left out. Grids are (N, 2, Gh, Gw)."""
     rows, cols = target.shape[-2:]
     target = target.float()
     du = torch.gradient(target, dim=3)[0] * ((cols - 1) / 2.0)  # dp per page unit of u
     dv = torch.gradient(target, dim=2)[0] * ((rows - 1) / 2.0)
     det = du[:, 0] * dv[:, 1] - dv[:, 0] * du[:, 1]
+    lengths = du.norm(dim=1) * dv.norm(dim=1)
+    # A node counts when its 3x3 neighbourhood is valid (the differences read it) and its
+    # page axes are far from parallel (a folded or collapsed target has no local inverse).
+    usable = -F.max_pool2d(-valid.float(), 3, stride=1, padding=1)
+    weight = usable[:, 0] * (det.abs() >= 0.1 * lengths).float()
     det = torch.where(det.abs() < 1e-6, torch.full_like(det, 1e-6), det)
     error = prediction.float() - target
     shift_u = (dv[:, 1] * error[:, 0] - dv[:, 0] * error[:, 1]) / det * du.norm(dim=1)
     shift_v = (du[:, 0] * error[:, 1] - du[:, 1] * error[:, 0]) / det * dv.norm(dim=1)
-    weight = valid[:, 0].float()
+    shift_u, shift_v = shift_u.clamp(-0.5, 0.5), shift_v.clamp(-0.5, 0.5)
 
     def spread(values: torch.Tensor, dim: int) -> torch.Tensor:
         count = weight.sum(dim=dim)
