@@ -1,0 +1,73 @@
+{
+  "schema": "flattener-orient-build-1",
+  "name": "orient-release-v3",
+  "track": "release",
+  "long_side": 1024,
+  "jpeg_quality": 85,
+  "chunk": 500,
+  "sources": [
+    {
+      "name": "sd-flat",
+      "kind": "syntheticdoc_flat",
+      "track": "release",
+      "license": "SyntheticDoc CC BY 4.0; documents CC BY, CC0 or ODC-BY, backgrounds CC0 or CC BY, meshes CC BY",
+      "dewarp_spec": "../dewarp/data-release.json",
+      "part": [
+        0,
+        2
+      ],
+      "count": {
+        "train": 40000,
+        "val": 1000
+      }
+    },
+    {
+      "name": "sd-crop",
+      "kind": "syntheticdoc_crop",
+      "track": "release",
+      "license": "SyntheticDoc CC BY 4.0; documents CC BY, CC0 or ODC-BY, backgrounds CC0 or CC BY, meshes CC BY",
+      "dewarp_spec": "../dewarp/data-release.json",
+      "part": [
+        1,
+        2
+      ],
+      "count": {
+        "train": 40000,
+        "val": 1000
+      }
+    },
+    {
+      "name": "own-pages",
+      "kind": "documents",
+      "track": "release",
+      "license": "Apache-2.0 (text, layout, code); OFL-1.1 (Noto Sans KR glyphs)",
+      "count": {
+        "train": 40000,
+        "val": 2000
+      },
+      "form_prob": 0.2,
+      "sparse_prob": 0.1,
+      "print_prob": 0.2
+    },
+    {
+      "name": "own-spreads",
+      "kind": "spread",
+      "track": "release",
+      "license": "Apache-2.0 (text, layout, code); OFL-1.1 (Noto Sans KR glyphs)",
+      "count": {
+        "train": 12000,
+        "val": 600
+      }
+    },
+    {
+      "name": "text-free",
+      "kind": "text_free",
+      "track": "release",
+      "license": "Apache-2.0",
+      "count": {
+        "train": 3000,
+        "val": 300
+      }
+    }
+  ]
+}

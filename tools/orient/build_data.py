@@ -8,7 +8,8 @@ The build spec (``flattener-orient-build-1``, see ``examples/orient``) lists sou
   the dewarp source index also refuses samples without a release license class.
   ``part: [i, n]`` keeps the samples with index i mod n, so flat pages and crops can
   use disjoint renders. ``count`` caps each split (evenly spaced samples).
-* ``documents`` and ``text_free``: own generated pages (``count`` per split).
+* ``documents``, ``spread`` and ``text_free``: own generated pages, open-book spreads and
+  paper without text (``count`` per split).
 * ``pages``: upright page images listed in ``<root>/manifest.jsonl`` with ``path``,
   ``split``, ``track`` and ``license_class`` (and optional ``document_group`` and
   ``uniform``), for SmartDoc templates or scanner residual pages.
@@ -79,6 +80,7 @@ SOURCE_KEYS = {
     "document_prob",
     "form_prob",
     "sparse_prob",
+    "print_prob",
 }
 
 
@@ -257,8 +259,13 @@ def make_page(kind: str, item: Any, rng: np.random.Generator, settings: dict[str
             settings.get("document_prob", 0.35),
             settings.get("form_prob", 0.0),
             settings.get("sparse_prob", 0.0),
+            settings.get("print_prob", 0.0),
         )
         return gray, box, {**own, "document_group": page_id, "origin": {"layout": layout}}
+    if kind == "spread":
+        gray, box, layout = pages.spread_page(rng, long_side)
+        group = f"{settings['source']}-{settings['split']}-{item}"
+        return gray, box, {**own, "document_group": group, "origin": {"layout": layout}}
     gray, box, layout = pages.text_free_page(rng, long_side)
     group = f"{settings['source']}-{settings['split']}-{item}"
     return (
@@ -402,6 +409,7 @@ def build(
                 "document_prob": source.get("document_prob", 0.35),
                 "form_prob": source.get("form_prob", 0.0),
                 "sparse_prob": source.get("sparse_prob", 0.0),
+                "print_prob": source.get("print_prob", 0.0),
             }
             for start in range(0, len(items), spec["chunk"]):
                 tasks.append(

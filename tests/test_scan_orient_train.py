@@ -381,11 +381,16 @@ def test_the_data_build_reads_pages_upright_and_refuses_research_and_changed_sou
         build_data.build(spec, tmp_path / "pages", workers=1)
 
 
-def test_own_pages_can_be_forms_or_nearly_empty():
+def test_own_pages_can_be_forms_prints_nearly_empty_or_spreads():
     rng = np.random.default_rng(3)
     default = pages.document_page("a", np.random.default_rng(3), 768)
     assert pages.document_page("a", np.random.default_rng(3), 768, 0.35, 0.0, 0.0)[2] == default[2]
-    layouts = {pages.document_page("b", rng, 768, 0.35, 0.5, 0.5)[2] for _ in range(6)}
-    assert layouts == {"form", "sparse"}
+    layouts = {pages.document_page("b", rng, 768, 0.35, 0.4, 0.3, 0.3)[2] for _ in range(12)}
+    assert layouts == {"form", "sparse", "print"}
     sparse, _, _ = pages.document_page("c", np.random.default_rng(1), 768, 0.0, 0.0, 1.0)
     assert (sparse < 128).mean() < 0.02  # mostly blank paper
+    spread, box, layout = pages.spread_page(np.random.default_rng(2), 768)
+    height, width = spread.shape
+    assert layout == "spread" and width > height and max(height, width) <= 768
+    gutter = spread[:, width // 2 - 2 : width // 2 + 2].mean()
+    assert gutter < spread[:, width // 4].mean()  # the fold is shaded

@@ -67,7 +67,9 @@ from .orient import (
 )
 
 DATA_SCHEMA = "flattener-orient-data-1"
-DATA_KINDS = ("syntheticdoc_flat", "syntheticdoc_crop", "documents", "text_free", "pages")
+DATA_KINDS = (
+    "syntheticdoc_flat", "syntheticdoc_crop", "documents", "spread", "text_free", "pages",
+)  # fmt: skip
 CROP_KINDS = frozenset({"syntheticdoc_crop"})
 INITS = ("scratch", "checkpoint")
 VAL_SEED = 20260927

@@ -11,8 +11,10 @@ fixes the pixels for a fixed Pillow/FreeType build.
   its up vector (mean of the grid's column vectors, bottom row to top row) points up.
 * ``document_page``: an own page, either ``flattener.synthetic.documents`` (imported,
   unchanged) or a composed page of procedural Hangul/Latin text, formulas, tables and
-  figures in the bundled Noto Sans KR; with ``form_prob`` and ``sparse_prob`` also a
-  ruled form (``form_page``) or a nearly empty page (``sparse_page``).
+  figures in the bundled Noto Sans KR; with ``form_prob``, ``sparse_prob`` and
+  ``print_prob`` also a ruled form (``form_page``), a nearly empty page (``sparse_page``)
+  or a page printed from a browser (``print_page``).
+* ``spread_page``: an open book, two composed pages side by side with a shaded gutter.
 * ``text_free_page``: blank, figure-only or ruled paper.
 """
 
@@ -405,6 +407,91 @@ def sparse_page(rng: np.random.Generator, size: tuple[int, int]) -> NDArray[np.u
     return np.array(image)
 
 
+def print_page(rng: np.random.Generator, size: tuple[int, int]) -> NDArray[np.uint8]:
+    """A page printed from a browser: a head line with the print date, time or title and
+    the page count ("6 / 18") at the top, a foot line with an address and a date at the
+    bottom, and a body of dense Hangul paragraphs (often inside a ruled box), a short
+    closing phrase on blank paper, or a ruled form."""
+    height, width = size
+    image, draw, ink = _paper(rng, size)
+    left = round(width * rng.uniform(0.04, 0.08))
+    right = width - left
+    top = round(height * rng.uniform(0.02, 0.04))
+    bottom = height - round(height * rng.uniform(0.02, 0.04))
+    small = font(max(8, round(height * rng.uniform(0.007, 0.011))))
+    year, month, day = (
+        int(rng.integers(2015, 2031)),
+        int(rng.integers(1, 13)),
+        int(rng.integers(1, 29)),
+    )
+    date = f"{year}.{month:02d}.{day:02d}"
+    count = f"{int(rng.integers(1, 30))} / {int(rng.integers(30, 60))}"
+    stamp = f"{date} {int(rng.integers(0, 24)):02d}:{int(rng.integers(0, 60)):02d}"
+    head_left = stamp if rng.random() < 0.5 else _fit_line(small, words(rng, "ko"), width * 0.35)
+    head_right = count if rng.random() < 0.7 else _fit_line(small, words(rng, "ko"), width * 0.3)
+    draw.text((left, top), head_left, font=small, fill=ink)
+    draw.text((right - small.getlength(head_right), top), head_right, font=small, fill=ink)
+    address = "https://" + _fit_line(small, words(rng, "en"), width * 0.4).replace(" ", "/")
+    foot_left, foot_right = (address, date) if rng.random() < 0.6 else (date, count)
+    draw.text((left, bottom - small.size), foot_left, font=small, fill=ink)
+    draw.text((right - small.getlength(foot_right), bottom - small.size), foot_right, font=small,
+              fill=ink)  # fmt: skip
+    body_top = top + small.size * rng.uniform(2.5, 6)
+    body_bottom = bottom - small.size * rng.uniform(2.5, 6)
+    roll = rng.random()
+    if roll < 0.2:  # a short closing phrase on blank paper
+        big = font(round(height * rng.uniform(0.02, 0.04)), 500)
+        phrase = " ".join("".join(hangul_word(rng)[:2] for _ in range(2)))
+        y = body_top + (body_bottom - body_top) * rng.uniform(0.2, 0.7)
+        draw.text(((width - big.getlength(phrase)) / 2, y), phrase, font=big, fill=ink)
+        return np.array(image)
+    if roll < 0.35:  # a ruled form under the print head
+        inner = form_page(rng, (int(body_bottom - body_top), right - left))
+        image.paste(Image.fromarray(inner), (left, int(body_top)))
+        return np.array(image)
+    body = font(max(8, round(height * rng.uniform(0.008, 0.013))))
+    leading = body.size * rng.uniform(1.3, 1.6)
+    boxed = rng.random() < 0.6
+    x0, x1 = left, right
+    if boxed:
+        rule = max(1, body.size // 10)
+        draw.rectangle((left, body_top, right, body_bottom), outline=ink, width=rule)
+        x0, x1 = left + body.size, right - body.size
+    y = body_top + body.size * 0.8
+    while y + leading < body_bottom - body.size * 0.5:
+        source = words(rng, "ko")
+        indent = body.size * 1.2 if rng.random() < 0.3 else 0.0
+        for line_index in range(int(rng.integers(3, 12))):
+            if y + leading >= body_bottom - body.size * 0.5:
+                break
+            shift = indent if line_index == 0 else 0.0
+            draw.text((x0 + shift, y), _fit_line(body, source, x1 - x0 - shift), font=body,
+                      fill=ink)  # fmt: skip
+            y += leading
+        y += leading * rng.uniform(0.3, 1.0)
+    return np.array(image)
+
+
+def spread_page(
+    rng: np.random.Generator, long_side: int = 1024
+) -> tuple[NDArray[np.uint8], list[float], str]:
+    """An open book: two composed pages side by side, each a little different in size and
+    brightness, with a shaded gutter between them."""
+    height, width = page_size(rng, long_side // 2 * 2, landscape_prob=0.0)
+    height, width = height // 2 * 2, width // 2 * 2
+    scale = long_side / (2 * width) if 2 * width > long_side else 1.0
+    height, width = max(128, round(height * scale)), max(128, round(width * scale))
+    pages = []
+    for _ in range(2):
+        page = composed_page(rng, (height, width)).astype(np.float32)
+        pages.append(page * rng.uniform(0.9, 1.0))
+    spread = np.concatenate(pages, axis=1)
+    x = np.arange(2 * width, dtype=np.float32)
+    depth = rng.uniform(0.15, 0.5)
+    spread *= (1 - depth * np.exp(-np.abs(x - width) / (width * rng.uniform(0.02, 0.08))))[None]
+    return np.clip(spread, 0, 255).astype(np.uint8), list(FULL_BOX), "spread"
+
+
 def _block(
     rng, image: Image.Image, draw: ImageDraw.ImageDraw, box, ink: int, text_size: int
 ) -> None:
@@ -456,16 +543,20 @@ def document_page(
     document_prob: float = 0.35,
     form_prob: float = 0.0,
     sparse_prob: float = 0.0,
+    print_prob: float = 0.0,
 ) -> tuple[NDArray[np.uint8], list[float], str]:
     """An own text page; returns the page, its box and its layout name. Without
-    ``form_prob`` and ``sparse_prob`` the draws are those of earlier builds."""
+    ``form_prob``, ``sparse_prob`` and ``print_prob`` the draws are those of earlier
+    builds."""
     size = page_size(rng, long_side)
-    if form_prob or sparse_prob:
+    if form_prob or sparse_prob or print_prob:
         roll = rng.random()
         if roll < form_prob:
             return form_page(rng, size), list(FULL_BOX), "form"
         if roll < form_prob + sparse_prob:
             return sparse_page(rng, size), list(FULL_BOX), "sparse"
+        if roll < form_prob + sparse_prob + print_prob:
+            return print_page(rng, size), list(FULL_BOX), "print"
     if rng.random() < document_prob:
         seed = int(rng.integers(0, 2**63))
         try:
