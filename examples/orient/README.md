@@ -12,6 +12,7 @@ trunk across the five views and pools them by a text-saliency softmax (0.44M par
 |---|---|
 | `data-orient-release.json` | build spec for `tools/orient/build_data.py` |
 | `train-orient-release.json` | train config for `python -m flattener.scan.orient_train` |
+| `data-orient-release-v3.json`, `train-orient-release-v3.json` | the default v3: v1 fine-tuned 4,000 steps on data with forms, printed web pages and spreads |
 
 ## Data
 
@@ -21,6 +22,12 @@ trunk across the five views and pools them by a text-saliency softmax (0.44M par
 | SyntheticDoc warped crops, turned so the page's up vector points up (15% stored margin) | `syntheticdoc_crop` | 120,000 / 1,000 |
 | Own Korean/English/mixed pages: `synthetic/documents.py` pages and composed pages of procedural text, formulas, tables and figures in Noto Sans KR | `documents` | 40,000 / 2,000 |
 | Blank, figure-only and ruled paper (uniform target) | `text_free` | 3,000 / 300 |
+
+v3 (`data-orient-release-v3.json`, 40,000 / 1,000 SyntheticDoc pages of each kind from the compact copy) adds:
+- Own pages that are 20% ruled forms, 10% nearly empty pages and 20% browser printouts (`print_page`: a print date or title with the page count at the top, an address and date at the foot, and a body of boxed Hangul, a form or a closing phrase).
+- 12,000 / 600 two-page spreads (`spread`: two composed pages with a shaded gutter).
+
+On KR-Real it fixes the two printouts v1 turned upside down. Spreads keep the orientation v1 gave them.
 
 The SyntheticDoc sources read `../dewarp/data-release-raw.json` (the full-resolution
 download named by `FLATTENER_DATA`); `../dewarp/data-release.json` (the compact copy) also
