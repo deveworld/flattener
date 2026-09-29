@@ -2,8 +2,10 @@
 
 The build spec (``flattener-crumple-build-1``, see ``examples/dewarp``) names a dewarp data
 spec (``dewarp_spec``; ``converted`` or ``syntheticdoc_compact`` release sources), the
-counts per split, the photo size, a background folder and optional ``modes`` weights of
-``render.render`` modes (default all ``crumple``). Each item flattens one
+counts per split, the photo size, a background folder, optional ``modes`` weights of
+``render.render`` modes (default all ``crumple``), ``own_texture_prob`` (own generated pages
+as textures, license class ``own``) and ``under_prob`` (a flat own page lying under the
+crumpled one, left out of the target). Each item flattens one
 SyntheticDoc render through its ground truth into a page texture (the aspect from the
 grid's arc lengths), crumples and photographs it (``render.render``) on a CC0 or
 procedural background, and writes ``files/<split>/<id>.jpg`` and ``<id>.bm.npy`` (the
@@ -92,6 +94,44 @@ def flat_texture(record: dict[str, Any], long_side: int = 1024, device: str = "c
     return flat[0].permute(1, 2, 0).clamp(0, 255).round().byte().cpu().numpy()
 
 
+def own_texture(rng: np.random.Generator, page_id: str) -> np.ndarray:
+    """An own page (``tools/orient/pages.py``: documents, forms, printouts), tinted paper."""
+    pages = _orient_builder().pages
+    gray, _, _ = pages.document_page(page_id, rng, 1024, 0.35, 0.2, 0.05, 0.2)
+    paper = np.array([rng.uniform(0.9, 1.0), rng.uniform(0.88, 0.98), rng.uniform(0.82, 0.95)])
+    return (gray.astype(np.float32)[..., None] * paper).astype(np.uint8)
+
+
+def paper_underneath(
+    background: np.ndarray, texture: np.ndarray, rng: np.random.Generator
+) -> np.ndarray:
+    """``background`` with a flat sheet (``texture``) lying on it, turned and shifted; the
+    crumpled page is drawn over it later, so it sits underneath."""
+    from PIL import Image as PILImage
+
+    from flattener.dewarp.composite import corner_homography, polygon_area, warp_homography
+
+    height, width = background.shape[:2]
+    tex_h, tex_w = texture.shape[:2]
+    scale = rng.uniform(0.6, 1.2) * min(width / tex_w, height / tex_h)
+    angle = rng.normal(0, 0.4)
+    center = rng.uniform([0.1 * width, 0.1 * height], [0.9 * width, 0.9 * height])
+    cos, sin = np.cos(angle), np.sin(angle)
+    source = np.array([[0, 0], [tex_w, 0], [tex_w, tex_h], [0, tex_h]], dtype=np.float64)
+    offsets = (source - [tex_w / 2, tex_h / 2]) * scale
+    target = center + offsets @ np.array([[cos, sin], [-sin, cos]])
+    transform = corner_homography(source, target)
+    step = np.sqrt(abs(polygon_area(source)) / max(abs(polygon_area(target)), 1e-9))
+    sheet = warp_homography(PILImage.fromarray(texture), transform, (height, width), step=step)
+    mask = PILImage.new("L", (width, height), 0)
+    from PIL import ImageDraw
+
+    ImageDraw.Draw(mask).polygon([tuple(p) for p in target.tolist()], fill=255)
+    alpha = np.asarray(mask, np.float32)[..., None] / 255.0
+    out = background.astype(np.float32) * (1 - alpha) + sheet.astype(np.float32) * alpha * 0.95
+    return np.clip(out, 0, 255).astype(np.uint8)
+
+
 def run_chunk(task: dict[str, Any]) -> dict[str, Any]:
     import torch
 
@@ -104,12 +144,20 @@ def run_chunk(task: dict[str, Any]) -> dict[str, Any]:
     for index, record in zip(task["indices"], task["items"], strict=True):
         rng = np.random.default_rng(_seed(settings["name"], settings["split"], index))
         try:
-            texture = flat_texture(record, device=settings["device"])
+            own = rng.random() < settings.get("own_texture_prob", 0.0)
+            if own:
+                texture = own_texture(rng, f"{settings['name']}-{settings['split']}-{index}")
+            else:
+                texture = flat_texture(record, device=settings["device"])
             bank = _bank(settings["background_dir"])
             if bank is not None and len(bank) and rng.random() < 0.75:
                 background = bank.draw(rng, out_hw)
             else:
                 background = procedural_background(rng, out_hw)
+            background = np.clip(background, 0, 255).astype(np.uint8)
+            if rng.random() < settings.get("under_prob", 0.0):
+                under = own_texture(rng, f"{settings['name']}-{settings['split']}-{index}-under")
+                background = paper_underneath(background, under, rng)
             modes = settings.get("modes") or {"crumple": 1.0}
             names = sorted(modes)
             weights = np.array([modes[name] for name in names], dtype=np.float64)
@@ -143,12 +191,12 @@ def run_chunk(task: dict[str, Any]) -> dict[str, Any]:
                 "backward_map_convention": "flattener",
                 "image_size": list(out_hw),
                 "track": record["track"],
-                "license_class": record["license_class"],
+                "license_class": "own" if own else record["license_class"],
                 "image_sha256": hashlib.sha256(image_bytes).hexdigest(),
                 "image_bytes": len(image_bytes),
                 "backward_map_sha256": hashlib.sha256(map_bytes).hexdigest(),
                 "backward_map_bytes": len(map_bytes),
-                "texture_sample_id": record["sample_id"],
+                "texture_sample_id": None if own else record["sample_id"],
                 "mode": mode,
             }
         )
@@ -189,7 +237,8 @@ def build(
         items = [records[int(i)] for i in picks]
         settings = {"name": spec["name"], "split": split, "photo_hw": spec["photo_hw"],
                     "background_dir": background_dir, "modes": spec.get("modes"),
-                    "device": device}  # fmt: skip
+                    "device": device, "own_texture_prob": spec.get("own_texture_prob", 0.0),
+                    "under_prob": spec.get("under_prob", 0.0)}  # fmt: skip
         for start in range(0, count, spec.get("chunk", 200)):
             stop = min(count, start + spec.get("chunk", 200))
             tasks.append({"key": f"{split}-{start:07d}", "settings": settings,

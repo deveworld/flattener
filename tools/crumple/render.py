@@ -59,8 +59,14 @@ def height_field(
 ) -> torch.Tensor:
     """Heights (page-width units) at page points ``x`` in [0, 1], ``y`` in [0, aspect]:
     ``crumple`` sums creases, folds, curl and waves; ``curve`` is a smooth curl (a page
-    lying on a book or curling off a table) with at most one soft fold."""
+    lying on a book or curling off a table) with at most one soft fold; ``flat`` is a page
+    lying almost flat."""
     z = torch.zeros_like(x)
+    if mode == "flat":  # paper lying almost flat: a slight curl, no creases
+        axis = rng.uniform(0, math.pi)
+        along = (x - 0.5) * math.cos(axis) + (y - aspect / 2) * math.sin(axis)
+        z = z + float(rng.uniform(-0.06, 0.06)) * along**2
+        return z - z.mean()
     if mode == "curve":
         axis = rng.uniform(0, math.pi)
         along = (x - 0.5) * math.cos(axis) + (y - aspect / 2) * math.sin(axis)
