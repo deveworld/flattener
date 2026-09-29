@@ -1,0 +1,20 @@
+{
+  "schema": "flattener-crumple-build-1",
+  "name": "crumple-release-v2",
+  "track": "release",
+  "dewarp_spec": "data-release.json",
+  "photo_hw": [
+    900,
+    640
+  ],
+  "background_dir": "${FLATTENER_CACHE}/backgrounds/polyhaven-768",
+  "chunk": 200,
+  "count": {
+    "train": 40000,
+    "val": 800
+  },
+  "modes": {
+    "crumple": 0.55,
+    "curve": 0.45
+  }
+}
