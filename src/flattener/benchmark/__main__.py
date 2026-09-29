@@ -80,6 +80,11 @@ def _add_rerun(parser: argparse.ArgumentParser, *, perspective: bool = False) ->
             help="with --rerun: turned tight-crop passes (flattener.dewarp.predict --rect)",
         )
         parser.add_argument(
+            "--refine",
+            action="store_true",
+            help="an interior pass on the flat output (flattener.dewarp.predict --refine)",
+        )
+        parser.add_argument(
             "--snap-border",
             action="store_true",
             help="snap the final border to the photo's page edges (flattener.dewarp.edges)",
@@ -594,6 +599,7 @@ def main(argv: list[str] | None = None) -> int:
             perspective=args.perspective,
             snap=args.snap_border,
             rect=args.rect,
+            refine=args.refine,
         )
         print(json.dumps(record["counts"]))
         return 0
@@ -682,6 +688,7 @@ def main(argv: list[str] | None = None) -> int:
             perspective=args.perspective,
             snap=args.snap_border,
             rect=args.rect,
+            refine=args.refine,
         )
         print(json.dumps(record["counts"]))
         return 0 if record["counts"]["failed"] == 0 else 1

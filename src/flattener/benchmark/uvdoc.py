@@ -352,6 +352,7 @@ def predict_uvdoc(
     perspective: bool = False,
     snap: bool = False,
     rect: bool = False,
+    refine: bool = False,
 ) -> dict[str, Any]:
     """Rectify the 50 samples into ``output_dir/{uwp_texture,uwp_img}/{id}.png``.
 
@@ -380,7 +381,9 @@ def predict_uvdoc(
     if record_path.exists() and not overwrite:
         raise FileExistsError(f"{record_path} exists; pass overwrite to predict again")
     inset_info = inset_record(inset)  # refuses an invalid inset before any work
-    rerun_info = rerun_record(rerun, deskew, perspective, snap, rect)  # and invalid settings
+    rerun_info = rerun_record(
+        rerun, deskew, perspective, snap, rect, refine
+    )  # and invalid settings
     photos = hash_folder(root, "img", verify=verify_inputs)
     textures = hash_folder(root, "warped_textures", verify=verify_inputs)
     convention = dewarper.config.grid_convention
@@ -417,11 +420,13 @@ def predict_uvdoc(
         name = sample_name(sample)
         photo = load_rgb(root / "img" / name)
         texture = load_rgb(root / "warped_textures" / name)
-        if rerun or snap:
-            grid, crops = rerun_grid(dewarper, photo, rerun, deskew, perspective, snap, rect)
+        if rerun or snap or refine:
+            grid, crops = rerun_grid(
+                dewarper, photo, rerun, deskew, perspective, snap, rect, refine
+            )
         else:
             grid, crops = predict_grid(dewarper, photo), []
-        values = {"flattener_values": rerun > 0 or snap}
+        values = {"flattener_values": rerun > 0 or snap or refine}
         check = _check_status(texture, grid, convention, inset, **values)
         sources = {"uwp_texture": ("warped_textures", texture), "uwp_img": ("img", photo)}
         items = []

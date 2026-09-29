@@ -402,17 +402,19 @@ def rerun_record(
     perspective: bool = False,
     snap: bool = False,
     rect: bool = False,
+    refine: bool = False,
 ) -> dict[str, Any]:
     """How crop-and-rerun settings are recorded: ``passes``, ``deskew`` and the rules that
     apply (``margin`` with passes, ``max_angle_deg`` and ``min_agreement`` with deskew;
     ``None`` otherwise), ``perspective: true`` for perspective passes
     (``homography_pass``) and ``snap: true`` when the final border is snapped to the photo's
     page edges (``edges.snap_border``); ``rect_margins`` for turned tight-crop passes
-    (``rect_pass``). Refuses a negative or non-integer ``rerun``, and deskew, perspective or
+    (``rect_pass``); ``refine: true`` for an interior pass on the flat output
+    (``refine_pass``). Refuses a negative or non-integer ``rerun``, and deskew, perspective or
     rect without passes or together (each pass is one kind)."""
     if isinstance(rerun, bool) or not isinstance(rerun, (int, np.integer)) or rerun < 0:
         raise _rerun_error(f"rerun must be an integer >= 0, got {rerun!r}")
-    if not all(isinstance(flag, bool) for flag in (deskew, perspective, snap, rect)):
+    if not all(isinstance(flag, bool) for flag in (deskew, perspective, snap, rect, refine)):
         raise _rerun_error(f"deskew and perspective must be bools, got {deskew!r}, {perspective!r}")
     if (deskew or perspective or rect) and rerun == 0:
         raise _rerun_error("deskew, perspective and rect need rerun >= 1")
@@ -429,6 +431,8 @@ def rerun_record(
         record["perspective"] = True
     if snap:
         record["snap"] = True
+    if refine:
+        record["refine"] = True
     if rect:
         record["rect_margins"] = [RECT_MARGINS[min(i, len(RECT_MARGINS) - 1)] for i in range(rerun)]
     return record
@@ -728,6 +732,42 @@ def homography_pass(
     return 2.0 * source / np.array([width, height], dtype=np.float64) - 1.0, record
 
 
+def refine_pass(
+    dewarper: Dewarper, image: NDArray[np.uint8], grid: NDArray
+) -> tuple[NDArray[np.float64], dict[str, Any]]:
+    """Interior correction from the model's view of its own flat output: ``grid``
+    (flattener values of ``image``, edge-aligned nodes) renders a flat page at the model
+    input size; the model's grid on it minus the identity is the leftover warp. Its border
+    part (the Coons patch of the border residual) is dropped, so the outline stays, and
+    the rest moves the interior nodes: the new grid is ``grid`` sampled (bilinear over
+    its nodes) at the corrected positions. The record holds the mean interior move in
+    view pixels (``interior_px``)."""
+    from .edges import coons
+
+    view_h, view_w = dewarper.config.input_size
+    array = np.asarray(grid, dtype=np.float64)
+    dense = torch.from_numpy(grid_to_map(array, (view_h, view_w)).astype(np.float32))[None]
+    source = torch.from_numpy(np.ascontiguousarray(image)).permute(2, 0, 1)[None].float()
+    flat = F.grid_sample(source, dense, mode="bilinear", padding_mode="border", align_corners=False)
+    view = flat[0].permute(1, 2, 0).clamp(0, 255).round().to(torch.uint8).numpy()
+    raw = predict_grid(dewarper, np.ascontiguousarray(view))
+    local = np.asarray(
+        _flattener_values(raw, dewarper.config.grid_convention, (view_h, view_w)), np.float64
+    )
+    rows, cols = array.shape[:2]
+    ys, xs = np.meshgrid(np.linspace(-1, 1, rows), np.linspace(-1, 1, cols), indexing="ij")
+    identity = np.stack([xs, ys], axis=-1)
+    residual = local - identity
+    residual -= coons(residual[0], residual[-1], residual[:, 0], residual[:, -1])
+    positions = torch.from_numpy((identity + residual).astype(np.float32))[None]
+    nodes = torch.from_numpy(array.astype(np.float32)).permute(2, 0, 1)[None]
+    refined = F.grid_sample(nodes, positions, mode="bilinear", padding_mode="border",
+                            align_corners=True)  # fmt: skip
+    scale = np.array([view_w, view_h]) / 2.0
+    record = {"interior_px": round(float(np.abs(residual * scale).mean()), 3)}
+    return refined[0].permute(1, 2, 0).numpy().astype(np.float64), record
+
+
 RECT_MARGINS = (0.01, 0.03)  # per pass, AADD's DIR300 expansion ratios; the last repeats
 
 
@@ -795,13 +835,14 @@ def rerun_grid(
     perspective: bool = False,
     snap: bool = False,
     rect: bool = False,
+    refine: bool = False,
 ) -> tuple[NDArray[np.float64], list[dict[str, Any]]]:
     """Grid of flattener values of ``image`` after the whole-image prediction and
     ``rerun`` passes, crop passes (``crop_pass``) or with ``perspective`` perspective
     passes (``homography_pass``), with one record per pass (``pass`` from 1); with
     ``snap`` its border then moves onto the page edge (``edges.snap_border``, recorded as
     a last entry with ``snap``)."""
-    rerun_record(rerun, deskew, perspective, snap, rect)
+    rerun_record(rerun, deskew, perspective, snap, rect, refine)
     grid = _flattener_values(
         predict_grid(dewarper, image), dewarper.config.grid_convention, image.shape[:2]
     )
@@ -815,6 +856,9 @@ def rerun_grid(
         else:
             grid, record = crop_pass(dewarper, image, grid, deskew)
         passes.append({"pass": number, **record})
+    if refine:
+        grid, record = refine_pass(dewarper, image, grid)
+        passes.append({"refine": record})
     if snap:
         from .edges import snap_border
 
@@ -889,6 +933,7 @@ def rectify(
     perspective: bool = False,
     snap: bool = False,
     rect: bool = False,
+    refine: bool = False,
 ) -> RenderResult:
     """Predict and render through ``flattener.render`` and its checks.
 
@@ -926,7 +971,7 @@ def rectify(
         )
     check_quantize(quantize)
     inset_info = inset_record(inset)
-    rerun_info = rerun_record(rerun, deskew, perspective, snap, rect)
+    rerun_info = rerun_record(rerun, deskew, perspective, snap, rect, refine)
     _check_image(image)
     size = tuple(image.shape[:2]) if output_size is None else tuple(output_size)
     convention = dewarper.config.grid_convention
@@ -948,11 +993,13 @@ def rectify(
         metadata["timings"]["total"] = time.perf_counter() - started
         result = _handle_failure(error, checked_config, image=None, metadata=metadata)
     else:
-        if rerun == 0 and not snap:
+        if rerun == 0 and not snap and not refine:
             grid = predict_grid(dewarper, image)
             backward_map = dense_backward_map(grid, convention, size, image.shape[:2], inset)
         else:
-            grid, crops = rerun_grid(dewarper, image, rerun, deskew, perspective, snap, rect)
+            grid, crops = rerun_grid(
+                dewarper, image, rerun, deskew, perspective, snap, rect, refine
+            )
             backward_map = dense_backward_map(
                 grid, convention, size, image.shape[:2], inset, flattener_values=True
             )
@@ -1116,6 +1163,7 @@ def prediction_evidence(
     perspective: bool = False,
     snap: bool = False,
     rect: bool = False,
+    refine: bool = False,
 ) -> dict[str, Any]:
     """The evidence block of a prediction record, with its output quantization, inset,
     rerun settings and pipeline."""
@@ -1213,6 +1261,7 @@ def rectify_batch(
     perspective: bool = False,
     snap: bool = False,
     rect: bool = False,
+    refine: bool = False,
 ) -> dict[str, Any]:
     """Rectify ``inputs`` into ``output_dir`` and record every item in ``predictions.json``.
 
@@ -1252,7 +1301,7 @@ def rectify_batch(
         )
     else:
         inset_info = inset_record(inset)
-        rerun_info = rerun_record(rerun, deskew, perspective, snap, rect)
+        rerun_info = rerun_record(rerun, deskew, perspective, snap, rect, refine)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     report_path = output_dir / "predictions.json"
@@ -1306,6 +1355,7 @@ def rectify_batch(
                 perspective=perspective,
                 snap=snap,
                 rect=rect,
+                refine=refine,
             )
 
     report = {
@@ -1368,6 +1418,7 @@ def rectify_docunet(
     deskew: bool = False,
     snap: bool = False,
     rect: bool = False,
+    refine: bool = False,
 ) -> dict[str, Any]:
     """Rectify every ``{k}_{m} copy.png`` into ``{k}_{m}.png`` at the crop's own size.
 
@@ -1386,6 +1437,7 @@ def rectify_docunet(
         deskew=deskew,
         snap=snap,
         rect=rect,
+        refine=refine,
     )
 
 
@@ -1443,6 +1495,9 @@ def main(argv: list[str] | None = None) -> int:
     rect_help = "with --rerun: turned tight-crop passes (rect_pass, margins RECT_MARGINS)"
     single.add_argument("--rect", action="store_true", help=rect_help)
     batch.add_argument("--rect", action="store_true", help=rect_help)
+    refine_help = "an interior pass on the flat output that keeps the outline (refine_pass)"
+    single.add_argument("--refine", action="store_true", help=refine_help)
+    batch.add_argument("--refine", action="store_true", help=refine_help)
     args = parser.parse_args(argv)
     if args.deskew and args.rerun == 0:
         parser.error("--deskew needs --rerun 1 or more")
@@ -1461,6 +1516,7 @@ def main(argv: list[str] | None = None) -> int:
             deskew=args.deskew,
             snap=args.snap_border,
             rect=args.rect,
+            refine=args.refine,
         )
         output = Path(args.output)
         removed = False
@@ -1477,7 +1533,9 @@ def main(argv: list[str] | None = None) -> int:
             "forced": bool(result.metadata.get("forced_render")),
             "quantize": args.quantize,
             "inset": inset_record(args.inset),
-            "rerun": rerun_record(args.rerun, args.deskew, snap=args.snap_border, rect=args.rect),
+            "rerun": rerun_record(
+                args.rerun, args.deskew, snap=args.snap_border, rect=args.rect, refine=args.refine
+            ),
             "crops": result.metadata["dewarp"]["crops"],
             "evidence": prediction_evidence(
                 dewarper,
@@ -1487,6 +1545,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.deskew,
                 snap=args.snap_border,
                 rect=args.rect,
+                refine=args.refine,
             ),
         }
         print(json.dumps(summary))
@@ -1503,6 +1562,7 @@ def main(argv: list[str] | None = None) -> int:
         deskew=args.deskew,
         snap=args.snap_border,
         rect=args.rect,
+        refine=args.refine,
     )
     print(json.dumps(report["counts"]))
     return 0 if report["counts"]["failed"] == 0 else EXIT_FAILED

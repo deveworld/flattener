@@ -197,6 +197,7 @@ def predict_dir300(
     perspective: bool = False,
     snap: bool = False,
     rect: bool = False,
+    refine: bool = False,
 ) -> dict[str, Any]:
     """Rectify ``dist/{k}.png`` into ``output_dir/{k}.png`` at the photo's own size.
 
@@ -239,6 +240,7 @@ def predict_dir300(
         perspective=perspective,
         snap=snap,
         rect=rect,
+        refine=refine,
     )
 
 
