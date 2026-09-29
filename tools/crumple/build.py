@@ -2,7 +2,8 @@
 
 The build spec (``flattener-crumple-build-1``, see ``examples/dewarp``) names a dewarp data
 spec (``dewarp_spec``; ``converted`` or ``syntheticdoc_compact`` release sources), the
-counts per split, the photo size and a background folder. Each item flattens one
+counts per split, the photo size, a background folder and optional ``modes`` weights of
+``render.render`` modes (default all ``crumple``). Each item flattens one
 SyntheticDoc render through its ground truth into a page texture (the aspect from the
 grid's arc lengths), crumples and photographs it (``render.render``) on a CC0 or
 procedural background, and writes ``files/<split>/<id>.jpg`` and ``<id>.bm.npy`` (the
@@ -109,8 +110,12 @@ def run_chunk(task: dict[str, Any]) -> dict[str, Any]:
                 background = bank.draw(rng, out_hw)
             else:
                 background = procedural_background(rng, out_hw)
+            modes = settings.get("modes") or {"crumple": 1.0}
+            names = sorted(modes)
+            weights = np.array([modes[name] for name in names], dtype=np.float64)
+            mode = names[int(rng.choice(len(names), p=weights / weights.sum()))]
             photo, forward = render.render(
-                texture, rng, out_hw, np.clip(background, 0, 255).astype(np.uint8)
+                texture, rng, out_hw, np.clip(background, 0, 255).astype(np.uint8), mode
             )
         except (OSError, ValueError, RuntimeError):
             skipped += 1
@@ -143,6 +148,7 @@ def run_chunk(task: dict[str, Any]) -> dict[str, Any]:
                 "backward_map_sha256": hashlib.sha256(map_bytes).hexdigest(),
                 "backward_map_bytes": len(map_bytes),
                 "texture_sample_id": record["sample_id"],
+                "mode": mode,
             }
         )
     return {"key": task["key"], "rows": rows, "skipped": skipped}
@@ -179,7 +185,7 @@ def build(spec_path: Path, output: Path, *, workers: int, limit: int | None) -> 
         picks = rng.choice(len(records), size=count, replace=count > len(records))
         items = [records[int(i)] for i in picks]
         settings = {"name": spec["name"], "split": split, "photo_hw": spec["photo_hw"],
-                    "background_dir": background_dir}  # fmt: skip
+                    "background_dir": background_dir, "modes": spec.get("modes")}  # fmt: skip
         for start in range(0, count, spec.get("chunk", 200)):
             stop = min(count, start + spec.get("chunk", 200))
             tasks.append({"key": f"{split}-{start:07d}", "settings": settings,

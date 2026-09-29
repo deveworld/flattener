@@ -29,6 +29,7 @@ from numpy.typing import NDArray
 
 MAP_HW = (177, 121)
 MAX_TILT_DEG = 32.0
+CURVE_TILT_DEG = 45.0
 OVERSAMPLE = 2.2
 
 
@@ -50,10 +51,33 @@ def _creases(rng: np.random.Generator, aspect: float) -> list[tuple]:
 
 
 def height_field(
-    rng: np.random.Generator, x: torch.Tensor, y: torch.Tensor, aspect: float
+    rng: np.random.Generator,
+    x: torch.Tensor,
+    y: torch.Tensor,
+    aspect: float,
+    mode: str = "crumple",
 ) -> torch.Tensor:
-    """Heights (page-width units) at page points ``x`` in [0, 1], ``y`` in [0, aspect]."""
+    """Heights (page-width units) at page points ``x`` in [0, 1], ``y`` in [0, aspect]:
+    ``crumple`` sums creases, folds, curl and waves; ``curve`` is a smooth curl (a page
+    lying on a book or curling off a table) with at most one soft fold."""
     z = torch.zeros_like(x)
+    if mode == "curve":
+        axis = rng.uniform(0, math.pi)
+        along = (x - 0.5) * math.cos(axis) + (y - aspect / 2) * math.sin(axis)
+        z = (
+            z
+            + float(rng.uniform(-0.3, 0.3)) * along**2
+            + float(rng.uniform(-0.08, 0.08)) * along**3
+        )
+        if rng.random() < 0.4:
+            center = rng.uniform([0.3, 0.3 * aspect], [0.7, 0.7 * aspect])
+            direction = rng.choice([0.0, math.pi / 2]) + rng.normal(0, 0.1)
+            across = -(x - float(center[0])) * math.sin(direction) + (
+                y - float(center[1])
+            ) * math.cos(direction)
+            width = rng.uniform(0.01, 0.05)
+            z = z + float(rng.uniform(-0.12, 0.12)) * (torch.sqrt(across**2 + width**2) - width)
+        return z - z.mean()
     for center, angle, half, slope, width in _creases(rng, aspect):
         direction = torch.tensor([math.cos(angle), math.sin(angle)], dtype=x.dtype)
         dx, dy = x - float(center[0]), y - float(center[1])
@@ -85,8 +109,11 @@ def render(
     rng: np.random.Generator,
     out_hw: tuple[int, int],
     background: NDArray[np.uint8] | None = None,
+    mode: str = "crumple",
 ) -> tuple[NDArray[np.uint8], NDArray[np.float32]]:
-    """(photo, forward map) of ``texture`` (the flat page) crumpled and photographed."""
+    """(photo, forward map) of ``texture`` (the flat page) crumpled and photographed.
+    ``mode`` ``curve`` is a gently curved page under a steep, close camera (tilt up to
+    ``CURVE_TILT_DEG``). A page that folds over itself in the photo raises ValueError."""
     out_h, out_w = out_hw
     tex_h, tex_w = texture.shape[:2]
     aspect = tex_h / tex_w
@@ -98,17 +125,24 @@ def render(
     xs = torch.linspace(0, 1, cols)
     ys = torch.linspace(0, aspect, rows)
     y, x = torch.meshgrid(ys, xs, indexing="ij")
-    z = height_field(rng, x, y, aspect)
+    z = height_field(rng, x, y, aspect, mode)
+    max_tilt = CURVE_TILT_DEG if mode == "curve" else MAX_TILT_DEG
     rotation = _rotation(
-        math.radians(rng.uniform(0, MAX_TILT_DEG)), rng.uniform(0, math.pi),
+        math.radians(rng.uniform(0, max_tilt)), rng.uniform(0, math.pi),
         math.radians(rng.normal(0, 8)),
     )  # fmt: skip
     points = torch.stack([x - 0.5, y - aspect / 2, z], dim=-1) @ rotation.T
-    distance = rng.uniform(1.4, 3.0)
+    distance = rng.uniform(0.9, 1.8) if mode == "curve" else rng.uniform(1.4, 3.0)
     focal = fill * min(out_w, out_h / aspect) * distance  # page width -> fill of the frame
     depth = points[..., 2] + distance
+    if float(depth.min()) <= 0.2:
+        raise ValueError("page reaches the camera")
     px = focal * points[..., 0] / depth
     py = focal * points[..., 1] / depth
+    jx_y, jx_x = torch.gradient(px)
+    jy_y, jy_x = torch.gradient(py)
+    if float((jx_x * jy_y - jx_y * jy_x).min()) <= 0:
+        raise ValueError("page folds over itself in the photo")
     # Fit the page into the frame (shrink if needed) at a random place with a margin.
     margin = rng.uniform(0.02, 0.1) * min(out_w, out_h)
     low = torch.stack([px.min(), py.min()])
