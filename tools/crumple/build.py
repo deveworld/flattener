@@ -64,7 +64,7 @@ def _bank(directory: str | None) -> BackgroundBank | None:
     return BackgroundBank(directory, license_ok=release_license_ok)
 
 
-def flat_texture(record: dict[str, Any], long_side: int = 1024) -> np.ndarray:
+def flat_texture(record: dict[str, Any], long_side: int = 1024, device: str = "cpu") -> np.ndarray:
     """The render flattened through its ground truth, sized by the grid's arc lengths."""
     import torch
     import torch.nn.functional as F
@@ -85,11 +85,11 @@ def flat_texture(record: dict[str, Any], long_side: int = 1024) -> np.ndarray:
         if aspect >= 1
         else (round(long_side * aspect), long_side)
     )
-    dense = torch.from_numpy(np.asarray(values, np.float32)).permute(2, 0, 1)[None]
+    dense = torch.from_numpy(np.asarray(values, np.float32)).to(device).permute(2, 0, 1)[None]
     dense = F.interpolate(dense, size=size, mode="bilinear", align_corners=False)
-    source = torch.from_numpy(rgb).permute(2, 0, 1)[None].float()
+    source = torch.from_numpy(rgb).to(device).permute(2, 0, 1)[None].float()
     flat = F.grid_sample(source, dense.permute(0, 2, 3, 1), align_corners=False, mode="bilinear")
-    return flat[0].permute(1, 2, 0).clamp(0, 255).round().byte().numpy()
+    return flat[0].permute(1, 2, 0).clamp(0, 255).round().byte().cpu().numpy()
 
 
 def run_chunk(task: dict[str, Any]) -> dict[str, Any]:
@@ -104,7 +104,7 @@ def run_chunk(task: dict[str, Any]) -> dict[str, Any]:
     for index, record in zip(task["indices"], task["items"], strict=True):
         rng = np.random.default_rng(_seed(settings["name"], settings["split"], index))
         try:
-            texture = flat_texture(record)
+            texture = flat_texture(record, device=settings["device"])
             bank = _bank(settings["background_dir"])
             if bank is not None and len(bank) and rng.random() < 0.75:
                 background = bank.draw(rng, out_hw)
@@ -115,8 +115,9 @@ def run_chunk(task: dict[str, Any]) -> dict[str, Any]:
             weights = np.array([modes[name] for name in names], dtype=np.float64)
             mode = names[int(rng.choice(len(names), p=weights / weights.sum()))]
             photo, forward = render.render(
-                texture, rng, out_hw, np.clip(background, 0, 255).astype(np.uint8), mode
-            )
+                texture, rng, out_hw, np.clip(background, 0, 255).astype(np.uint8), mode,
+                settings["device"],
+            )  # fmt: skip
         except (OSError, ValueError, RuntimeError):
             skipped += 1
             continue
@@ -154,7 +155,9 @@ def run_chunk(task: dict[str, Any]) -> dict[str, Any]:
     return {"key": task["key"], "rows": rows, "skipped": skipped}
 
 
-def build(spec_path: Path, output: Path, *, workers: int, limit: int | None) -> dict[str, Any]:
+def build(
+    spec_path: Path, output: Path, *, workers: int, limit: int | None, device: str = "cpu"
+) -> dict[str, Any]:
     spec = json.loads(spec_path.read_text(encoding="utf-8"))
     if spec.get("schema") != BUILD_SCHEMA:
         raise SystemExit(f"error: {spec_path}: schema must be {BUILD_SCHEMA}")
@@ -185,7 +188,8 @@ def build(spec_path: Path, output: Path, *, workers: int, limit: int | None) -> 
         picks = rng.choice(len(records), size=count, replace=count > len(records))
         items = [records[int(i)] for i in picks]
         settings = {"name": spec["name"], "split": split, "photo_hw": spec["photo_hw"],
-                    "background_dir": background_dir, "modes": spec.get("modes")}  # fmt: skip
+                    "background_dir": background_dir, "modes": spec.get("modes"),
+                    "device": device}  # fmt: skip
         for start in range(0, count, spec.get("chunk", 200)):
             stop = min(count, start + spec.get("chunk", 200))
             tasks.append({"key": f"{split}-{start:07d}", "settings": settings,
@@ -234,9 +238,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output", required=True)
     parser.add_argument("--workers", type=int, default=2)
     parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument("--device", default="cpu", help="torch device for the rendering")
     args = parser.parse_args(argv)
     summary = build(args.spec, Path(expand_path(args.output)), workers=args.workers,
-                    limit=args.limit)  # fmt: skip
+                    limit=args.limit, device=args.device)  # fmt: skip
     print(json.dumps({"records": summary["records"], "skipped": summary["skipped"]}))
     return 0
 

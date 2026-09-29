@@ -79,7 +79,7 @@ def height_field(
             z = z + float(rng.uniform(-0.12, 0.12)) * (torch.sqrt(across**2 + width**2) - width)
         return z - z.mean()
     for center, angle, half, slope, width in _creases(rng, aspect):
-        direction = torch.tensor([math.cos(angle), math.sin(angle)], dtype=x.dtype)
+        direction = (math.cos(angle), math.sin(angle))
         dx, dy = x - float(center[0]), y - float(center[1])
         along = dx * direction[0] + dy * direction[1]
         across = -dx * direction[1] + dy * direction[0]
@@ -110,10 +110,12 @@ def render(
     out_hw: tuple[int, int],
     background: NDArray[np.uint8] | None = None,
     mode: str = "crumple",
+    device: str = "cpu",
 ) -> tuple[NDArray[np.uint8], NDArray[np.float32]]:
     """(photo, forward map) of ``texture`` (the flat page) crumpled and photographed.
     ``mode`` ``curve`` is a gently curved page under a steep, close camera (tilt up to
-    ``CURVE_TILT_DEG``). A page that folds over itself in the photo raises ValueError."""
+    ``CURVE_TILT_DEG``). A page that folds over itself in the photo raises ValueError.
+    ``device`` runs the tensor work there (the draws stay on the CPU generator)."""
     out_h, out_w = out_hw
     tex_h, tex_w = texture.shape[:2]
     aspect = tex_h / tex_w
@@ -122,8 +124,8 @@ def render(
     page_px = fill * min(out_w, out_h / aspect)
     cols = int(page_px * OVERSAMPLE)
     rows = int(cols * aspect)
-    xs = torch.linspace(0, 1, cols)
-    ys = torch.linspace(0, aspect, rows)
+    xs = torch.linspace(0, 1, cols, device=device)
+    ys = torch.linspace(0, aspect, rows, device=device)
     y, x = torch.meshgrid(ys, xs, indexing="ij")
     z = height_field(rng, x, y, aspect, mode)
     max_tilt = CURVE_TILT_DEG if mode == "curve" else MAX_TILT_DEG
@@ -131,6 +133,7 @@ def render(
         math.radians(rng.uniform(0, max_tilt)), rng.uniform(0, math.pi),
         math.radians(rng.normal(0, 8)),
     )  # fmt: skip
+    rotation = rotation.to(device)
     points = torch.stack([x - 0.5, y - aspect / 2, z], dim=-1) @ rotation.T
     distance = rng.uniform(0.9, 1.8) if mode == "curve" else rng.uniform(1.4, 3.0)
     focal = fill * min(out_w, out_h / aspect) * distance  # page width -> fill of the frame
@@ -147,10 +150,10 @@ def render(
     margin = rng.uniform(0.02, 0.1) * min(out_w, out_h)
     low = torch.stack([px.min(), py.min()])
     span = torch.stack([px.max(), py.max()]) - low
-    room = torch.tensor([out_w - 2 * margin, out_h - 2 * margin])
+    room = torch.tensor([out_w - 2 * margin, out_h - 2 * margin], device=device)
     scale = float(torch.clamp((room / span).min(), max=1.0))
     px, py = (px - low[0]) * scale, (py - low[1]) * scale
-    slack = (room - span * scale).clamp(min=0).numpy()
+    slack = (room - span * scale).clamp(min=0).cpu().numpy()
     px = px + margin + rng.uniform(0, slack[0])
     py = py + margin + rng.uniform(0, slack[1])
     # Shading from the surface normal, camera-side light.
@@ -158,19 +161,20 @@ def render(
     normal = torch.stack([gz_x, gz_y, -torch.ones_like(z)], dim=-1) @ rotation.T
     normal = normal / normal.norm(dim=-1, keepdim=True)
     light = np.array([rng.normal(0, 0.5), rng.normal(0, 0.5), -1.0])
-    light = torch.tensor(light / np.linalg.norm(light), dtype=torch.float32)
+    light = torch.tensor(light / np.linalg.norm(light), dtype=torch.float32, device=device)
     lambert = (normal * light).sum(-1).clamp(min=0)
     ambient = rng.uniform(0.35, 0.7)
     shade = ambient + (1 - ambient) * lambert / max(float(lambert.max()), 1e-6)
-    tex = torch.from_numpy(np.ascontiguousarray(texture)).permute(2, 0, 1)[None].float() / 255
+    tex = torch.from_numpy(np.ascontiguousarray(texture)).to(device).permute(2, 0, 1)[None]
+    tex = tex.float() / 255
     sample_grid = torch.stack([x * 2 - 1, y / aspect * 2 - 1], dim=-1)[None]
     colour = F.grid_sample(tex, sample_grid, align_corners=True, mode="bilinear")[0]
     colour = (colour * shade[None]).permute(1, 2, 0).reshape(-1, 3)
     # Bilinear splat into the photo.
     fx, fy = px.reshape(-1) - 0.5, py.reshape(-1) - 0.5
     x0, y0 = torch.floor(fx), torch.floor(fy)
-    acc = torch.zeros(out_h * out_w, 3)
-    weight = torch.zeros(out_h * out_w)
+    acc = torch.zeros(out_h * out_w, 3, device=device)
+    weight = torch.zeros(out_h * out_w, device=device)
     for ox in (0, 1):
         for oy in (0, 1):
             xi, yi = x0 + ox, y0 + oy
@@ -184,16 +188,17 @@ def render(
     if background is None:
         base = rng.uniform(0.1, 0.9, 3)
         background = np.full((out_h, out_w, 3), base * 255, np.uint8)
-    back = torch.from_numpy(np.ascontiguousarray(background)).reshape(-1, 3).float() / 255
+    back = torch.from_numpy(np.ascontiguousarray(background)).to(device).reshape(-1, 3)
+    back = back.float() / 255
     photo = (photo * covered + back * (1 - covered)).reshape(out_h, out_w, 3)
-    image = (photo.clamp(0, 1) * 255 + 0.5).to(torch.uint8).numpy()
+    image = (photo.clamp(0, 1) * 255 + 0.5).to(torch.uint8).cpu().numpy()
     # Forward map at the center-aligned map grid: exact projection of those page points.
     map_h, map_w = MAP_HW
-    grid_x = (torch.arange(map_w) + 0.5) / map_w
-    grid_y = (torch.arange(map_h) + 0.5) / map_h * aspect
+    grid_x = (torch.arange(map_w, device=device) + 0.5) / map_w
+    grid_y = (torch.arange(map_h, device=device) + 0.5) / map_h * aspect
     gy, gx = torch.meshgrid(grid_y, grid_x, indexing="ij")
     at = torch.stack([gx * 2 - 1, gy / aspect * 2 - 1], dim=-1)[None]
     fields = torch.stack([px, py], dim=0)[None]
     mapped = F.grid_sample(fields, at, align_corners=True, mode="bilinear")[0].permute(1, 2, 0)
     forward = torch.stack([mapped[..., 0] / out_w * 2 - 1, mapped[..., 1] / out_h * 2 - 1], -1)
-    return image, forward.numpy().astype(np.float32)
+    return image, forward.cpu().numpy().astype(np.float32)
