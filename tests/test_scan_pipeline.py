@@ -334,6 +334,11 @@ def test_a_zoomed_piece_of_the_page_returns_the_original(monkeypatch):
     result = scanner.scan(image)
     assert result.reason_code == "page_cut_off" and result.reasons[-1].detail["check"] == "close_up"
     assert result.metadata["localization"]["method"] == "fills_frame"
+    # A page running out of the photo: over 5 % of the output would lie outside it.
+    cut = Page((60, 125), (150, 190), 7.0)
+    scanner, _ = _scanner(cut)
+    result = scanner.scan(ramp_scene(SIZE, cut))
+    assert result.reason_code == "page_cut_off" and result.reasons[-1].detail["check"] == "outside"
 
 
 def test_without_a_gate_the_outline_is_used_unverified():
