@@ -612,9 +612,10 @@ def _draw_neighbor(
     out_hw: tuple[int, int],
     config: CompositeConfig,
     rng: np.random.Generator,
-) -> NDArray | None:
+) -> tuple[NDArray, NDArray] | None:
     """Draw the facing page along the left or right edge of the placed page (corners
-    ``placed``, output px) onto ``surface``; return the fold as two output points."""
+    ``placed``, output px) onto ``surface``; return the fold as two output points and the
+    facing page's outline (four output points)."""
     image, grid, valid = neighbor
     if not valid.all():
         return None
@@ -643,7 +644,7 @@ def _draw_neighbor(
         return None
     box = polygon_box(target, out_hw)
     if box is None:
-        return fold
+        return fold, target
     transform = corner_homography(np.array(source), target)
     step = math.sqrt(abs(polygon_area(np.array(source))) / abs(polygon_area(target)))
     pixels = warp_homography(image, transform, out_hw, step=step, box=box)
@@ -652,7 +653,7 @@ def _draw_neighbor(
     region = surface[y0:y1, x0:x1]
     gain = np.float32(rng.uniform(*config.page_gain))
     region += alpha * (pixels.astype(np.float32) * gain - region)
-    return fold
+    return fold, target
 
 
 def _fold_shade(
@@ -703,7 +704,8 @@ def compose(
     fold = None
     if neighbor is not None:
         corners = apply_homography(transform, _corners(nodes_px))
-        fold = _draw_neighbor(surface, neighbor, corners, out_hw, config, rng)
+        drawn = _draw_neighbor(surface, neighbor, corners, out_hw, config, rng)
+        fold = None if drawn is None else drawn[0]
     alpha = np.zeros(out_hw, dtype=np.float32)
     if box is not None:
         left, top, right, bottom = box
