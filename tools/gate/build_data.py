@@ -13,9 +13,6 @@ The build spec (``flattener-gate-build-1``, see ``examples/gate``) names a scene
   folder's ``manifest.json``, or one written by ``smartdoc_frames.py``), their page quads
   as masks. ``families`` maps each split to the document numbers it takes
   (``datasheet004`` is number 4); other captures are left out.
-* ``labeled_photos``: own photos under ``root`` with the page polygons of
-  ``real_labels.py manifest`` (EXIF-applied pixels; none for a photo without page), in
-  the splits written there.
 
 Output: ``files/<source>/<split>/<id>.jpg`` (scene) and ``<id>.png`` (mask, 255 = page),
 ``parts/`` with one JSONL per finished chunk (an interrupted build resumes from them when
@@ -43,7 +40,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from PIL import Image, ImageDraw, ImageOps
+from PIL import Image, ImageDraw
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -82,10 +79,7 @@ from flattener.dewarp.model import sha256_file  # noqa: E402
 
 BUILD_SCHEMA = "flattener-gate-build-1"
 DATA_SCHEMA = "flattener-gate-data-1"
-KINDS = (
-    "syntheticdoc_scene", "documents_scene", "negative_scene", "smartdoc_capture",
-    "labeled_photos",
-)  # fmt: skip
+KINDS = ("syntheticdoc_scene", "documents_scene", "negative_scene", "smartdoc_capture")
 SOURCE_KEYS = {
     "name", "kind", "track", "license", "count", "dewarp_spec", "part", "root", "families",
     "document_prob", "form_prob", "sparse_prob",
@@ -179,14 +173,6 @@ def plan_source(spec: dict[str, Any], source: dict[str, Any], limit: int | None)
             ]  # fmt: skip
             plan[split] = _evenly(rows, cap(split))
         info["root_manifest_sha256"] = sha256_file(root / "manifest.json")
-    elif kind == "labeled_photos":
-        root = Path(spec["base_dir"], expand_path(source["root"])).resolve()
-        manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
-        for row in manifest["photos"]:
-            plan.setdefault(row["split"], []).append({**row, "path": str(root / row["path"])})
-        for split in plan:
-            plan[split] = _evenly(plan[split], cap(split))
-        info["root_manifest_sha256"] = sha256_file(root / "manifest.json")
     else:
         for split, count in counts.items():
             plan[split] = list(range(cap(split) or count))
@@ -236,21 +222,6 @@ def make_scene(kind: str, item: Any, rng: np.random.Generator, settings: dict[st
             "track": "release",
             "origin": {k: item[k] for k in ("template", "background")}
             | {"file": Path(item["path"]).name},
-        }
-        return np.asarray(rgb), np.asarray(mask) > 127, fields
-    if kind == "labeled_photos":
-        with Image.open(item["path"]) as image:
-            rgb = ImageOps.exif_transpose(image).convert("RGB")
-        scale = config.long_side / max(rgb.size)
-        size = (round(rgb.size[0] * scale), round(rgb.size[1] * scale))
-        rgb = rgb.resize(size, Image.Resampling.LANCZOS)
-        mask = Image.new("L", size, 0)
-        for polygon in item["polygons"]:
-            ImageDraw.Draw(mask).polygon([(x * scale, y * scale) for x, y in polygon], fill=255)
-        fields = {
-            "license_class": "own",
-            "track": settings["track"],
-            "origin": {"id": item["id"], "group": item["group"]},
         }
         return np.asarray(rgb), np.asarray(mask) > 127, fields
     bank = _bank(settings["background_dir"])
