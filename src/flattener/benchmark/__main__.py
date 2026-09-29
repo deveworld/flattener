@@ -60,7 +60,7 @@ def parse_rerun(text: str) -> int:
     return parse(text)
 
 
-def _add_rerun(parser: argparse.ArgumentParser) -> None:
+def _add_rerun(parser: argparse.ArgumentParser, *, perspective: bool = False) -> None:
     parser.add_argument(
         "--rerun",
         type=parse_rerun,
@@ -73,6 +73,23 @@ def _add_rerun(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="with --rerun: turn each crop upright (flattener.dewarp.predict --deskew)",
     )
+    if perspective:
+        parser.add_argument(
+            "--rect",
+            action="store_true",
+            help="with --rerun: turned tight-crop passes (flattener.dewarp.predict --rect)",
+        )
+        parser.add_argument(
+            "--snap-border",
+            action="store_true",
+            help="snap the final border to the photo's page edges (flattener.dewarp.edges)",
+        )
+        parser.add_argument(
+            "--perspective",
+            action="store_true",
+            help="with --rerun: perspective passes, the page taken to an upright rectangle "
+            "by the homography of its corners (flattener.dewarp.predict --perspective)",
+        )
 
 
 def _add_common(parser: argparse.ArgumentParser, *, predictions: bool = True) -> None:
@@ -303,7 +320,7 @@ def build_parser() -> argparse.ArgumentParser:
         "published outputs were saved); default %(default)s",
     )
     rectify300.add_argument("--overwrite", action="store_true", help="predict every image again")
-    _add_rerun(rectify300)
+    _add_rerun(rectify300, perspective=True)
     rectify300.add_argument(
         "--no-verify-inputs",
         action="store_true",
@@ -456,7 +473,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="move the outline inward before sampling (flattener.dewarp.predict --inset): "
         "a preset name, E or EX,EY; default 0",
     )
-    _add_rerun(rectify)
+    _add_rerun(rectify, perspective=True)
     rectify.add_argument("--no-verify-inputs", action="store_true", help="accept other image bytes")
     rectify.add_argument("--quiet", action="store_true", help="no per-image progress")
 
@@ -518,6 +535,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if getattr(args, "deskew", False) and args.rerun == 0:
         parser.error("--deskew needs --rerun 1 or more")
+    kinds = [getattr(args, name, False) for name in ("deskew", "perspective", "rect")]
+    if any(kinds) and (args.rerun == 0 or sum(kinds) > 1):
+        parser.error("--deskew, --perspective and --rect need --rerun 1 or more, one at a time")
     if args.command == "build-siftflow":
         build = siftflow.build_siftflow(
             args.siftflow_source, cache_dir=args.cache_dir, verbose=args.verbose
@@ -571,6 +591,9 @@ def main(argv: list[str] | None = None) -> int:
             inset=args.inset,
             rerun=args.rerun,
             deskew=args.deskew,
+            perspective=args.perspective,
+            snap=args.snap_border,
+            rect=args.rect,
         )
         print(json.dumps(record["counts"]))
         return 0
@@ -656,6 +679,9 @@ def main(argv: list[str] | None = None) -> int:
             quantize=args.quantize,
             rerun=args.rerun,
             deskew=args.deskew,
+            perspective=args.perspective,
+            snap=args.snap_border,
+            rect=args.rect,
         )
         print(json.dumps(record["counts"]))
         return 0 if record["counts"]["failed"] == 0 else 1

@@ -349,6 +349,9 @@ def predict_uvdoc(
     inset: Any = None,
     rerun: int = 0,
     deskew: bool = False,
+    perspective: bool = False,
+    snap: bool = False,
+    rect: bool = False,
 ) -> dict[str, Any]:
     """Rectify the 50 samples into ``output_dir/{uwp_texture,uwp_img}/{id}.png``.
 
@@ -359,8 +362,8 @@ def predict_uvdoc(
     Without ``overwrite`` an existing ``predictions.json`` stops the run. ``inset``
     (``flattener.dewarp.predict.resolve_inset``) moves the outline inward on the dense
     map of both outputs and of the checks; ``predictions.json`` records it. ``rerun``
-    crop passes (with ``deskew``) refine the grid on the photo
-    (``flattener.dewarp.predict.rerun_grid``) before both outputs and the checks;
+    crop passes (with ``deskew``; perspective passes with ``perspective``) refine the grid
+    on the photo (``flattener.dewarp.predict.rerun_grid``) before both outputs and the checks;
     ``predictions.json`` records the settings and each item its passes (``crops``).
     """
     from ..dewarp.predict import (
@@ -377,7 +380,7 @@ def predict_uvdoc(
     if record_path.exists() and not overwrite:
         raise FileExistsError(f"{record_path} exists; pass overwrite to predict again")
     inset_info = inset_record(inset)  # refuses an invalid inset before any work
-    rerun_info = rerun_record(rerun, deskew)  # and invalid rerun settings
+    rerun_info = rerun_record(rerun, deskew, perspective, snap, rect)  # and invalid settings
     photos = hash_folder(root, "img", verify=verify_inputs)
     textures = hash_folder(root, "warped_textures", verify=verify_inputs)
     convention = dewarper.config.grid_convention
@@ -385,7 +388,16 @@ def predict_uvdoc(
         "schema": PREDICTIONS_SCHEMA,
         "created_utc": utc_now(),
         "model": dewarper.info,
-        "evidence": prediction_evidence(dewarper, "truncate", inset, rerun, deskew),
+        "evidence": prediction_evidence(
+            dewarper,
+            "truncate",
+            inset,
+            rerun,
+            deskew,
+            perspective=perspective,
+            snap=snap,
+            rect=rect,
+        ),
         "inputs": "uvdoc_benchmark",
         "root": str(root),
         "inputs_verified": verify_inputs,
@@ -405,11 +417,11 @@ def predict_uvdoc(
         name = sample_name(sample)
         photo = load_rgb(root / "img" / name)
         texture = load_rgb(root / "warped_textures" / name)
-        if rerun:
-            grid, crops = rerun_grid(dewarper, photo, rerun, deskew)
+        if rerun or snap:
+            grid, crops = rerun_grid(dewarper, photo, rerun, deskew, perspective, snap, rect)
         else:
             grid, crops = predict_grid(dewarper, photo), []
-        values = {"flattener_values": rerun > 0}
+        values = {"flattener_values": rerun > 0 or snap}
         check = _check_status(texture, grid, convention, inset, **values)
         sources = {"uwp_texture": ("warped_textures", texture), "uwp_img": ("img", photo)}
         items = []

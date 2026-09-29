@@ -396,24 +396,42 @@ def _rerun_error(message: str) -> FlattenerError:
     return FlattenerError(Status.INPUT_ERROR, "invalid_config", message)
 
 
-def rerun_record(rerun: int = 0, deskew: bool = False) -> dict[str, Any]:
+def rerun_record(
+    rerun: int = 0,
+    deskew: bool = False,
+    perspective: bool = False,
+    snap: bool = False,
+    rect: bool = False,
+) -> dict[str, Any]:
     """How crop-and-rerun settings are recorded: ``passes``, ``deskew`` and the rules that
     apply (``margin`` with passes, ``max_angle_deg`` and ``min_agreement`` with deskew;
-    ``None`` otherwise). Refuses a negative or non-integer ``rerun`` and deskew without
-    passes."""
+    ``None`` otherwise), ``perspective: true`` for perspective passes
+    (``homography_pass``) and ``snap: true`` when the final border is snapped to the photo's
+    page edges (``edges.snap_border``); ``rect_margins`` for turned tight-crop passes
+    (``rect_pass``). Refuses a negative or non-integer ``rerun``, and deskew, perspective or
+    rect without passes or together (each pass is one kind)."""
     if isinstance(rerun, bool) or not isinstance(rerun, (int, np.integer)) or rerun < 0:
         raise _rerun_error(f"rerun must be an integer >= 0, got {rerun!r}")
-    if not isinstance(deskew, bool):
-        raise _rerun_error(f"deskew must be a bool, got {deskew!r}")
-    if deskew and rerun == 0:
-        raise _rerun_error("deskew needs rerun >= 1")
-    return {
+    if not all(isinstance(flag, bool) for flag in (deskew, perspective, snap, rect)):
+        raise _rerun_error(f"deskew and perspective must be bools, got {deskew!r}, {perspective!r}")
+    if (deskew or perspective or rect) and rerun == 0:
+        raise _rerun_error("deskew, perspective and rect need rerun >= 1")
+    if deskew + perspective + rect > 1:
+        raise _rerun_error("choose one pass kind: deskew, perspective or rect")
+    record = {
         "passes": int(rerun),
         "deskew": deskew,
         "margin": RERUN_MARGIN if rerun else None,
         "max_angle_deg": DESKEW_MAX_DEG if deskew else None,
         "min_agreement": DESKEW_MIN_AGREEMENT if deskew else None,
     }
+    if perspective:
+        record["perspective"] = True
+    if snap:
+        record["snap"] = True
+    if rect:
+        record["rect_margins"] = [RECT_MARGINS[min(i, len(RECT_MARGINS) - 1)] for i in range(rerun)]
+    return record
 
 
 def recorded_rerun(record: dict[str, Any] | None) -> dict[str, Any]:
@@ -655,19 +673,153 @@ def crop_pass(
     return composed, record
 
 
+def _clockwise_convex(quad: NDArray[np.float64]) -> bool:
+    edges = np.roll(quad, -1, axis=0) - quad
+    turns = (
+        edges[:, 0] * np.roll(edges, -1, axis=0)[:, 1]
+        - edges[:, 1] * np.roll(edges, -1, axis=0)[:, 0]
+    )
+    return bool((turns > 0).all())  # y points down: clockwise on screen
+
+
+def homography_pass(
+    dewarper: Dewarper, image: NDArray[np.uint8], grid: NDArray
+) -> tuple[NDArray[np.float64], dict[str, Any]]:
+    """One rerun pass on ``image`` from ``grid`` through a perspective view: the new grid in
+    flattener values of ``image`` and the pass record.
+
+    A homography takes the grid's four corner nodes (TL, TR, BR, BL, source pixels) to an
+    upright rectangle inside a view of the model input size, ``RERUN_MARGIN`` of the page
+    extent from the view edge on every side, so the model sees the page without the
+    camera's perspective. The view samples the source once (``composite.warp_homography``,
+    box-reduced first when it shrinks the source). The prediction is placed back node by
+    node through the inverse homography. A pass whose corners are not finite
+    (``non_finite_outline``) or not a clockwise convex quad (``not_convex``) keeps
+    ``grid``. The record holds ``corners`` (source pixels) and ``view_size`` and
+    ``skipped``."""
+    from .composite import apply_homography, corner_homography, polygon_area, warp_homography
+
+    height, width = image.shape[:2]
+    record: dict[str, Any] = {"corners": None, "view_size": None, "skipped": None}
+    points = _source_points(grid, (height, width))
+    corners = np.array([points[0, 0], points[0, -1], points[-1, -1], points[-1, 0]])
+    if not np.isfinite(corners).all():
+        record["skipped"] = "non_finite_outline"
+        return np.asarray(grid, dtype=np.float64), record
+    if not _clockwise_convex(corners):
+        record["skipped"] = "not_convex"
+        return np.asarray(grid, dtype=np.float64), record
+    view_h, view_w = dewarper.config.input_size
+    low, high = RERUN_MARGIN / (1 + 2 * RERUN_MARGIN), (1 + RERUN_MARGIN) / (1 + 2 * RERUN_MARGIN)
+    rectangle = np.array(
+        [[low * view_w, low * view_h], [high * view_w, low * view_h],
+         [high * view_w, high * view_h], [low * view_w, high * view_h]]
+    )  # fmt: skip
+    transform = corner_homography(corners, rectangle)
+    step = np.sqrt(abs(polygon_area(corners)) / abs(polygon_area(rectangle)))
+    view = warp_homography(
+        Image.fromarray(image), transform, (view_h, view_w), step=step, edge=True
+    )
+    raw = predict_grid(dewarper, np.ascontiguousarray(view))
+    local = _flattener_values(raw, dewarper.config.grid_convention, (view_h, view_w))
+    view_points = (np.asarray(local, dtype=np.float64) + 1.0) / 2.0 * np.array([view_w, view_h])
+    source = apply_homography(np.linalg.inv(transform), view_points)
+    record.update(corners=np.round(corners, 2).tolist(), view_size=[view_h, view_w])
+    return 2.0 * source / np.array([width, height], dtype=np.float64) - 1.0, record
+
+
+RECT_MARGINS = (0.01, 0.03)  # per pass, AADD's DIR300 expansion ratios; the last repeats
+
+
+def _min_area_rectangle(points: NDArray[np.float64]) -> NDArray[np.float64] | None:
+    """Corners (TL, TR, BR, BL on screen after turning upright) of the minimum-area
+    rectangle around ``points``, turned by at most 45 degrees either way."""
+    from ..scan.locate import min_area_rect_angle
+
+    angle = np.radians(min_area_rect_angle(points))
+    cos, sin = np.cos(angle), np.sin(angle)
+    axis_u, axis_v = np.array([cos, sin]), np.array([-sin, cos])
+    along, across = points @ axis_u, points @ axis_v
+    if np.ptp(along) < MIN_CROP_PIXELS or np.ptp(across) < MIN_CROP_PIXELS:
+        return None
+    return np.array(
+        [axis_u * a + axis_v * b for a, b in (
+            (along.min(), across.min()), (along.max(), across.min()),
+            (along.max(), across.max()), (along.min(), across.max()))]
+    )  # fmt: skip
+
+
+def rect_pass(
+    dewarper: Dewarper, image: NDArray[np.uint8], grid: NDArray, margin: float
+) -> tuple[NDArray[np.float64], dict[str, Any]]:
+    """One rerun pass through a turned, tight crop (AADD's axis-aligned preprocessing):
+    the minimum-area rectangle around the grid's outline, grown by ``margin`` of its size
+    per side, is turned upright and resized to the model input in one sampling
+    (``composite.warp_homography``); the prediction is placed back through the inverse
+    transform. The record holds ``rectangle`` (source pixels), ``margin`` and
+    ``skipped`` (``non_finite_outline`` or ``empty_crop``)."""
+    from .composite import apply_homography, corner_homography, polygon_area, warp_homography
+
+    height, width = image.shape[:2]
+    record: dict[str, Any] = {"rectangle": None, "margin": margin, "skipped": None}
+    points = outline_points(grid, (height, width))
+    if not np.isfinite(points).all():
+        record["skipped"] = "non_finite_outline"
+        return np.asarray(grid, dtype=np.float64), record
+    rectangle = _min_area_rectangle(points)
+    if rectangle is None:
+        record["skipped"] = "empty_crop"
+        return np.asarray(grid, dtype=np.float64), record
+    center = rectangle.mean(axis=0)
+    rectangle = center + (rectangle - center) * (1.0 + 2.0 * margin)
+    view_h, view_w = dewarper.config.input_size
+    frame = np.array([[0, 0], [view_w, 0], [view_w, view_h], [0, view_h]], dtype=np.float64)
+    transform = corner_homography(rectangle, frame)
+    step = np.sqrt(abs(polygon_area(rectangle)) / abs(polygon_area(frame)))
+    view = warp_homography(
+        Image.fromarray(image), transform, (view_h, view_w), step=step, edge=True
+    )
+    raw = predict_grid(dewarper, np.ascontiguousarray(view))
+    local = _flattener_values(raw, dewarper.config.grid_convention, (view_h, view_w))
+    view_points = (np.asarray(local, dtype=np.float64) + 1.0) / 2.0 * np.array([view_w, view_h])
+    source = apply_homography(np.linalg.inv(transform), view_points)
+    record["rectangle"] = np.round(rectangle, 2).tolist()
+    return 2.0 * source / np.array([width, height], dtype=np.float64) - 1.0, record
+
+
 def rerun_grid(
-    dewarper: Dewarper, image: NDArray[np.uint8], rerun: int, deskew: bool = False
+    dewarper: Dewarper,
+    image: NDArray[np.uint8],
+    rerun: int,
+    deskew: bool = False,
+    perspective: bool = False,
+    snap: bool = False,
+    rect: bool = False,
 ) -> tuple[NDArray[np.float64], list[dict[str, Any]]]:
     """Grid of flattener values of ``image`` after the whole-image prediction and
-    ``rerun`` crop passes (``crop_pass``), with one record per pass (``pass`` from 1)."""
-    rerun_record(rerun, deskew)
+    ``rerun`` passes, crop passes (``crop_pass``) or with ``perspective`` perspective
+    passes (``homography_pass``), with one record per pass (``pass`` from 1); with
+    ``snap`` its border then moves onto the page edge (``edges.snap_border``, recorded as
+    a last entry with ``snap``)."""
+    rerun_record(rerun, deskew, perspective, snap, rect)
     grid = _flattener_values(
         predict_grid(dewarper, image), dewarper.config.grid_convention, image.shape[:2]
     )
     passes = []
     for number in range(1, rerun + 1):
-        grid, record = crop_pass(dewarper, image, grid, deskew)
+        if perspective:
+            grid, record = homography_pass(dewarper, image, grid)
+        elif rect:
+            margin = RECT_MARGINS[min(number - 1, len(RECT_MARGINS) - 1)]
+            grid, record = rect_pass(dewarper, image, grid, margin)
+        else:
+            grid, record = crop_pass(dewarper, image, grid, deskew)
         passes.append({"pass": number, **record})
+    if snap:
+        from .edges import snap_border
+
+        grid, record = snap_border(image, grid)
+        passes.append({"snap": record})
     return grid, passes
 
 
@@ -734,6 +886,9 @@ def rectify(
     inset: Inset = None,
     rerun: int = 0,
     deskew: bool = False,
+    perspective: bool = False,
+    snap: bool = False,
+    rect: bool = False,
 ) -> RenderResult:
     """Predict and render through ``flattener.render`` and its checks.
 
@@ -771,7 +926,7 @@ def rectify(
         )
     check_quantize(quantize)
     inset_info = inset_record(inset)
-    rerun_info = rerun_record(rerun, deskew)
+    rerun_info = rerun_record(rerun, deskew, perspective, snap, rect)
     _check_image(image)
     size = tuple(image.shape[:2]) if output_size is None else tuple(output_size)
     convention = dewarper.config.grid_convention
@@ -793,11 +948,11 @@ def rectify(
         metadata["timings"]["total"] = time.perf_counter() - started
         result = _handle_failure(error, checked_config, image=None, metadata=metadata)
     else:
-        if rerun == 0:
+        if rerun == 0 and not snap:
             grid = predict_grid(dewarper, image)
             backward_map = dense_backward_map(grid, convention, size, image.shape[:2], inset)
         else:
-            grid, crops = rerun_grid(dewarper, image, rerun, deskew)
+            grid, crops = rerun_grid(dewarper, image, rerun, deskew, perspective, snap, rect)
             backward_map = dense_backward_map(
                 grid, convention, size, image.shape[:2], inset, flattener_values=True
             )
@@ -958,11 +1113,18 @@ def prediction_evidence(
     rerun: int = 0,
     deskew: bool = False,
     pipeline: dict[str, Any] | None = None,
+    perspective: bool = False,
+    snap: bool = False,
+    rect: bool = False,
 ) -> dict[str, Any]:
     """The evidence block of a prediction record, with its output quantization, inset,
     rerun settings and pipeline."""
     return _evidence_block(
-        dewarper, quantize, inset_record(inset), rerun_record(rerun, deskew), pipeline
+        dewarper,
+        quantize,
+        inset_record(inset),
+        rerun_record(rerun, deskew, perspective, snap),
+        pipeline,
     )
 
 
@@ -1048,6 +1210,9 @@ def rectify_batch(
     deskew: bool = False,
     rectifier: Rectifier | None = None,
     pipeline: dict[str, Any] | None = None,
+    perspective: bool = False,
+    snap: bool = False,
+    rect: bool = False,
 ) -> dict[str, Any]:
     """Rectify ``inputs`` into ``output_dir`` and record every item in ``predictions.json``.
 
@@ -1087,7 +1252,7 @@ def rectify_batch(
         )
     else:
         inset_info = inset_record(inset)
-        rerun_info = rerun_record(rerun, deskew)
+        rerun_info = rerun_record(rerun, deskew, perspective, snap, rect)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     report_path = output_dir / "predictions.json"
@@ -1138,6 +1303,9 @@ def rectify_batch(
                 inset=inset,
                 rerun=rerun,
                 deskew=deskew,
+                perspective=perspective,
+                snap=snap,
+                rect=rect,
             )
 
     report = {
@@ -1198,6 +1366,8 @@ def rectify_docunet(
     inset: Inset = None,
     rerun: int = 0,
     deskew: bool = False,
+    snap: bool = False,
+    rect: bool = False,
 ) -> dict[str, Any]:
     """Rectify every ``{k}_{m} copy.png`` into ``{k}_{m}.png`` at the crop's own size.
 
@@ -1214,6 +1384,8 @@ def rectify_docunet(
         inset=inset,
         rerun=rerun,
         deskew=deskew,
+        snap=snap,
+        rect=rect,
     )
 
 
@@ -1265,6 +1437,12 @@ def main(argv: list[str] | None = None) -> int:
     batch.add_argument("--inset", type=parse_inset, default=None, help=inset_help)
     batch.add_argument("--rerun", type=parse_rerun, default=0, help=rerun_help)
     batch.add_argument("--deskew", action="store_true", help=deskew_help)
+    snap_help = "snap the final border to the photo's page edges (edges.snap_border)"
+    single.add_argument("--snap-border", action="store_true", help=snap_help)
+    batch.add_argument("--snap-border", action="store_true", help=snap_help)
+    rect_help = "with --rerun: turned tight-crop passes (rect_pass, margins RECT_MARGINS)"
+    single.add_argument("--rect", action="store_true", help=rect_help)
+    batch.add_argument("--rect", action="store_true", help=rect_help)
     args = parser.parse_args(argv)
     if args.deskew and args.rerun == 0:
         parser.error("--deskew needs --rerun 1 or more")
@@ -1281,6 +1459,8 @@ def main(argv: list[str] | None = None) -> int:
             inset=args.inset,
             rerun=args.rerun,
             deskew=args.deskew,
+            snap=args.snap_border,
+            rect=args.rect,
         )
         output = Path(args.output)
         removed = False
@@ -1297,10 +1477,16 @@ def main(argv: list[str] | None = None) -> int:
             "forced": bool(result.metadata.get("forced_render")),
             "quantize": args.quantize,
             "inset": inset_record(args.inset),
-            "rerun": rerun_record(args.rerun, args.deskew),
+            "rerun": rerun_record(args.rerun, args.deskew, snap=args.snap_border, rect=args.rect),
             "crops": result.metadata["dewarp"]["crops"],
             "evidence": prediction_evidence(
-                dewarper, args.quantize, args.inset, args.rerun, args.deskew
+                dewarper,
+                args.quantize,
+                args.inset,
+                args.rerun,
+                args.deskew,
+                snap=args.snap_border,
+                rect=args.rect,
             ),
         }
         print(json.dumps(summary))
@@ -1315,6 +1501,8 @@ def main(argv: list[str] | None = None) -> int:
         inset=args.inset,
         rerun=args.rerun,
         deskew=args.deskew,
+        snap=args.snap_border,
+        rect=args.rect,
     )
     print(json.dumps(report["counts"]))
     return 0 if report["counts"]["failed"] == 0 else EXIT_FAILED
