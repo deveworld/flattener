@@ -49,11 +49,12 @@ save_scan(result, "out", "photo")  # out/photo.jpg, out/photo.scan.json
 ## 모델
 
 - 휨 보정: `~/.cache/flattener/scan-weights/dewarp-v2/step_00040000.pt`와 옆의 `.pt.json`입니다. UVDoc 구조에 파라미터 약 800만 개입니다. 공개해도 되는 합성 페이지로 처음부터 학습한 `dewarp-v1`을 기울어진 카메라·배경·옆 쪽 합성 페이지로 4만 스텝 더 학습했습니다(`examples/dewarp/train-release-perspective-fold-ft.json`). `dewarp-v1`보다 UVDoc 벤치(0.611 → 0.652)와 DIR300(0.619 → 0.643), KR-Real(68장 중 53 → 57장)이 좋고, DocUNet LD·AD는 조금 나쁩니다(5.01 → 5.42, 0.225 → 0.240).
-- 세 모델을 함께 쓰는 번들: `~/.cache/flattener/scan-weights/bundle-v2.json`(이전 휨 보정 모델은 `bundle-v1.json`).
-- 페이지 찾기(페이지 게이트 v0): `python tools/locator_v0.py install`이 `$FLATTENER_CACHE_DIR/scan-weights`(기본 `~/.cache/flattener/scan-weights`)에 `page-gate-v0.pt`를 씁니다. `python tools/locator_v0.py reproduce`는 SmartDoc 사진 48장에서 기록된 IoU 0.951을 다시 잽니다.
+- 세 모델을 함께 쓰는 번들: `~/.cache/flattener/scan-weights/bundle-v3.json`. 이전 번들은 `bundle-v2.json`(페이지 찾기 v0)과 `bundle-v1.json`(이전 휨 보정 모델)입니다.
+- 페이지 찾기(페이지 게이트 v1.2): `~/.cache/flattener/scan-weights/page-gate-v1.2/best.pt`와 옆의 `.sha256`입니다. 파라미터 약 56만 개이고, 입력은 192×144입니다. 공개해도 되는 합성 장면(SyntheticDoc 페이지, 직접 만든 한국어 페이지, 노트북·키보드·화면·흰 가구·밑에 깔린 문서가 있는 책상, 가까이 찍은 페이지)과 SmartDoc 촬영 영상 프레임(CC BY 4.0)으로 처음부터 학습했습니다(`examples/gate/train-gate-release-v1.2.json`). SmartDoc 테스트 문서 사진 72장의 IoU는 0.977(v0 0.939)입니다. KR-Real에서는 v0보다 4장이 좋아지고 2장이 나빠졌습니다.
+- 이전 페이지 찾기(페이지 게이트 v0): `python tools/locator_v0.py install`이 `$FLATTENER_CACHE_DIR/scan-weights`(기본 `~/.cache/flattener/scan-weights`)에 `page-gate-v0.pt`를 씁니다. `python tools/locator_v0.py reproduce`는 SmartDoc 사진 48장에서 기록된 IoU 0.951을 다시 잽니다.
 - 배포 검사: 기록된 트랙이 모두 release이고, 계보가 처음부터(scratch) 시작하고, 모든 학습 단계의 데이터 spec이 release 조건을 통과해야 배포할 수 있습니다. `python -m flattener.scan.shippable CKPT...`는 모두 통과하면 0, 하나라도 아니면 1, 사용 오류면 2로 끝납니다. 휨 보정 가중치에 씁니다. 페이지 게이트는 스캐너가 불러올 때 직접 판정합니다.
 - 방향 판별(OrientNet-1): `~/.cache/flattener/scan-weights/orient-v1/step_00015000.pt`와 옆의 `.pt.json`입니다. 파라미터 약 44만 개이고, 공개해도 되는 합성 페이지로 처음부터 학습했습니다. 합성 검증 정확도는 99.6%, KR-Real 실사진 63장 중 58장의 방향을 맞혔습니다. 임계값은 0.9입니다.
-- 학습 방법: [휨 보정](examples/dewarp/README.md), [방향 판별](examples/orient/README.md).
+- 학습 방법: [휨 보정](examples/dewarp/README.md), [방향 판별](examples/orient/README.md), [페이지 찾기](examples/gate/README.md).
 
 ## 렌더러
 
