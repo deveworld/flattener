@@ -462,8 +462,10 @@ def axis_alignment_loss(
     target grid (the target's node differences as a Jacobian), so a node off its target
     by ``e`` lands at page position (u, v) + J^-1 e. A row of the flat page has one v and
     a column one u: the loss is the mean variance of v along the rows plus that of u
-    along the columns, in page units (-1 to 1), over valid nodes. Moving a whole row or
-    column costs nothing here; bending it does. Grids are (N, 2, Gh, Gw)."""
+    along the columns, over valid nodes. Moving a whole row or column costs nothing here;
+    bending it does. The shifts are measured in image units (flattener values, as the
+    grid loss), each scaled by the local length of its page axis, so a small page on a
+    large background weighs no more per pixel than a large one. Grids are (N, 2, Gh, Gw)."""
     rows, cols = target.shape[-2:]
     target = target.float()
     du = torch.gradient(target, dim=3)[0] * ((cols - 1) / 2.0)  # dp per page unit of u
@@ -471,8 +473,8 @@ def axis_alignment_loss(
     det = du[:, 0] * dv[:, 1] - dv[:, 0] * du[:, 1]
     det = torch.where(det.abs() < 1e-6, torch.full_like(det, 1e-6), det)
     error = prediction.float() - target
-    shift_u = (dv[:, 1] * error[:, 0] - dv[:, 0] * error[:, 1]) / det
-    shift_v = (du[:, 0] * error[:, 1] - du[:, 1] * error[:, 0]) / det
+    shift_u = (dv[:, 1] * error[:, 0] - dv[:, 0] * error[:, 1]) / det * du.norm(dim=1)
+    shift_v = (du[:, 0] * error[:, 1] - du[:, 1] * error[:, 0]) / det * dv.norm(dim=1)
     weight = valid[:, 0].float()
 
     def spread(values: torch.Tensor, dim: int) -> torch.Tensor:

@@ -439,6 +439,10 @@ def test_the_axis_loss_charges_bent_rows_and_columns_but_not_moved_ones():
     assert loss > 1e-5
     loss.backward()
     assert torch.isfinite(bent.grad).all()
+    small = target * 0.3  # the same bend on a page a third the size costs the same
+    small_bent = small.clone()
+    small_bent[0, :, 4, 3] += 0.04 * normal
+    assert axis_alignment_loss(small_bent, small, valid) == pytest.approx(loss.item(), rel=1e-3)
     valid[0, 0, 4, 3] = 0  # an invalid node does not count
     assert axis_alignment_loss(bent.detach(), target, valid) == pytest.approx(0.0, abs=1e-9)
     config = TrainConfig(data_spec="s", output_dir="o", track="research", model=TINY, loss_axis=1.0)
