@@ -294,6 +294,7 @@ def render(
     mode: str = "crumple",
     device: str = "cpu",
     isometric: bool = False,
+    close: bool | None = None,
 ) -> tuple[NDArray[np.uint8], NDArray[np.float32], NDArray[np.float32]]:
     """(photo, forward map, shape) of ``texture`` (the flat page) crumpled and photographed.
     ``shape`` holds the surface point of each map point in the page's own frame (x across,
@@ -303,7 +304,8 @@ def render(
     ``device`` runs the tensor work there (the draws stay on the CPU generator).
     ``isometric`` keeps the paper's length: the texture lies on the surface as the page
     laid flat (``lay_flat``), so slopes foreshorten it as they do real paper; otherwise
-    each texture point sits straight above its place on the ground plane."""
+    each texture point sits straight above its place on the ground plane. ``close`` picks
+    the steep, close camera (``None``: only for ``curve``)."""
     out_h, out_w = out_hw
     tex_h, tex_w = texture.shape[:2]
     aspect = tex_h / tex_w
@@ -321,14 +323,15 @@ def render(
         ground_x, ground_y = to_ground(x, y, *lay_flat(shape, aspect, device))
     z = shape(ground_x, ground_y)
     z = z - z.mean()
-    max_tilt = CURVE_TILT_DEG if mode == "curve" else MAX_TILT_DEG
+    close = mode == "curve" if close is None else close
+    max_tilt = CURVE_TILT_DEG if close else MAX_TILT_DEG
     rotation = _rotation(
         math.radians(rng.uniform(0, max_tilt)), rng.uniform(0, math.pi),
         math.radians(rng.normal(0, 8)),
     )  # fmt: skip
     rotation = rotation.to(device)
     points = torch.stack([ground_x - 0.5, ground_y - aspect / 2, z], dim=-1) @ rotation.T
-    distance = rng.uniform(0.9, 1.8) if mode == "curve" else rng.uniform(1.4, 3.0)
+    distance = rng.uniform(0.9, 1.8) if close else rng.uniform(1.4, 3.0)
     focal = fill * min(out_w, out_h / aspect) * distance  # page width -> fill of the frame
     depth = points[..., 2] + distance
     if float(depth.min()) <= 0.2:

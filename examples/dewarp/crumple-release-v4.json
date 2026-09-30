@@ -22,5 +22,6 @@
   "own_texture_prob": 0.25,
   "under_prob": 0.2,
   "isometric": true,
-  "grid3d": true
+  "grid3d": true,
+  "close_prob": 0.4
 }

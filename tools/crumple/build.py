@@ -7,7 +7,8 @@ counts per split, the photo size, a background folder, optional ``modes`` weight
 as textures, license class ``own``), ``under_prob`` (a flat own page lying under the
 crumpled one, left out of the target), ``isometric`` (``render.render``: the paper
 keeps its length) and ``grid3d`` (also write the surface's shape in the page frame,
-``<id>.g3.npy``, the 3-D target). Each item flattens one
+``<id>.g3.npy``, the 3-D target) and ``close_prob`` (the share of other modes under
+``curve``'s steep, close camera). Each item flattens one
 SyntheticDoc render through its ground truth into a page texture (the aspect from the
 grid's arc lengths), crumples and photographs it (``render.render``) on a CC0 or
 procedural background, and writes ``files/<split>/<id>.jpg`` and ``<id>.bm.npy`` (the
@@ -164,9 +165,12 @@ def run_chunk(task: dict[str, Any]) -> dict[str, Any]:
             names = sorted(modes)
             weights = np.array([modes[name] for name in names], dtype=np.float64)
             mode = names[int(rng.choice(len(names), p=weights / weights.sum()))]
+            close = None  # the renderer's default: close only for curve
+            if settings.get("close_prob") is not None:
+                close = mode == "curve" or rng.random() < settings["close_prob"]
             photo, forward, shape = render.render(
                 texture, rng, out_hw, np.clip(background, 0, 255).astype(np.uint8), mode,
-                settings["device"], settings.get("isometric", False),
+                settings["device"], settings.get("isometric", False), close,
             )  # fmt: skip
         except (OSError, ValueError, RuntimeError):
             skipped += 1
@@ -212,6 +216,7 @@ def run_chunk(task: dict[str, Any]) -> dict[str, Any]:
                 "backward_map_bytes": len(map_bytes),
                 "texture_sample_id": None if own else record["sample_id"],
                 "mode": mode,
+                "close": bool(mode == "curve" if close is None else close),
                 **extra,
             }
         )
@@ -255,7 +260,8 @@ def build(
                     "device": device, "own_texture_prob": spec.get("own_texture_prob", 0.0),
                     "under_prob": spec.get("under_prob", 0.0),
                     "isometric": spec.get("isometric", False),
-                    "grid3d": spec.get("grid3d", False)}  # fmt: skip
+                    "grid3d": spec.get("grid3d", False),
+                    "close_prob": spec.get("close_prob")}  # fmt: skip
         for start in range(0, count, spec.get("chunk", 200)):
             stop = min(count, start + spec.get("chunk", 200))
             tasks.append({"key": f"{split}-{start:07d}", "settings": settings,
