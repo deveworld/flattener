@@ -1,0 +1,51 @@
+{
+  "schema": "flattener-dewarp-data-1",
+  "name": "release-clean-v2-crumple4-half",
+  "track": "release",
+  "sources": [
+    {
+      "name": "syntheticdoc-clean-train",
+      "kind": "syntheticdoc_compact",
+      "root": "${FLATTENER_CACHE}/syntheticdoc-release",
+      "track": "release",
+      "split": "train",
+      "license": "SyntheticDoc CC BY 4.0; documents CC BY, CC0 or ODC-BY, backgrounds CC0 or CC BY, meshes CC BY",
+      "weight": 0.5
+    },
+    {
+      "name": "syntheticdoc-clean-val",
+      "kind": "syntheticdoc_compact",
+      "root": "${FLATTENER_CACHE}/syntheticdoc-release",
+      "track": "release",
+      "split": "val",
+      "max_samples": 2000,
+      "license": "SyntheticDoc CC BY 4.0; documents CC BY, CC0 or ODC-BY, backgrounds CC0 or CC BY, meshes CC BY"
+    },
+    {
+      "name": "crumple-train",
+      "kind": "converted",
+      "root": "${FLATTENER_CACHE}/crumple-release-v4",
+      "track": "release",
+      "split": "train",
+      "license": "SyntheticDoc CC BY 4.0; documents CC BY, CC0 or ODC-BY, backgrounds CC0 or CC BY, meshes CC BY; own procedural crumple geometry; own generated pages",
+      "weight": 0.17
+    },
+    {
+      "name": "crumple-v4b-train",
+      "kind": "converted",
+      "root": "${FLATTENER_CACHE}/crumple-release-v4b",
+      "track": "release",
+      "split": "train",
+      "license": "SyntheticDoc CC BY 4.0; documents CC BY, CC0 or ODC-BY, backgrounds CC0 or CC BY, meshes CC BY; own procedural crumple geometry; own generated pages",
+      "weight": 0.33
+    },
+    {
+      "name": "crumple-val",
+      "kind": "converted",
+      "root": "${FLATTENER_CACHE}/crumple-release-v4",
+      "track": "release",
+      "split": "val",
+      "license": "SyntheticDoc CC BY 4.0; documents CC BY, CC0 or ODC-BY, backgrounds CC0 or CC BY, meshes CC BY; own procedural crumple geometry; own generated pages"
+    }
+  ]
+}
