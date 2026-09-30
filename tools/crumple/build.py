@@ -4,8 +4,9 @@ The build spec (``flattener-crumple-build-1``, see ``examples/dewarp``) names a 
 spec (``dewarp_spec``; ``converted`` or ``syntheticdoc_compact`` release sources), the
 counts per split, the photo size, a background folder, optional ``modes`` weights of
 ``render.render`` modes (default all ``crumple``), ``own_texture_prob`` (own generated pages
-as textures, license class ``own``) and ``under_prob`` (a flat own page lying under the
-crumpled one, left out of the target). Each item flattens one
+as textures, license class ``own``), ``under_prob`` (a flat own page lying under the
+crumpled one, left out of the target) and ``isometric`` (``render.render``: the paper
+keeps its length). Each item flattens one
 SyntheticDoc render through its ground truth into a page texture (the aspect from the
 grid's arc lengths), crumples and photographs it (``render.render``) on a CC0 or
 procedural background, and writes ``files/<split>/<id>.jpg`` and ``<id>.bm.npy`` (the
@@ -164,7 +165,7 @@ def run_chunk(task: dict[str, Any]) -> dict[str, Any]:
             mode = names[int(rng.choice(len(names), p=weights / weights.sum()))]
             photo, forward = render.render(
                 texture, rng, out_hw, np.clip(background, 0, 255).astype(np.uint8), mode,
-                settings["device"],
+                settings["device"], settings.get("isometric", False),
             )  # fmt: skip
         except (OSError, ValueError, RuntimeError):
             skipped += 1
@@ -238,7 +239,8 @@ def build(
         settings = {"name": spec["name"], "split": split, "photo_hw": spec["photo_hw"],
                     "background_dir": background_dir, "modes": spec.get("modes"),
                     "device": device, "own_texture_prob": spec.get("own_texture_prob", 0.0),
-                    "under_prob": spec.get("under_prob", 0.0)}  # fmt: skip
+                    "under_prob": spec.get("under_prob", 0.0),
+                    "isometric": spec.get("isometric", False)}  # fmt: skip
         for start in range(0, count, spec.get("chunk", 200)):
             stop = min(count, start + spec.get("chunk", 200))
             tasks.append({"key": f"{split}-{start:07d}", "settings": settings,
