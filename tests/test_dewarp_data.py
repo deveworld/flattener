@@ -194,6 +194,35 @@ def test_raw_syntheticdoc_and_converted_conventions_agree(tmp_path):
     torch.testing.assert_close(converted["image"], raw["image"])
 
 
+def test_converted_page_frame_grid3d_is_read_and_checked(tmp_path):
+    entries = _write_converted(tmp_path / "c", count=2, manifest=False)
+    rows, cols = 18, 12  # a flat page 1 wide, 1.5 high, centred, over the map's centres
+    x, y = np.meshgrid(
+        (np.arange(cols) + 0.5) / cols - 0.5, ((np.arange(rows) + 0.5) / rows - 0.5) * 1.5
+    )
+    np.save(
+        tmp_path / "c/s0.g3.npy", np.stack([x, y, np.full_like(x, 0.15)], -1).astype(np.float16)
+    )
+    entries[0].update(grid3d="s0.g3.npy", grid3d_convention="page_frame")
+    (tmp_path / "c/manifest.jsonl").write_text("".join(json.dumps(e) + "\n" for e in entries))
+    source = {"name": "c", "kind": "converted", "root": str(tmp_path / "c"), "track": "research"}
+    items = _build(_spec(tmp_path, [source]))
+    with_3d, without = items[0], items[1]
+    assert bool(with_3d["has_grid3d"]) and not bool(without["has_grid3d"])
+    target = with_3d["grid3d"].numpy()  # (3, Gh, Gw), (value - low) / (high - low)
+    xmx, xmn, ymx, ymn, zmx, zmn = dewarp_data.PAGE_GRID3D_RANGE
+    edges = np.linspace(-0.5, 0.5, GRID[1])  # edge-aligned nodes reach the page border
+    np.testing.assert_allclose(target[0, 0], (edges - xmn) / (xmx - xmn), atol=2e-3)
+    np.testing.assert_allclose(
+        target[1, :, 0], (np.linspace(-0.75, 0.75, GRID[0]) - ymn) / (ymx - ymn), atol=2e-3
+    )
+    np.testing.assert_allclose(target[2], (0.15 - zmn) / (zmx - zmn), atol=2e-3)
+    entries[0]["grid3d_convention"] = "camera"
+    (tmp_path / "c/manifest.jsonl").write_text("".join(json.dumps(e) + "\n" for e in entries))
+    with pytest.raises(FlattenerError, match="page_frame"):
+        _build(_spec(tmp_path, [source], name="bad"))
+
+
 def test_release_track_refuses_research_sources(tmp_path):
     _write_converted(tmp_path / "clean")
     _write_doc3d(tmp_path / "doc3d")

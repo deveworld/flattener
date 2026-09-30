@@ -29,14 +29,19 @@ Converted layout (``kind: "converted"``, written by the data pipeline)::
      "image": "relative/path.jpg", "backward_map": "relative/path.npy",
      "backward_map_convention": "flattener" | "syntheticdoc",
      "original_render_size": [1440, 1024], "track": "release",
-     "license_class": "clean", "image_sha256": "...", "backward_map_sha256": "...", ...}
+     "license_class": "clean", "image_sha256": "...", "backward_map_sha256": "...",
+     "grid3d": "relative/path.g3.npy", "grid3d_convention": "page_frame", ...}
 
 Paths are relative to the JSON document that lists them. ``backward_map`` is a
 center-aligned (H, W, 2) float16/float32 map holding flattener values, or raw
 SyntheticDoc values when the convention is ``"syntheticdoc"`` (then
 ``original_render_size`` (H, W) of the upstream render is required; the image may be
 a resized copy). Entries without ``split`` belong to the source's split. The optional
-sha256 and ``*_bytes`` fields feed the content digest and the size check.
+sha256 and ``*_bytes`` fields feed the content digest and the size check. The optional
+``grid3d`` is a center-aligned (H, W, 3) map of the surface point under each map point
+in the page's own frame (``page_frame``: x across, y down, z away from the camera,
+page-width units, centred), the 3-D target; it does not depend on the camera, so crops,
+turns and composites leave it as it is.
 
 ``kind: "syntheticdoc_compact"`` reads the training copy written by
 ``tools/syntheticdoc/compact.py``: the converted layout plus ``compact.json`` and
@@ -107,6 +112,7 @@ RELEASE_LICENSE_KEYS = frozenset(
 # Upstream UVDoc 3-D normalization constants (xmax, xmin, ymax, ymin, zmax, zmin).
 DOC3D_GRID3D_RANGE = (1.2539363, -1.2442188, 1.2396319, -1.2289206, 0.6436657, -0.67492497)
 UVDOC_GRID3D_RANGE = (0.11433014, -0.12551452, 0.12401487, -0.12401487, 0.1952378, -0.1952378)
+PAGE_GRID3D_RANGE = (0.6, -0.6, 0.9, -0.9, 0.3, -0.3)  # page_frame, page-width units
 # How stored values become targets, as defined in code (``coords`` and the adapters).
 # Every source description carries its digest; raise the version when a conversion
 # changes, so resumes and best checkpoints of the old targets are refused. The code
@@ -118,6 +124,7 @@ TARGET_CONVENTIONS = {
     "grid": "edge-aligned nodes; map_to_grid extrapolates half a map pixel",
     "doc3d_grid3d": {"range": DOC3D_GRID3D_RANGE, "order": "zyx", "flip_channel_1": True},
     "uvdoc_grid3d": {"range": UVDOC_GRID3D_RANGE, "order": "xyz"},
+    "page_grid3d": {"range": PAGE_GRID3D_RANGE, "order": "xyz", "map": "center-aligned"},
     "layouts": {"sample": SAMPLE_SCHEMA, "compact": COMPACT_SCHEMA},
 }
 # compact.json fields that decide how the copy was made (not its creation time or tool).
@@ -742,31 +749,40 @@ class ConvertedSource(_Source):
             ):
                 raise _error("invalid_data", f"{entry['sample_id']}: bad map convention")
             sample_id = str(entry["sample_id"])
-            hashes = tuple(entry.get(k) for k in ("image_sha256", "backward_map_sha256"))
+            hash_keys = ("image_sha256", "backward_map_sha256")
+            size_keys = ("image_bytes", "backward_map_bytes")
+            if entry.get("grid3d"):
+                if entry.get("grid3d_convention") != "page_frame":
+                    raise _error("invalid_data", f"{sample_id}: grid3d must be page_frame")
+                hash_keys, size_keys = (*hash_keys, "grid3d_sha256"), (*size_keys, "grid3d_bytes")
+            hashes = tuple(entry.get(k) for k in hash_keys)
             if all(isinstance(h, str) and h for h in hashes):
                 self.hashes[sample_id] = hashes
             elif self.require_hashes:
                 raise _error("invalid_data", f"{sample_id}: image/backward_map sha256 missing")
-            sizes = tuple(entry.get(k) for k in ("image_bytes", "backward_map_bytes"))
+            sizes = tuple(entry.get(k) for k in size_keys)
             known_sizes = all(isinstance(s, int) and not isinstance(s, bool) for s in sizes)
             if self.require_sizes and not known_sizes:
                 raise _error("invalid_data", f"{sample_id}: image/backward_map bytes missing")
-            records.append(  # compact: records are pickled into every loader worker
-                {
-                    "sample_id": sample_id,
-                    "image": str(Path(base, entry["image"])),
-                    "backward_map": str(Path(base, entry["backward_map"])),
-                    "track": track,
-                    "license_class": license_class,
-                    # None: flattener values; a size: SyntheticDoc values of that render
-                    "render_size": tuple(render_size) if convention == "syntheticdoc" else None,
-                    "bytes": sizes if known_sizes else None,
-                }
-            )
+            record = {  # compact: records are pickled into every loader worker
+                "sample_id": sample_id,
+                "image": str(Path(base, entry["image"])),
+                "backward_map": str(Path(base, entry["backward_map"])),
+                "track": track,
+                "license_class": license_class,
+                # None: flattener values; a size: SyntheticDoc values of that render
+                "render_size": tuple(render_size) if convention == "syntheticdoc" else None,
+                "bytes": sizes if known_sizes else None,
+            }
+            if entry.get("grid3d"):
+                record["grid3d"] = str(Path(base, entry["grid3d"]))
+            records.append(record)
         return records
 
     def content_files(self, record: dict[str, Any], sizes: _FileSizes) -> list[str]:
-        return [record["image"], record["backward_map"]]
+        return [record["image"], record["backward_map"], *(
+            [record["grid3d"]] if "grid3d" in record else []
+        )]  # fmt: skip
 
     def load(self, index: int) -> RawSample:
         record = self.records[index]
@@ -775,8 +791,12 @@ class ConvertedSource(_Source):
         if record["render_size"] is not None:
             values = syntheticdoc_to_flattener(values, record["render_size"])
         grid = map_to_grid(values, self.grid_size)
+        grid3d = None
+        if "grid3d" in record:
+            shape = np.load(record["grid3d"], allow_pickle=False).astype(np.float32)
+            grid3d = _normalize_3d(map_to_grid(shape, self.grid_size), PAGE_GRID3D_RANGE, "xyz")
         meta = self._meta(record, record["track"], record["license_class"] or self.spec.license)
-        return RawSample(image, grid, np.isfinite(grid).all(axis=-1), None, meta)
+        return RawSample(image, grid, np.isfinite(grid).all(axis=-1), grid3d, meta)
 
 
 class SyntheticDocCompactSource(ConvertedSource):

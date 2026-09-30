@@ -5,8 +5,9 @@ spec (``dewarp_spec``; ``converted`` or ``syntheticdoc_compact`` release sources
 counts per split, the photo size, a background folder, optional ``modes`` weights of
 ``render.render`` modes (default all ``crumple``), ``own_texture_prob`` (own generated pages
 as textures, license class ``own``), ``under_prob`` (a flat own page lying under the
-crumpled one, left out of the target) and ``isometric`` (``render.render``: the paper
-keeps its length). Each item flattens one
+crumpled one, left out of the target), ``isometric`` (``render.render``: the paper
+keeps its length) and ``grid3d`` (also write the surface's shape in the page frame,
+``<id>.g3.npy``, the 3-D target). Each item flattens one
 SyntheticDoc render through its ground truth into a page texture (the aspect from the
 grid's arc lengths), crumples and photographs it (``render.render``) on a CC0 or
 procedural background, and writes ``files/<split>/<id>.jpg`` and ``<id>.bm.npy`` (the
@@ -163,7 +164,7 @@ def run_chunk(task: dict[str, Any]) -> dict[str, Any]:
             names = sorted(modes)
             weights = np.array([modes[name] for name in names], dtype=np.float64)
             mode = names[int(rng.choice(len(names), p=weights / weights.sum()))]
-            photo, forward = render.render(
+            photo, forward, shape = render.render(
                 texture, rng, out_hw, np.clip(background, 0, 255).astype(np.uint8), mode,
                 settings["device"], settings.get("isometric", False),
             )  # fmt: skip
@@ -182,6 +183,18 @@ def run_chunk(task: dict[str, Any]) -> dict[str, Any]:
         np.save(map_buffer, forward.astype(np.float16))
         map_bytes = map_buffer.getvalue()
         (folder / f"{ident}.bm.npy").write_bytes(map_bytes)
+        extra = {}
+        if settings.get("grid3d"):
+            shape_buffer = io.BytesIO()
+            np.save(shape_buffer, shape.astype(np.float16))
+            shape_bytes = shape_buffer.getvalue()
+            (folder / f"{ident}.g3.npy").write_bytes(shape_bytes)
+            extra = {
+                "grid3d": f"files/{settings['split']}/{ident}.g3.npy",
+                "grid3d_convention": "page_frame",
+                "grid3d_sha256": hashlib.sha256(shape_bytes).hexdigest(),
+                "grid3d_bytes": len(shape_bytes),
+            }
         rows.append(
             {
                 "schema": "flattener-dewarp-sample-1",
@@ -199,6 +212,7 @@ def run_chunk(task: dict[str, Any]) -> dict[str, Any]:
                 "backward_map_bytes": len(map_bytes),
                 "texture_sample_id": None if own else record["sample_id"],
                 "mode": mode,
+                **extra,
             }
         )
     return {"key": task["key"], "rows": rows, "skipped": skipped}
@@ -240,7 +254,8 @@ def build(
                     "background_dir": background_dir, "modes": spec.get("modes"),
                     "device": device, "own_texture_prob": spec.get("own_texture_prob", 0.0),
                     "under_prob": spec.get("under_prob", 0.0),
-                    "isometric": spec.get("isometric", False)}  # fmt: skip
+                    "isometric": spec.get("isometric", False),
+                    "grid3d": spec.get("grid3d", False)}  # fmt: skip
         for start in range(0, count, spec.get("chunk", 200)):
             stop = min(count, start + spec.get("chunk", 200))
             tasks.append({"key": f"{split}-{start:07d}", "settings": settings,

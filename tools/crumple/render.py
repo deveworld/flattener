@@ -1,9 +1,10 @@
 """Crumpled and creased pages: a height field over a flat page, seen by a pinhole camera.
 
-``render(texture, rng, out_hw)`` returns the photo (uint8 (H, W, 3)) and its exact
-forward map: for each point of a center-aligned (``MAP_HW``) grid over the flat page, the
-flattener value of where it lands in the photo. That map is the dewarp target
-(``backward_map_convention: "flattener"`` in the converted data layout).
+``render(texture, rng, out_hw)`` returns the photo (uint8 (H, W, 3)), its exact forward
+map (for each point of a center-aligned (``MAP_HW``) grid over the flat page, the
+flattener value of where it lands in the photo; the dewarp target,
+``backward_map_convention: "flattener"`` in the converted data layout) and the surface's
+shape at those points in the page's frame (the 3-D target).
 
 Surface (page width 1, height ``aspect``), by ``mode`` (``surface``):
 - ``crumple``: creases, line segments with a V profile ``a * (sqrt(s^2 + w^2) - w)``
@@ -293,8 +294,10 @@ def render(
     mode: str = "crumple",
     device: str = "cpu",
     isometric: bool = False,
-) -> tuple[NDArray[np.uint8], NDArray[np.float32]]:
-    """(photo, forward map) of ``texture`` (the flat page) crumpled and photographed.
+) -> tuple[NDArray[np.uint8], NDArray[np.float32], NDArray[np.float32]]:
+    """(photo, forward map, shape) of ``texture`` (the flat page) crumpled and photographed.
+    ``shape`` holds the surface point of each map point in the page's own frame (x across,
+    y down, z away from the camera, page-width units, centred), the same at any camera.
     ``mode`` ``curve`` is a gently curved page under a steep, close camera (tilt up to
     ``CURVE_TILT_DEG``). A page that folds over itself in the photo raises ValueError.
     ``device`` runs the tensor work there (the draws stay on the CPU generator).
@@ -396,4 +399,6 @@ def render(
     fields = torch.stack([px, py], dim=0)[None]
     mapped = F.grid_sample(fields, at, align_corners=True, mode="bilinear")[0].permute(1, 2, 0)
     forward = torch.stack([mapped[..., 0] / out_w * 2 - 1, mapped[..., 1] / out_h * 2 - 1], -1)
-    return image, forward.cpu().numpy().astype(np.float32)
+    frame = torch.stack([ground_x - 0.5, ground_y - aspect / 2, z], dim=0)[None]
+    shape = F.grid_sample(frame, at, align_corners=True, mode="bilinear")[0].permute(1, 2, 0)
+    return image, forward.cpu().numpy().astype(np.float32), shape.cpu().numpy().astype(np.float32)
