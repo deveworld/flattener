@@ -187,6 +187,10 @@ def run_chunk(task: dict[str, Any]) -> dict[str, Any]:
         except (OSError, ValueError, RuntimeError):
             skipped += 1
             continue
+        finally:
+            if settings["device"].startswith("cuda"):
+                # Every render has other tensor sizes: cached blocks would fill the card.
+                torch.cuda.empty_cache()
         if not np.isfinite(forward).all() or np.abs(forward).max() > 1.0:
             skipped += 1
             continue
