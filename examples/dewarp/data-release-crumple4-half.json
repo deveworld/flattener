@@ -22,9 +22,9 @@
       "license": "SyntheticDoc CC BY 4.0; documents CC BY, CC0 or ODC-BY, backgrounds CC0 or CC BY, meshes CC BY"
     },
     {
-      "name": "crumple-train",
+      "name": "crumple-v4-nobook-train",
       "kind": "converted",
-      "root": "${FLATTENER_CACHE}/crumple-release-v4",
+      "root": "${FLATTENER_CACHE}/crumple-release-v4-nobook",
       "track": "release",
       "split": "train",
       "license": "SyntheticDoc CC BY 4.0; documents CC BY, CC0 or ODC-BY, backgrounds CC0 or CC BY, meshes CC BY; own procedural crumple geometry; own generated pages",
