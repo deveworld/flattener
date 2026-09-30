@@ -1464,7 +1464,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     rerun_help = (
         "crop passes after the whole-image prediction: crop the predicted outline's box "
-        f"plus {RERUN_MARGIN:.0%} of the page extent per side, predict again and compose; "
+        f"plus {RERUN_MARGIN:.0%}% of the page extent per side, predict again and compose; "
         "checks and exit status are the same; default 0"
     )
     deskew_help = (
