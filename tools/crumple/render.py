@@ -14,7 +14,9 @@ Surface (page width 1, height ``aspect``), by ``mode`` (``surface``):
   fade over that reach, so crumpled paper stays within real slopes;
 - ``fold``: a letter folded in halves or thirds each way and opened again;
 - ``curve``: a smooth curl under a steep, close camera; ``flat``: a slight curl;
-- ``book``: two pages open at a gutter that dips away, arching or sagging outward.
+- ``book``: two pages open at a gutter that dips away, arching or sagging outward, the
+  texture on one of them; ``spread``: the same with both pages as the texture (the
+  scanner's target for an open book, which it splits at the gutter).
 With ``isometric`` the texture lies on the surface as the paper laid flat (``lay_flat``,
 ``to_ground``), so it keeps its length and slopes foreshorten it; without, each texture
 point sits straight above its place on the ground plane, which stretches the paper on
@@ -116,17 +118,26 @@ def surface(rng: np.random.Generator, aspect: float, mode: str = "crumple"):
                         c * (torch.sqrt(across(x, y, center, direction) ** 2 + width**2) - width)
                     )
                 )
-    elif mode == "book":  # an open book over x in [0, 2], the gutter at x = 1
+    elif mode in ("book", "spread"):
+        # book: two pages over x in [0, 2] page widths, the gutter at x = 1; spread: the
+        # same as one sheet (the texture holds both pages), x in [0, 1], the gutter at 0.5
+        unit = 1.0 if mode == "book" else 0.5  # a page width in the sheet's units
+        page_aspect = aspect / unit
         reach = rng.uniform(0.05, 0.3)
         depth = reach * rng.uniform(0.3, 1.5)
         spine = rng.normal(0, 0.15)  # the gutter deeper at one end
         arch = rng.uniform(-0.12, 0.04, size=2)  # outer parts rising (-) or sagging (+)
 
         def book(x, y):
-            s = x - 1.0
-            gutter = depth * (1 + spine * (y - aspect / 2) / aspect) * torch.exp(-s.abs() / reach)
+            s = (x - unit) / unit  # page widths from the gutter (at x = unit)
+            along = y / unit
+            gutter = (
+                depth
+                * (1 + spine * (along - page_aspect / 2) / page_aspect)
+                * torch.exp(-s.abs() / reach)
+            )
             side = torch.where(s < 0, float(arch[0]), float(arch[1]))
-            return gutter + side * s**2
+            return unit * (gutter + side * s**2)
 
         terms.append(book)
     elif mode == "fold":  # folded in halves or thirds along each side, then opened
