@@ -8,7 +8,8 @@ as textures, license class ``own``), ``under_prob`` (a flat own page lying under
 crumpled one, left out of the target), ``isometric`` (``render.render``: the paper
 keeps its length) and ``grid3d`` (also write the surface's shape in the page frame,
 ``<id>.g3.npy``, the 3-D target) and ``close_prob`` (the share of other modes under
-``curve``'s steep, close camera). Each item flattens one
+``curve``'s steep, close camera); mode ``book`` puts an own page on the facing side.
+Each item flattens one
 SyntheticDoc render through its ground truth into a page texture (the aspect from the
 grid's arc lengths), crumples and photographs it (``render.render``) on a CC0 or
 procedural background, and writes ``files/<split>/<id>.jpg`` and ``<id>.bm.npy`` (the
@@ -168,9 +169,14 @@ def run_chunk(task: dict[str, Any]) -> dict[str, Any]:
             close = None  # the renderer's default: close only for curve
             if settings.get("close_prob") is not None:
                 close = mode == "curve" or rng.random() < settings["close_prob"]
+            facing = None
+            if mode == "book":  # an own page faces it
+                name = f"{settings['name']}-{settings['split']}-{index}-facing"
+                size = (texture.shape[1], texture.shape[0])
+                facing = np.asarray(Image.fromarray(own_texture(rng, name)).resize(size))
             photo, forward, shape = render.render(
                 texture, rng, out_hw, np.clip(background, 0, 255).astype(np.uint8), mode,
-                settings["device"], settings.get("isometric", False), close,
+                settings["device"], settings.get("isometric", False), close, facing,
             )  # fmt: skip
         except (OSError, ValueError, RuntimeError):
             skipped += 1

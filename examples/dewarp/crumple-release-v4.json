@@ -14,10 +14,11 @@
     "val": 800
   },
   "modes": {
-    "crease": 0.35,
-    "fold": 0.25,
-    "curve": 0.2,
-    "flat": 0.2
+    "crease": 0.3,
+    "fold": 0.2,
+    "curve": 0.15,
+    "flat": 0.15,
+    "book": 0.2
   },
   "own_texture_prob": 0.25,
   "under_prob": 0.2,
