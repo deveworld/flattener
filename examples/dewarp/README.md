@@ -76,6 +76,26 @@ the schedule, and a rerun resumes it. Seed 1 keeps the augmentation draws apart 
 those of the seed-0 parent; validation does not depend on the seed, so its EPE compares
 with the parent's.
 
+`crumple-release-v*.json` are build specs for `tools/crumple/build.py`: each item
+flattens a SyntheticDoc render (or draws an own page), bends it with a procedural
+surface (`tools/crumple/render.py`), photographs it through a pinhole camera onto a
+background and stores the exact map, in the converted layout. `data-release-crumple*.json`
+add a build to the compact copy, and `train-release-crumple*-ft.json` fine-tune a release
+checkpoint on it like `train-release-perspective-ft.json`.
+
+| Build | Surfaces | Camera | Paper |
+|---|---|---|---|
+| v1 | crumple | tilt up to 32° | stretched on slopes |
+| v2 | crumple .55, curve .45 | curve: steep and close | stretched |
+| v3 | as v2, plus flat .2, own pages .25, paper underneath .2 | as v2 | stretched |
+| v4 | crease .3, fold .2, curve .15, flat .15, book .2 | 40% of every mode close | keeps its length, 3-D shape stored |
+
+The v1-v3 renderer put each texture point straight above its place on the ground
+plane, so folds and curls stretched the paper where real paper keeps its length and
+foreshortens text. From v4 the surface is laid flat first (`isometric`), and each sample
+also stores the surface's shape in the page's own frame (`grid3d`), which becomes the
+model's 3-D target (`loss_grid3d`; `train-release-crumple4-no3d-ft.json` turns it off).
+
 The start record of a fine-tune carries the parent's data spec, so
 `python -m flattener.scan.shippable` checks every training step of the chain from the
 child's sidecar alone. Fine-tunes trained before that record only the spec's sha256: the
