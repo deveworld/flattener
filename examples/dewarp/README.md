@@ -94,7 +94,7 @@ The v1-v3 renderer put each texture point straight above its place on the ground
 plane, so folds and curls stretched the paper where real paper keeps its length and
 foreshortens text. From v4 the surface is laid flat first (`isometric`), and each sample
 also stores the surface's shape in the page's own frame (`grid3d`), which becomes the
-model's 3-D target (`loss_grid3d`; `train-release-crumple4-no3d-ft.json` turns it off).
+model's 3-D target (`loss_grid3d`; `train-release-crumple6-no3d-ft.json` turns it off).
 
 The start record of a fine-tune carries the parent's data spec, so
 `python -m flattener.scan.shippable` checks every training step of the chain from the

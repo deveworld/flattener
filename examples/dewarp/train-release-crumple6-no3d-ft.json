@@ -1,6 +1,6 @@
 {
-  "data_spec": "data-release-crumple4.json",
-  "output_dir": "${FLATTENER_RUNS}/crumple4-no3d-ft-1",
+  "data_spec": "data-release-crumple6.json",
+  "output_dir": "${FLATTENER_RUNS}/crumple6-no3d-ft-1",
   "track": "release",
   "model": {
     "input_size": [
