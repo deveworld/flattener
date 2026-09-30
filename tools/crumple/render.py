@@ -311,6 +311,8 @@ def render(
     isometric: bool = False,
     close: bool | None = None,
     facing: NDArray[np.uint8] | None = None,
+    gloss: bool = False,
+    shadow: bool = False,
 ) -> tuple[NDArray[np.uint8], NDArray[np.float32], NDArray[np.float32]]:
     """(photo, forward map, shape) of ``texture`` (the flat page) crumpled and photographed.
     ``shape`` holds the surface point of each map point in the page's own frame (x across,
@@ -324,7 +326,9 @@ def render(
     the steep, close camera (``None``: only for ``curve``). ``mode`` ``book`` needs
     ``facing``, a page of the texture's size: the two lie open at a gutter, the texture on
     a random side, and only the texture is framed and mapped (the facing page may leave
-    the photo)."""
+    the photo). ``gloss`` adds a Blinn-Phong highlight of the light (glossy paper under a
+    flash); ``shadow`` darkens the photo past one or two soft lines (a hand or a phone
+    between the light and the page)."""
     out_h, out_w = out_hw
     tex_h, tex_w = texture.shape[:2]
     aspect = tex_h / tex_w
@@ -398,6 +402,14 @@ def render(
     sample_grid = torch.stack([x / width * 2 - 1, y / aspect * 2 - 1], dim=-1)[None]
     colour = F.grid_sample(tex, sample_grid, align_corners=True, mode="bilinear")[0]
     colour = (colour * shade[None]).permute(1, 2, 0).reshape(-1, 3)
+    if gloss:
+        eye = torch.tensor([0.0, 0.0, distance], device=device)
+        view = -(points + eye)  # towards the camera
+        half = light + view / view.norm(dim=-1, keepdim=True)
+        half = half / half.norm(dim=-1, keepdim=True)
+        strength, shininess = rng.uniform(0.15, 0.5), rng.uniform(15, 80)
+        highlight = strength * (normal * half).sum(-1).clamp(min=0) ** shininess
+        colour = colour + highlight.reshape(-1, 1)
     # Bilinear splat into the photo.
     fx, fy = px.reshape(-1) - 0.5, py.reshape(-1) - 0.5
     x0, y0 = torch.floor(fx), torch.floor(fy)
@@ -419,6 +431,18 @@ def render(
     back = torch.from_numpy(np.ascontiguousarray(background)).to(device).reshape(-1, 3)
     back = back.float() / 255
     photo = (photo * covered + back * (1 - covered)).reshape(out_h, out_w, 3)
+    if shadow:
+        side = min(out_h, out_w)
+        rows_at = (torch.arange(out_h, device=device) - out_h / 2) / side
+        cols_at = (torch.arange(out_w, device=device) - out_w / 2) / side
+        at_y, at_x = torch.meshgrid(rows_at, cols_at, indexing="ij")
+        soft, dark = rng.uniform(0.01, 0.08), rng.uniform(0.2, 0.55)
+        mask = torch.ones_like(at_x)
+        for _ in range(1 + int(rng.random() < 0.5)):
+            angle, offset = rng.uniform(0, 2 * math.pi), rng.uniform(-0.1, 0.45)
+            edge = at_x * math.cos(angle) + at_y * math.sin(angle) - offset
+            mask = mask * torch.sigmoid(edge / soft)
+        photo = photo * (1 - dark * mask)[..., None]
     image = (photo.clamp(0, 1) * 255 + 0.5).to(torch.uint8).cpu().numpy()
     # Forward map at the center-aligned map grid: exact projection of those page points.
     map_h, map_w = MAP_HW

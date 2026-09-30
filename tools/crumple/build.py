@@ -6,9 +6,10 @@ counts per split, the photo size, a background folder, optional ``modes`` weight
 ``render.render`` modes (default all ``crumple``), ``own_texture_prob`` (own generated pages
 as textures, license class ``own``), ``under_prob`` (a flat own page lying under the
 crumpled one, left out of the target), ``isometric`` (``render.render``: the paper
-keeps its length) and ``grid3d`` (also write the surface's shape in the page frame,
-``<id>.g3.npy``, the 3-D target) and ``close_prob`` (the share of other modes under
-``curve``'s steep, close camera); mode ``book`` puts an own page on the facing side.
+keeps its length), ``grid3d`` (also write the surface's shape in the page frame,
+``<id>.g3.npy``, the 3-D target), ``close_prob`` (the share of other modes under
+``curve``'s steep, close camera), and ``gloss_prob`` and ``shadow_prob`` (``render.render``'s
+highlight and cast shadow); mode ``book`` puts an own page on the facing side.
 Each item flattens one
 SyntheticDoc render through its ground truth into a page texture (the aspect from the
 grid's arc lengths), crumples and photographs it (``render.render``) on a CC0 or
@@ -174,9 +175,14 @@ def run_chunk(task: dict[str, Any]) -> dict[str, Any]:
                 name = f"{settings['name']}-{settings['split']}-{index}-facing"
                 size = (texture.shape[1], texture.shape[0])
                 facing = np.asarray(Image.fromarray(own_texture(rng, name)).resize(size))
+            gloss = shadow = False
+            if settings.get("gloss_prob") or settings.get("shadow_prob"):
+                gloss = rng.random() < (settings.get("gloss_prob") or 0.0)
+                shadow = rng.random() < (settings.get("shadow_prob") or 0.0)
             photo, forward, shape = render.render(
                 texture, rng, out_hw, np.clip(background, 0, 255).astype(np.uint8), mode,
-                settings["device"], settings.get("isometric", False), close, facing,
+                settings["device"], settings.get("isometric", False), close, facing, gloss,
+                shadow,
             )  # fmt: skip
         except (OSError, ValueError, RuntimeError):
             skipped += 1
@@ -267,7 +273,9 @@ def build(
                     "under_prob": spec.get("under_prob", 0.0),
                     "isometric": spec.get("isometric", False),
                     "grid3d": spec.get("grid3d", False),
-                    "close_prob": spec.get("close_prob")}  # fmt: skip
+                    "close_prob": spec.get("close_prob"),
+                    "gloss_prob": spec.get("gloss_prob"),
+                    "shadow_prob": spec.get("shadow_prob")}  # fmt: skip
         for start in range(0, count, spec.get("chunk", 200)):
             stop = min(count, start + spec.get("chunk", 200))
             tasks.append({"key": f"{split}-{start:07d}", "settings": settings,
