@@ -31,6 +31,7 @@ from flattener.dewarp.train import (
     code_record,
     compute_losses,
     improves,
+    page_space_loss,
     train,
     validate,
     validation_signature,
@@ -453,3 +454,32 @@ def test_the_axis_loss_charges_bent_rows_and_columns_but_not_moved_ones():
     }
     losses = compute_losses(config, 0, batch, bent.detach(), None)
     assert losses["loss_axis"] > 0 and losses["loss"] > losses["loss_grid2d"] * 5.0
+
+
+def test_the_page_loss_weighs_errors_where_the_page_is_foreshortened():
+    rows, cols = 9, 7
+    v = torch.linspace(-1, 1, rows)
+    far = 0.5 * (v + 1) ** 2 / 2 - 0.5  # rows bunch up at the top (v = -1), as far away
+    y, x = torch.meshgrid(far * 1.6, torch.linspace(-0.6, 0.6, cols), indexing="ij")
+    target = torch.stack([x, y])[None]
+    valid = torch.ones(1, 1, rows, cols)
+    assert page_space_loss(target, target, valid) == pytest.approx(0.0, abs=1e-10)
+    even = torch.stack(
+        torch.meshgrid(
+            torch.linspace(-0.8, 0.8, rows), torch.linspace(-0.6, 0.6, cols), indexing="ij"
+        )[::-1]
+    )[None]
+    moved = even + torch.tensor([0.02, -0.01]).view(1, 2, 1, 1)
+    # An evenly spaced page scores as the image-space L1 over the nodes it weighs.
+    assert page_space_loss(moved, even, valid) == pytest.approx(0.03, rel=1e-4)
+    near, bunched = target.clone(), target.clone()
+    near[0, 1, 6, 3] += 0.01  # the same image-space error, near and far
+    bunched[0, 1, 2, 3] += 0.01
+    assert page_space_loss(bunched, target, valid) > 1.5 * page_space_loss(near, target, valid)
+    loss = page_space_loss(bunched.requires_grad_(), target, valid)
+    loss.backward()
+    assert torch.isfinite(bunched.grad).all()
+    config = TrainConfig(data_spec="s", output_dir="o", track="research", model=TINY, loss_page=2.0)
+    batch = {"grid2d": target, "valid": valid, "has_grid3d": torch.tensor([False])}
+    losses = compute_losses(config, 0, batch, near, None)
+    assert losses["loss"] == pytest.approx(5.0 * losses["loss_grid2d"] + 2.0 * losses["loss_page"])

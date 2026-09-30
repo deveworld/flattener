@@ -20,7 +20,8 @@ with a different signature starts a new best. Every new best is saved.
 Loss (UVDoc ``train.py`` defaults): 5 * L1(2-D grid) + 5 * L1(3-D grid, only
 samples that have one) + optional reconstruction L1 (UVDoc: 1.0 from epoch 10
 of 21), all masked by grid-node validity. ``loss_axis`` adds the axis-alignment term
-(``axis_alignment_loss``, after the AADD paper, arXiv 2507.15000).
+(``axis_alignment_loss``, after the AADD paper, arXiv 2507.15000) and ``loss_page`` the
+grid error on the flat page (``page_space_loss``).
 
 ``examples/dewarp/train-research-uvdoc-recipe.json`` maps the upstream
 schedule to steps: batch 8, two optimizer steps (Doc3D, UVDoc) per mixDataset
@@ -142,6 +143,7 @@ CSV_COLUMNS = (
     "loss_grid3d",
     "loss_recon",
     "loss_axis",
+    "loss_page",
     "grad_norm",
     "skipped",
     "overflow_steps",
@@ -185,6 +187,7 @@ class TrainConfig:
     loss_grid3d: float = 5.0
     loss_recon: float = 0.0
     loss_axis: float = 0.0
+    loss_page: float = 0.0
     recon_start_step: int = 0
     num_workers: int = 6
     prefetch_factor: int = 4
@@ -260,6 +263,7 @@ class TrainConfig:
             "loss_grid3d",
             "loss_recon",
             "loss_axis",
+            "loss_page",
         )
         for name in numbers:
             value = getattr(self, name)
@@ -452,37 +456,47 @@ def _masked_l1(prediction: torch.Tensor, target: torch.Tensor, mask: torch.Tenso
     return ((prediction - target).abs() * weight).sum() / weight.sum().clamp_min(1.0)
 
 
-def axis_alignment_loss(
+def _page_errors(
     prediction: torch.Tensor, target: torch.Tensor, valid: torch.Tensor
-) -> torch.Tensor:
-    """How far each predicted grid row strays from one line of the flat page, and each
-    column likewise (AADD's axis-aligned constraint).
-
-    Each predicted node is taken to page coordinates through the local inverse of the
-    target grid (the target's node differences as a Jacobian), so a node off its target
-    by ``e`` lands at page position (u, v) + J^-1 e. A row of the flat page has one v and
-    a column one u: the loss is the mean variance of v along the rows plus that of u
-    along the columns, over valid nodes. Moving a whole row or column costs nothing here;
-    bending it does. The shifts are measured in image units (flattener values, as the
-    grid loss), each scaled by the local length of its page axis, so a small page on a
-    large background weighs no more per pixel than a large one, and clipped at 0.5.
-    Nodes next to an invalid one, or where the target's page axes are nearly parallel,
-    are left out. Grids are (N, 2, Gh, Gw)."""
+) -> tuple[torch.Tensor, ...]:
+    """Each node's error taken to page coordinates through the local inverse of the target
+    grid (its node differences as a Jacobian): (u, v) shifts in page units (the page spans
+    -1..1 each way), the lengths of the target's page axes at the node (image units per
+    page unit) and the weight of the node: its 3x3 neighbourhood is valid (the differences
+    read it) and its page axes are far from parallel (a folded or collapsed target has no
+    local inverse)."""
     rows, cols = target.shape[-2:]
     target = target.float()
     du = torch.gradient(target, dim=3)[0] * ((cols - 1) / 2.0)  # dp per page unit of u
     dv = torch.gradient(target, dim=2)[0] * ((rows - 1) / 2.0)
     det = du[:, 0] * dv[:, 1] - dv[:, 0] * du[:, 1]
     lengths = du.norm(dim=1) * dv.norm(dim=1)
-    # A node counts when its 3x3 neighbourhood is valid (the differences read it) and its
-    # page axes are far from parallel (a folded or collapsed target has no local inverse).
     usable = -F.max_pool2d(-valid.float(), 3, stride=1, padding=1)
     weight = usable[:, 0] * (det.abs() >= 0.1 * lengths).float()
     det = torch.where(det.abs() < 1e-6, torch.full_like(det, 1e-6), det)
     error = prediction.float() - target
-    shift_u = (dv[:, 1] * error[:, 0] - dv[:, 0] * error[:, 1]) / det * du.norm(dim=1)
-    shift_v = (du[:, 0] * error[:, 1] - du[:, 1] * error[:, 0]) / det * dv.norm(dim=1)
-    shift_u, shift_v = shift_u.clamp(-0.5, 0.5), shift_v.clamp(-0.5, 0.5)
+    page_u = (dv[:, 1] * error[:, 0] - dv[:, 0] * error[:, 1]) / det
+    page_v = (du[:, 0] * error[:, 1] - du[:, 1] * error[:, 0]) / det
+    return page_u, page_v, du.norm(dim=1), dv.norm(dim=1), weight
+
+
+def axis_alignment_loss(
+    prediction: torch.Tensor, target: torch.Tensor, valid: torch.Tensor
+) -> torch.Tensor:
+    """How far each predicted grid row strays from one line of the flat page, and each
+    column likewise (AADD's axis-aligned constraint).
+
+    Each predicted node is taken to page coordinates (``_page_errors``), so a node off its
+    target by ``e`` lands at page position (u, v) + J^-1 e. A row of the flat page has one
+    v and a column one u: the loss is the mean variance of v along the rows plus that of u
+    along the columns, over the nodes ``_page_errors`` weighs. Moving a whole row or column
+    costs nothing here; bending it does. The shifts are measured in image units
+    (flattener values, as the grid loss), each scaled by the local length of its page
+    axis, so a small page on a large background weighs no more per pixel than a large
+    one, and clipped at 0.5. Grids are (N, 2, Gh, Gw)."""
+    page_u, page_v, length_u, length_v, weight = _page_errors(prediction, target, valid)
+    shift_u = (page_u * length_u).clamp(-0.5, 0.5)
+    shift_v = (page_v * length_v).clamp(-0.5, 0.5)
 
     def spread(values: torch.Tensor, dim: int) -> torch.Tensor:
         count = weight.sum(dim=dim)
@@ -493,6 +507,26 @@ def axis_alignment_loss(
         return (variance * lines).sum() / lines.sum().clamp_min(1.0)
 
     return spread(shift_v, dim=2) + spread(shift_u, dim=1)
+
+
+def page_space_loss(
+    prediction: torch.Tensor, target: torch.Tensor, valid: torch.Tensor
+) -> torch.Tensor:
+    """L1 of the grid error on the flat page, where the output is judged.
+
+    The image-space grid loss weighs a node's error by how far it moves in the photo; where
+    the page is foreshortened (its far side, a fold turned away) the same error moves the
+    output by more. Here each node's error is taken to page coordinates
+    (``_page_errors``) and scaled by the page's mean axis lengths in the image, one per
+    sample, so an evenly spaced page scores as the image-space L1 in its own axes and
+    compressed parts weigh more. Each shift is clipped at 0.5; nodes are averaged over
+    the weights of ``_page_errors``. Grids are (N, 2, Gh, Gw)."""
+    page_u, page_v, length_u, length_v, weight = _page_errors(prediction, target, valid)
+    count = weight.sum(dim=(1, 2)).clamp_min(1.0)
+    scale_u = ((length_u * weight).sum(dim=(1, 2)) / count).view(-1, 1, 1)
+    scale_v = ((length_v * weight).sum(dim=(1, 2)) / count).view(-1, 1, 1)
+    error = (page_u * scale_u).abs().clamp(max=0.5) + (page_v * scale_v).abs().clamp(max=0.5)
+    return (error * weight).sum() / weight.sum().clamp_min(1.0)
 
 
 def compute_losses(
@@ -520,6 +554,9 @@ def compute_losses(
     if config.loss_axis > 0:
         losses["loss_axis"] = axis_alignment_loss(grid2d, batch["grid2d"], valid)
         total = total + config.loss_axis * losses["loss_axis"]
+    if config.loss_page > 0:
+        losses["loss_page"] = page_space_loss(grid2d, batch["grid2d"], valid)
+        total = total + config.loss_page * losses["loss_page"]
     losses["loss"] = total
     return losses
 
