@@ -9,8 +9,8 @@ crumpled one, left out of the target), ``isometric`` (``render.render``: the pap
 keeps its length), ``grid3d`` (also write the surface's shape in the page frame,
 ``<id>.g3.npy``, the 3-D target), ``close_prob`` (the share of other modes under
 ``curve``'s steep, close camera), and ``gloss_prob`` and ``shadow_prob`` (``render.render``'s
-highlight and cast shadow); modes ``book`` and ``spread`` put an own page on the
-facing side (``spread`` maps both).
+highlight and cast shadow); modes ``book``, ``leaf`` and ``spread`` put an own page on
+the facing side (``spread`` maps both).
 Each item flattens one
 SyntheticDoc render through its ground truth into a page texture (the aspect from the
 grid's arc lengths), crumples and photographs it (``render.render``) on a CC0 or
@@ -172,7 +172,7 @@ def run_chunk(task: dict[str, Any]) -> dict[str, Any]:
             if settings.get("close_prob") is not None:
                 close = mode == "curve" or rng.random() < settings["close_prob"]
             facing = None
-            if mode in ("book", "spread"):  # an own page faces it
+            if mode in ("book", "leaf", "spread"):  # an own page faces it
                 name = f"{settings['name']}-{settings['split']}-{index}-facing"
                 size = (texture.shape[1], texture.shape[0])
                 facing = np.asarray(Image.fromarray(own_texture(rng, name)).resize(size))

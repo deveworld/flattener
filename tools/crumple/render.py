@@ -15,8 +15,10 @@ Surface (page width 1, height ``aspect``), by ``mode`` (``surface``):
 - ``fold``: a letter folded in halves or thirds each way and opened again;
 - ``curve``: a smooth curl under a steep, close camera; ``flat``: a slight curl;
 - ``book``: two pages open at a gutter that dips away, arching or sagging outward, the
-  texture on one of them; ``spread``: the same with both pages as the texture (the
-  scanner's target for an open book, which it splits at the gutter).
+  texture on one of them; ``leaf``: the same framed with the gutter at the photo's edge,
+  so most of the facing page leaves the photo (one page of a book shot on its own);
+  ``spread``: the same with both pages as the texture (the scanner's target for an open
+  book, which it splits at the gutter).
 With ``isometric`` the texture lies on the surface as the paper laid flat (``lay_flat``,
 ``to_ground``), so it keeps its length and slopes foreshorten it; without, each texture
 point sits straight above its place on the ground plane, which stretches the paper on
@@ -44,6 +46,7 @@ CURVE_TILT_DEG = 45.0
 OVERSAMPLE = 2.2
 FLAT_COLS = 385  # ground-plane grid across the page for laying it flat
 FLAT_PAD = 0.08  # its margin around the page, share of each side
+LEAF_FACING_INSIDE = 0.35  # a leaf's facing page may keep at most this share in the photo
 
 
 def _creases(rng: np.random.Generator, aspect: float) -> list[tuple]:
@@ -334,7 +337,7 @@ def render(
     ``isometric`` keeps the paper's length: the texture lies on the surface as the page
     laid flat (``lay_flat``), so slopes foreshorten it as they do real paper; otherwise
     each texture point sits straight above its place on the ground plane. ``close`` picks
-    the steep, close camera (``None``: only for ``curve``). ``mode`` ``book`` needs
+    the steep, close camera (``None``: only for ``curve``). ``mode`` ``book`` (or ``leaf``) needs
     ``facing``, a page of the texture's size: the two lie open at a gutter, the texture on
     a random side, and only the texture is framed and mapped (the facing page may leave
     the photo). ``gloss`` adds a Blinn-Phong highlight of the light (glossy paper under a
@@ -344,7 +347,7 @@ def render(
     tex_h, tex_w = texture.shape[:2]
     aspect = tex_h / tex_w
     width, left = 1, 0  # the sheet in page widths, and where the page starts on it
-    if mode == "book":
+    if mode in ("book", "leaf"):
         if facing is None or facing.shape != texture.shape:
             raise ValueError("a book needs a facing page of the texture's size")
         width, left = 2, int(rng.random() < 0.5)
@@ -357,7 +360,7 @@ def render(
     xs = torch.linspace(0, width, cols * width, device=device)
     ys = torch.linspace(0, aspect, rows, device=device)
     y, x = torch.meshgrid(ys, xs, indexing="ij")
-    shape = surface(rng, aspect, mode)
+    shape = surface(rng, aspect, "book" if mode == "leaf" else mode)
     ground_x, ground_y = x, y
     if isometric:
         ground_x, ground_y = to_ground(x, y, *lay_flat(shape, aspect, device, width=width))
@@ -392,8 +395,21 @@ def render(
     scale = float(torch.clamp((room / span).min(), max=1.0))
     px, py = (px - low[0]) * scale, (py - low[1]) * scale
     slack = (room - span * scale).clamp(min=0).cpu().numpy()
-    px = px + margin + rng.uniform(0, slack[0])
-    py = py + margin + rng.uniform(0, slack[1])
+    shift = [rng.uniform(0, slack[0]), rng.uniform(0, slack[1])]
+    if mode == "leaf":  # the gutter against the frame's edge: the facing page leaves the photo
+        away = [
+            float(px[~page].mean() - px[page].mean()),
+            float(py[~page].mean() - py[page].mean()),
+        ]
+        axis = int(abs(away[1]) > abs(away[0]))
+        near = 0.1 * shift[axis]  # within a tenth of the slack of that edge
+        shift[axis] = near if away[axis] < 0 else slack[axis] - near
+    px = px + margin + shift[0]
+    py = py + margin + shift[1]
+    if mode == "leaf":
+        inside = (px >= 0) & (px < out_w) & (py >= 0) & (py < out_h)
+        if float(inside[~page].float().mean()) > LEAF_FACING_INSIDE:
+            raise ValueError("the facing page stays in the photo")
     # Shading from the surface normal, camera-side light.
     if isometric:
         surface_points = torch.stack([ground_x, ground_y, z], dim=-1)
