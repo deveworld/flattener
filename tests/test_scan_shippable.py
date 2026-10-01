@@ -303,6 +303,31 @@ def test_a_release_finetune_needs_every_parent_data_spec():
         assert shippable(child).reasons == reasons
 
 
+def test_a_blend_ships_only_when_both_parents_do():
+    parent = _parent(SCRATCH_409K, "/workspace/init/scratch-409k.pt")
+    tuned = _sidecar("c" * 64, SPEC_199K, SPEC_199K_SHA, [parent, _train(SPEC_199K_SHA)], step=1000)
+
+    def blend(first, second):
+        parents = [
+            {**_parent(first, "/w/a.pt"), "data_spec": first["data_spec"], "weight": 0.5},
+            {**_parent(second, "/w/b.pt"), "data_spec": second["data_spec"], "weight": 0.5},
+        ]
+        soup = {"kind": "soup", "track": "release", "parents": parents}
+        return {**first, "sha256": "s" * 64, "lineage": [*first["lineage"], soup]}
+
+    verdict = shippable(blend(SCRATCH_409K, tuned))
+    assert verdict.shippable and verdict.initialization == "scratch"
+    soup = verdict.chain[0]["training"][-1]
+    assert soup == {"kind": "soup", "parents": [SCRATCH_409K_SHA, "c" * 64]}
+    assert "research_data" in shippable(blend(SCRATCH_409K, RECIPE_REPRO)).reasons
+    assert "external_init" in shippable(blend(SCRATCH_409K, UVDOC_199K)).reasons
+    lonely = {
+        **SCRATCH_409K,
+        "lineage": [*SCRATCH_409K["lineage"], {"kind": "soup", "parents": []}],
+    }
+    assert "unknown_lineage_entry" in shippable(lonely).reasons
+
+
 GATE_DATA = [
     {"kind": "authored", "license": "Apache-2.0 AND OFL-1.1"},
     {"kind": "simulated", "license": "CC-BY-4.0"},

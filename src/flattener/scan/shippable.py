@@ -19,6 +19,10 @@ start holds the parent's own lineage) and requires:
 * the license manifest (``data_sources``, when the record has one) lists release sources
   whose license classes are all on ``RELEASE_LICENSE_KEYS``.
 
+A ``kind: "soup"`` step (``tools/soup.py``: weights blended from two checkpoints) names
+its ``parents`` as ``kind: "checkpoint"`` entries with their own lineage and data spec;
+each parent goes through the same rules as a checkpoint start.
+
 Accepted records: a checkpoint payload or sidecar, ``Dewarper.info`` (it has no data
 spec content, so pass the spec through ``specs``), a run-info file (``init`` dict,
 ``data_spec_content``; a ``checkpoint`` init keeps the parent lineage as
@@ -168,6 +172,8 @@ def _embedded_specs(lineage: Any, depth: int = 0) -> Iterator[Any]:
             if isinstance(entry.get("data_spec"), Mapping):
                 yield entry["data_spec"]
             yield from _embedded_specs(entry.get("lineage"), depth + 1)
+        elif isinstance(entry, Mapping) and entry.get("kind") == "soup":
+            yield from _embedded_specs(entry.get("parents"), depth + 1)
 
 
 def _spec_index(items: Iterable[Any]) -> dict[str, str]:
@@ -277,14 +283,16 @@ class _Walk:
         steps = lineage[1:]
         if not steps:
             self.fail("unknown_lineage_entry")
-        node["training"] = [self.step(step) for step in steps]
+        node["training"] = [self.step(step, depth) for step in steps]
         trained = [step for step in node["training"] if step["kind"] == "train"]
         last = trained[-1]["data_spec_sha256"] if trained else None
         if isinstance(spec_sha256, str) and last != spec_sha256:
             self.fail("lineage_mismatch")
         self.start(lineage[0], depth + 1)
 
-    def step(self, step: Any) -> dict[str, Any]:
+    def step(self, step: Any, depth: int) -> dict[str, Any]:
+        if isinstance(step, Mapping) and step.get("kind") == "soup":
+            return self.soup(step, depth)
         if not isinstance(step, Mapping) or step.get("kind") != "train":
             self.fail("unknown_lineage_entry")
             kind = step.get("kind") if isinstance(step, Mapping) else None
@@ -298,6 +306,22 @@ class _Walk:
         elif data != "release":
             self.fail("research_data")
         return {"kind": "train", "track": track, "data_spec_sha256": digest, "data": data}
+
+    def soup(self, step: Mapping[str, Any], depth: int) -> dict[str, Any]:
+        """A blend of checkpoints: its track, then each parent as a checkpoint start."""
+        if step.get("track") != "release":
+            self.fail("not_release_track")
+        parents = step.get("parents")
+        if not isinstance(parents, list) or len(parents) < 2:
+            self.fail("unknown_lineage_entry")
+            return {"kind": "soup", "parents": []}
+        for parent in parents:
+            if not isinstance(parent, Mapping) or parent.get("kind") != "checkpoint":
+                self.fail("unknown_lineage_entry")
+                continue
+            self.start(parent, depth + 1)
+        hashes = [parent.get("sha256") for parent in parents if isinstance(parent, Mapping)]
+        return {"kind": "soup", "parents": hashes}
 
     def start(self, start: Mapping[str, Any], depth: int) -> None:
         kind = start.get("kind")

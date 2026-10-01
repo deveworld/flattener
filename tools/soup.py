@@ -3,10 +3,11 @@
 The weights of OUT are ``(1 - W) * A + W * B`` (float tensors, BatchNorm statistics
 included; integer counters come from A), the rest of the payload is A's without its
 optimizer, scaler and RNG state, and the lineage gains a ``soup`` step naming both
-parents with their sha256, step, data spec and weight. B should be a fine-tune of A (or
-both fine-tunes of one checkpoint), so the two sit in one basin and a blend keeps what
-each learned (weight-space ensembling, as in WiSE-FT). Both must be release-track
-checkpoints of the same model configuration.
+parents as checkpoint entries (sha256, step, track, data spec and its sha256, lineage)
+with their weight, which ``flattener.scan.shippable`` checks like a fine-tune's start.
+B should be a fine-tune of A (or both fine-tunes of one checkpoint), so the two sit in
+one basin and a blend keeps what each learned (weight-space ensembling, as in WiSE-FT).
+Both must be release-track checkpoints of the same model configuration.
 """
 
 from __future__ import annotations
@@ -61,12 +62,17 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("error: the checkpoints have different model configurations")
     payload = {key: value for key, value in first.items() if key not in DROPPED}
     payload["model_state"] = blend(first["model_state"], second["model_state"], args.weight)
-    parents = [
+    parents = [  # checkpoint entries as a fine-tune's start records them, plus the share
         {
+            "kind": "checkpoint",
             "path": str(Path(path).resolve()),
             "sha256": sha256_file(path),
             "step": source["step"],
+            "track": source["track"],
+            "model_config": source["model_config"],
             "data_spec_sha256": source["data_spec_sha256"],
+            "data_spec": source.get("data_spec"),
+            "lineage": source["lineage"],
             "weight": share,
         }
         for path, source, share in (
