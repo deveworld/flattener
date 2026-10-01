@@ -81,3 +81,12 @@ def test_benchmark_captures_stay_out(tmp_path):
     bench.mkdir(parents=True)
     (bench / "09_00000_1_0_0.json").write_text('{"sample_id": "09_00000_1"}')
     assert tool.captures(tmp_path / "raw", tmp_path / "bench") == ["03_00007_1", "09_00001_1"]
+
+
+def test_builds_naming_one_split_hold_out_the_same_captures():
+    tool = _tool()
+    ids = [f"{session:02d}_{n:05d}_1" for session in range(4) for n in range(100)]
+    first = tool.split_captures(ids, {"name": "a"})
+    assert 0 < len(first["val"]) < 60 and len(first["val"]) + len(first["train"]) == len(ids)
+    assert tool.split_captures(ids, {"name": "b", "split_name": "a"}) == first
+    assert tool.split_captures(ids, {"name": "b"})["val"] != first["val"]

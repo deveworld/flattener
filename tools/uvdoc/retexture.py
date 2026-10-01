@@ -17,7 +17,9 @@ The build spec (``flattener-uvdoc-retexture-1``, see ``examples/dewarp``) names 
 root, the benchmark whose captures stay out (``exclude_benchmark``: a folder with
 ``metadata_geom/*.json``; their ``sample_id`` captures are skipped), the dewarp data
 spec the pages come from, the photo size, counts per split (captures are split by a hash
-of their id, ``val_share`` to val), ``own_texture_prob``, ``background_dir``,
+of their id and ``split_name``, the spec's name when absent, ``val_share`` to val; a
+further build of the same captures names the first one here so both hold out the same
+captures), ``own_texture_prob``, ``background_dir``,
 ``capture_background_prob`` (keep the photo's own surroundings), ``shade`` (strength
 range) and ``margin`` (crop margin around the page, share of its size per side). Each
 item flips the capture as UVDoc does (texture coordinates follow, so text never
@@ -331,6 +333,16 @@ def captures(raw: Path, exclude: Path | None) -> list[str]:
     return ids
 
 
+def split_captures(ids: list[str], spec: dict[str, Any]) -> dict[str, list[str]]:
+    """Captures per split: ``val_share`` of them to val by a hash of the id and
+    ``split_name`` (the spec's name when absent), the rest to train."""
+    share = spec.get("val_share", 0.05)
+    name = spec.get("split_name", spec["name"])
+    val = [c for c in ids if _seed(name, "split", c) % 1000 < share * 1000]
+    held = set(val)
+    return {"val": val, "train": [c for c in ids if c not in held]}
+
+
 def build(
     spec_path: Path, output: Path, *, workers: int, limit: int | None, device: str = "cpu"
 ) -> dict[str, Any]:
@@ -345,11 +357,7 @@ def build(
     ids = captures(raw, exclude)
     if not ids:
         raise SystemExit(f"error: no captures under {raw / 'samples' / 'rgb'}")
-    share = spec.get("val_share", 0.05)
-    by_split = {
-        "val": [c for c in ids if _seed(spec["name"], "split", c) % 1000 < share * 1000],
-    }
-    by_split["train"] = [c for c in ids if c not in set(by_split["val"])]
+    by_split = split_captures(ids, spec)
     build_module = _crumple_build()
     orient = build_module._orient_builder()
     dewarp_spec = Path(base, expand_path(spec["dewarp_spec"])).resolve()
