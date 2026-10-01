@@ -83,18 +83,29 @@ background and stores the exact map, in the converted layout. `data-release-crum
 add a build to the compact copy, and `train-release-crumple*-ft.json` fine-tune a release
 checkpoint on it like `train-release-perspective-ft.json`.
 
-| Build | Surfaces | Camera | Paper |
-|---|---|---|---|
-| v1 | crumple | tilt up to 32° | stretched on slopes |
-| v2 | crumple .55, curve .45 | curve: steep and close | stretched |
-| v3 | as v2, plus flat .2, own pages .25, paper underneath .2 | as v2 | stretched |
-| v4 | crease .3, fold .2, curve .15, flat .15, book .2 | 40% of every mode close | keeps its length, 3-D shape stored |
+| Build | Surfaces | Camera | Paper | 40k-step fine-tune from dewarp-v2 |
+|---|---|---|---|---|
+| v1 | crumple | tilt up to 32° | stretched on slopes | DIR300 +0.022 MS-SSIM; two real book photos worse |
+| v2 | crumple .55, curve .45 | curve: steep and close | stretched | DIR300 0.670, UVDoc bench 0.666; two book photos worse |
+| v5 | crease .25, fold .2, curve .15, flat .15, spread .25 | 40% of every mode close | keeps its length, 3-D shape stored | best UVDoc-bench AD and DIR300 LD; DocUNet -0.015; book photos worse |
+| v6 | as v5, spread .2, leaf .15 | as v5 | as v5 | no better on book photos; pages cut off by the photo cropped again |
 
-The v1-v3 renderer put each texture point straight above its place on the ground
-plane, so folds and curls stretched the paper where real paper keeps its length and
-foreshortens text. From v4 the surface is laid flat first (`isometric`), and each sample
+The v1-v2 renderer put each texture point straight above its place on the ground plane,
+so folds and curls stretched the paper where real paper keeps its length and
+foreshortens text. From v5 the surface is laid flat first (`isometric`), and each sample
 also stores the surface's shape in the page's own frame (`grid3d`), which becomes the
-model's 3-D target (`loss_grid3d`; `train-release-crumple6-no3d-ft.json` turns it off).
+model's 3-D target (`loss_grid3d`; `train-release-crumple6-no3d-ft.json` turns it off:
+DocUNet 0.563 against 0.558 with it). `spread` maps both pages of an open book (the
+scanner splits them at the gutter); `leaf` maps one page whose facing page mostly leaves
+the photo.
+
+Every fine-tune on these renders raised the single-sheet benchmarks (DIR300, UVDoc bench)
+and made real book photos worse: the facing page taken into the page, pages cut off by
+the photo cropped to their visible text, spreads left unsplit. The renders hold single
+sheets with all four edges in view, as SyntheticDoc does. `tools/soup.py` blends a
+fine-tune with its parent; the 50/50 blend of the v2 fine-tune with dewarp-v2 kept the
+real photos close to dewarp-v2 and scored DocUNet 0.576 / 5.33 / 0.234, while the blend
+with the v5 fine-tune (whose 3-D head had trained) fell below both parents.
 
 The start record of a fine-tune carries the parent's data spec, so
 `python -m flattener.scan.shippable` checks every training step of the chain from the
