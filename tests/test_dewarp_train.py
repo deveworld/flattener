@@ -1,5 +1,6 @@
 """Dewarp trainer: sampler, checkpoints, resume, validation, losses and a CPU smoke run."""
 
+import contextlib
 import csv
 import json
 import math
@@ -322,6 +323,28 @@ def test_two_step_cpu_training_smoke_and_exact_resume(tmp_path):
         assert torch.equal(value, b["model_state"][key]), key
     with pytest.raises(FlattenerError, match="checkpoints"):
         train(_config(tmp_path), resume="none")
+
+
+def test_device_tallies_train_the_same_weights_as_host_checks(tmp_path, monkeypatch):
+    """With a loss scaler the loop keeps its per-step checks on the device; a power-of-two
+    loss scale leaves the gradients, so the weights and logged losses match a plain run."""
+    _spec(tmp_path)
+    plain = train(_config(tmp_path, max_steps=3, name="plain"))
+    import flattener.dewarp.train as module
+
+    monkeypatch.setattr(module, "_amp", lambda config, device: True)
+    monkeypatch.setattr(module, "_autocast", lambda config, device: contextlib.nullcontext())
+    scaled = train(_config(tmp_path, max_steps=3, name="scaled"))
+    a, b = load_checkpoint(plain["checkpoint"]), load_checkpoint(scaled["checkpoint"])
+    for key, value in a["model_state"].items():
+        torch.testing.assert_close(b["model_state"][key], value, rtol=0, atol=0, msg=key)
+    assert b["counters"] == a["counters"] == {"skipped": 0, "overflow_steps": 0}
+
+    def losses(name):
+        rows = (tmp_path / name / "train_log.jsonl").read_text().splitlines()
+        return [json.loads(r)["loss"] for r in rows if json.loads(r)["kind"] == "train"]
+
+    assert losses("scaled") == pytest.approx(losses("plain"), rel=1e-6)
 
 
 def test_example_configs_parse_and_respect_tracks():

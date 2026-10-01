@@ -539,16 +539,23 @@ def compute_losses(
     valid = batch["valid"]
     losses = {"loss_grid2d": _masked_l1(grid2d.float(), batch["grid2d"], valid)}
     total = config.loss_grid2d * losses["loss_grid2d"]
-    if grid3d is not None and config.loss_grid3d > 0 and bool(batch["has_grid3d"].any()):
+    # The training loop reads both flags on the host before moving the batch (``_host_flags``),
+    # so the device never has to answer them.
+    any_3d = batch.get("any_grid3d")
+    if any_3d is None:
+        any_3d = bool(batch["has_grid3d"].any())
+    if grid3d is not None and config.loss_grid3d > 0 and any_3d:
         mask = valid * batch["has_grid3d"].to(valid.dtype).view(-1, 1, 1, 1)
         losses["loss_grid3d"] = _masked_l1(grid3d.float(), batch["grid3d"], mask)
         total = total + config.loss_grid3d * losses["loss_grid3d"]
-    complete = valid.flatten(1).all(dim=1)
-    if config.loss_recon > 0 and step >= config.recon_start_step and bool(complete.any()):
-        image, size = batch["image"][complete], config.model.input_size
-        predicted = unwarp_torch(image, grid2d.float()[complete], size)
+    complete = batch.get("complete_index")
+    if complete is None:
+        complete = torch.nonzero(valid.flatten(1).all(dim=1)).flatten()
+    if config.loss_recon > 0 and step >= config.recon_start_step and complete.numel() > 0:
+        image, size = batch["image"].index_select(0, complete), config.model.input_size
+        predicted = unwarp_torch(image, grid2d.float().index_select(0, complete), size)
         with torch.no_grad():
-            target = unwarp_torch(image, batch["grid2d"][complete], size)
+            target = unwarp_torch(image, batch["grid2d"].index_select(0, complete), size)
         losses["loss_recon"] = F.l1_loss(predicted, target)
         total = total + config.loss_recon * losses["loss_recon"]
     if config.loss_axis > 0:
@@ -566,6 +573,13 @@ def _layout(images: torch.Tensor, config: TrainConfig) -> torch.Tensor:
     if config.channels_last:
         return images.contiguous(memory_format=torch.channels_last)
     return images
+
+
+def _host_flags(batch: dict[str, Any]) -> dict[str, Any]:
+    """What ``compute_losses`` would otherwise ask the device: whether any sample has a 3-D
+    target, and the indices of samples whose grid is valid everywhere."""
+    complete = torch.nonzero(batch["valid"].flatten(1).all(dim=1)).flatten()
+    return {"any_grid3d": bool(batch["has_grid3d"].any()), "complete_index": complete}
 
 
 def _to_device(batch: dict[str, Any], device: torch.device) -> dict[str, Any]:
@@ -1043,9 +1057,38 @@ def train(config: TrainConfig, *, resume: str = "auto") -> dict[str, Any]:
         status("running")
         iterator = iter(loader)
         window = {"images": 0, "data": 0.0, "start": time.perf_counter()}
-        sums: dict[str, float] = {}
-        grad_norm: float | None = None
+        sums: dict[str, Any] = {}
+        grad_norm: Any = None
         nonfinite_run = 0
+        # With AMP on CUDA the per-step checks (finite loss, overflow, loss sums, gradient
+        # norm) stay on the device and are read once per log line, so the host never waits
+        # for a step to finish; the scaler already skips non-finite updates.
+        on_device = scaler.is_enabled()
+        if on_device:
+            zero = torch.zeros((), dtype=torch.long, device=device)
+            tally = {"skipped": zero.clone(), "overflow": zero.clone(), "run": zero.clone(),
+                     "worst_run": zero.clone(), "count": zero.clone()}  # fmt: skip
+
+        def flush() -> None:
+            """Move the device tallies of the steps since the last flush to the host."""
+            nonlocal grad_norm, nonfinite_run
+            if not on_device:
+                return
+            counters["skipped"] += int(tally["skipped"])
+            counters["overflow_steps"] += int(tally["overflow"])
+            nonfinite_run = int(tally["run"])
+            if int(tally["worst_run"]) > 100:
+                raise FlattenerError(
+                    Status.MODEL_ERROR,
+                    "non_finite_loss",
+                    f"100 consecutive non-finite losses before step {step}",
+                )
+            tally["worst_run"].copy_(tally["run"])
+            for key in ("skipped", "overflow"):
+                tally[key].zero_()
+            if isinstance(grad_norm, torch.Tensor):
+                grad_norm = float(grad_norm)  # inf/nan on an AMP overflow step
+
         stop_reason = "max_steps"
         while step < config.stop_step:
             if (
@@ -1055,7 +1098,9 @@ def train(config: TrainConfig, *, resume: str = "auto") -> dict[str, Any]:
                 stop_reason = "max_seconds"
                 break
             waited = time.perf_counter()
-            batch = _to_device(next(iterator), device)
+            host = next(iterator)
+            batch = {**_to_device(host, device), **_host_flags(host)}
+            batch["complete_index"] = batch["complete_index"].to(device, non_blocking=True)
             window["data"] += time.perf_counter() - waited
             batch["image"] = _layout(to_float_images(batch), config)  # colour jitter on device
             lr = learning_rate(config, step)
@@ -1064,33 +1109,54 @@ def train(config: TrainConfig, *, resume: str = "auto") -> dict[str, Any]:
             with _autocast(config, device):
                 grid2d, grid3d = model(batch["image"])
             losses = compute_losses(config, step, batch, grid2d, grid3d)
-            finite = bool(torch.isfinite(losses["loss"]))
-            nonfinite_run = 0 if finite else nonfinite_run + 1
-            counters["skipped"] += not finite
-            if nonfinite_run > 100:
-                raise FlattenerError(
-                    Status.MODEL_ERROR,
-                    "non_finite_loss",
-                    f"100 consecutive non-finite losses at step {step}",
-                )
-            if finite or scaler.is_enabled():  # the scaler skips non-finite updates itself
-                scaler.scale(losses["loss"]).backward()
+            if on_device:
+                finite = torch.isfinite(losses["loss"])
+                tally["run"] = torch.where(finite, zero, tally["run"] + 1)
+                tally["worst_run"] = torch.maximum(tally["worst_run"], tally["run"])
+                tally["skipped"] += (~finite).long()
+                scaled = scaler.scale(losses["loss"])
+                scale = scaler._scale.clone()  # set by scale(); update() lowers it on overflow
+                scaled.backward()
                 if config.grad_clip > 0:
                     scaler.unscale_(optimizer)
-                    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
-                    grad_norm = float(norm)  # inf/nan on an AMP overflow step
-                scale = scaler.get_scale()
+                    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
                 scaler.step(optimizer)
                 scaler.update()
-                counters["overflow_steps"] += scaler.is_enabled() and scaler.get_scale() < scale
+                tally["overflow"] += (scaler._scale < scale).long()
+                for key, value in losses.items():
+                    value = torch.where(finite, value.detach().float(), 0.0)
+                    sums[key] = sums[key] + value if key in sums else value
+                tally["count"] += finite.long()
+            else:
+                finite = bool(torch.isfinite(losses["loss"]))
+                nonfinite_run = 0 if finite else nonfinite_run + 1
+                counters["skipped"] += not finite
+                if nonfinite_run > 100:
+                    raise FlattenerError(
+                        Status.MODEL_ERROR,
+                        "non_finite_loss",
+                        f"100 consecutive non-finite losses at step {step}",
+                    )
+                if finite:  # without a scaler a non-finite step is skipped here
+                    scaler.scale(losses["loss"]).backward()
+                    if config.grad_clip > 0:
+                        scaler.unscale_(optimizer)
+                        norm = torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
+                        grad_norm = float(norm)
+                    scaler.step(optimizer)
+                    scaler.update()
+                    for key, value in losses.items():
+                        sums[key] = sums.get(key, 0.0) + float(value.detach())
+                    sums["count"] = sums.get("count", 0.0) + 1
             optimizer.zero_grad(set_to_none=True)
             step += 1
             window["images"] += batch["image"].shape[0]
-            if finite:
-                for key, value in losses.items():
-                    sums[key] = sums.get(key, 0.0) + float(value.detach())
-                sums["count"] = sums.get("count", 0.0) + 1
             if step % config.log_every == 0 or step == config.stop_step:
+                flush()
+                if on_device:
+                    sums = {key: float(value) for key, value in sums.items()}
+                    sums["count"] = float(tally["count"])
+                    tally["count"].zero_()
                 elapsed = max(time.perf_counter() - window["start"], 1e-9)
                 count = max(sums.pop("count", 0.0), 1.0)
                 record = {
@@ -1113,6 +1179,7 @@ def train(config: TrainConfig, *, resume: str = "auto") -> dict[str, Any]:
             improved = bool(config.val_every) and step % config.val_every == 0 and run_validation()
             if save_due(step, improved, saved_step, config.checkpoint_every):
                 save()
+        flush()
         if step > first_step:
             improved = run_validation()
             if save_due(step, improved, saved_step, config.checkpoint_every, last=True):
