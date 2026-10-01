@@ -2,7 +2,7 @@
   "schema": "flattener-uvdoc-retexture-1",
   "name": "uvdoc-retexture-release-v1",
   "track": "release",
-  "raw_root": "${FLATTENER_DATA}/uvdoc_raw",
+  "raw_root": "${FLATTENER_CACHE}/uvdoc_raw",
   "exclude_benchmark": "${FLATTENER_DATA}/eval/uvdoc_benchmark",
   "dewarp_spec": "data-release.json",
   "photo_hw": [
@@ -10,7 +10,7 @@
     732
   ],
   "count": {
-    "train": 40000,
+    "train": 60000,
     "val": 800
   },
   "val_share": 0.05,

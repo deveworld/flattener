@@ -9,7 +9,8 @@
       "root": "${FLATTENER_CACHE}/syntheticdoc-release",
       "track": "release",
       "split": "train",
-      "license": "SyntheticDoc CC BY 4.0; documents CC BY, CC0 or ODC-BY, backgrounds CC0 or CC BY, meshes CC BY"
+      "license": "SyntheticDoc CC BY 4.0; documents CC BY, CC0 or ODC-BY, backgrounds CC0 or CC BY, meshes CC BY",
+      "weight": 0.7
     },
     {
       "name": "syntheticdoc-clean-val",
@@ -26,7 +27,8 @@
       "root": "${FLATTENER_CACHE}/uvdoc-retexture-release-v1",
       "track": "release",
       "split": "train",
-      "license": "SyntheticDoc CC BY 4.0; documents CC BY, CC0 or ODC-BY, backgrounds CC0 or CC BY; own generated pages; page geometry and shading from UVDoc raw captures (MIT, (c) 2023 Tanguy Magne)"
+      "license": "SyntheticDoc CC BY 4.0; documents CC BY, CC0 or ODC-BY, backgrounds CC0 or CC BY; own generated pages; page geometry and shading from UVDoc raw captures (MIT, (c) 2023 Tanguy Magne)",
+      "weight": 0.3
     },
     {
       "name": "uvdoc-val",
