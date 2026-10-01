@@ -21,8 +21,9 @@ of their id, ``val_share`` to val), ``own_texture_prob``, ``background_dir``,
 ``capture_background_prob`` (keep the photo's own surroundings), ``shade`` (strength
 range) and ``margin`` (crop margin around the page, share of its size per side). Each
 item flips the capture as UVDoc does (texture coordinates follow, so text never
-mirrors), crops a window around the page, resizes it to the photo size and stores the
-exact page grid as a center-aligned flattener map in the converted layout, with
+mirrors), crops a window around the page, lays the page at the photo size (texture
+coordinates averaged over each output pixel) and stores the exact page grid as a
+center-aligned flattener map in the converted layout, with
 ``manifest.jsonl`` rows like ``tools/crumple/build.py``. Captures are processed one at a
 time (all items of a capture share its files); parts resume.
 """
@@ -125,34 +126,62 @@ def flip(capture: dict[str, np.ndarray], horizontal: bool, vertical: bool) -> di
             "seg": np.ascontiguousarray(seg), "grid": np.ascontiguousarray(grid)}  # fmt: skip
 
 
-def compose(
+def shrink(
     capture: dict[str, np.ndarray],
-    texture: np.ndarray,
-    background: np.ndarray | None,
-    shade: float,
-) -> np.ndarray:
-    """The page laid on the photographed paper through the UV map, ``shade`` of the
-    paper's light multiplied in (create_final.py uses 0.75), on ``background`` (None keeps
-    the photo's own surroundings)."""
+    window: tuple[int, int, int, int],
+    out_hw: tuple[int, int],
+    device: str = "cpu",
+) -> dict[str, Any]:
+    """The capture inside ``window`` at the photo size, on ``device``: the photo (H, W, 3,
+    0-1), texture coordinates averaged over each output pixel's share of the page and the
+    page mask (more than half of the pixel on the page)."""
     import torch
     import torch.nn.functional as F
 
-    photo = capture["photo"].astype(np.float32) / 255
-    uv = capture["uv"]
-    inside = np.isfinite(uv).all(axis=-1) & capture["seg"]
-    coords = np.where(inside[..., None], uv * 2 - 1, -2.0).astype(np.float32)
-    source = torch.from_numpy(np.ascontiguousarray(texture)).permute(2, 0, 1)[None].float() / 255
-    warped = F.grid_sample(source, torch.from_numpy(coords)[None], align_corners=False)
-    warped = _blur(warped, 0.5)[0].permute(1, 2, 0).numpy()
+    x0, y0, x1, y1 = window
+    photo = torch.from_numpy(np.ascontiguousarray(capture["photo"][y0:y1, x0:x1])).to(device)
+    photo = photo.permute(2, 0, 1)[None].float() / 255
+    photo = F.interpolate(photo, size=out_hw, mode="bilinear", antialias=True, align_corners=False)
+    uv = torch.from_numpy(np.ascontiguousarray(capture["uv"][y0:y1, x0:x1])).to(device)
+    seg = torch.from_numpy(np.ascontiguousarray(capture["seg"][y0:y1, x0:x1])).to(device)
+    valid = (torch.isfinite(uv).all(dim=-1) & seg).float()
+    uv = torch.nan_to_num(uv, nan=0.0) * valid[..., None]
+    stack = torch.cat([uv.permute(2, 0, 1), valid[None]])[None]
+    stack = F.interpolate(stack, size=out_hw, mode="area")[0]
+    share = stack[2]
+    uv = (stack[:2] / share.clamp_min(1e-6)).permute(1, 2, 0)
+    return {"photo": photo[0].permute(1, 2, 0), "uv": uv, "inside": share > 0.5}
+
+
+def compose(
+    view: dict[str, Any], texture: np.ndarray, background: np.ndarray | None, shade: float
+) -> np.ndarray:
+    """The page laid on the photographed paper through the UV map, ``shade`` of the
+    paper's light multiplied in (create_final.py uses 0.75), on ``background`` (None keeps
+    the photo's own surroundings). ``view`` comes from ``shrink``."""
+    import torch
+    import torch.nn.functional as F
+
+    photo, uv, inside = view["photo"], view["uv"], view["inside"]
+    device = photo.device
+    coords = torch.where(inside[..., None], uv * 2 - 1, torch.full_like(uv, -2.0))
+    source = torch.from_numpy(np.ascontiguousarray(texture)).to(device)
+    source = source.permute(2, 0, 1)[None].float() / 255
+    warped = F.grid_sample(source, coords[None], align_corners=False)
+    warped = _blur(warped, 0.5)[0].permute(1, 2, 0)
     page = photo * (shade * warped + (1 - shade))
+    mask = inside.float()
     # A soft edge one pixel past the page, so the paper's border blends into the background.
-    mask = torch.from_numpy(inside.astype(np.float32))[None, None]
-    grown = F.max_pool2d(mask, 3, stride=1, padding=1)
-    edge = np.maximum(_blur(grown, 0.75)[0, 0].numpy(), inside)[..., None]
-    surround = photo if background is None else background.astype(np.float32) / 255
-    out = page * inside[..., None] + surround * (1 - inside[..., None])
-    out = out * edge + surround * (1 - edge) if background is not None else out
-    return np.clip(out * 255 + 0.5, 0, 255).astype(np.uint8)
+    grown = F.max_pool2d(mask[None, None], 3, stride=1, padding=1)
+    edge = torch.maximum(_blur(grown, 0.75)[0, 0], mask)[..., None]
+    if background is None:
+        surround = photo
+    else:
+        surround = torch.from_numpy(np.ascontiguousarray(background)).to(device).float() / 255
+    out = page * mask[..., None] + surround * (1 - mask[..., None])
+    if background is not None:
+        out = out * edge + surround * (1 - edge)
+    return (out.clamp(0, 1) * 255 + 0.5).byte().cpu().numpy()
 
 
 def _blur(image, sigma: float):
@@ -161,9 +190,8 @@ def _blur(image, sigma: float):
     import torch.nn.functional as F
 
     radius = max(1, int(np.ceil(3 * sigma)))
-    taps = torch.exp(
-        -(torch.arange(-radius, radius + 1, dtype=torch.float32) ** 2) / (2 * sigma**2)
-    )
+    offsets = torch.arange(-radius, radius + 1, dtype=torch.float32, device=image.device)
+    taps = torch.exp(-(offsets**2) / (2 * sigma**2))
     taps = taps / taps.sum()
     channels = image.shape[1]
     out = F.pad(image, (radius, radius, radius, radius), mode="replicate")
@@ -196,26 +224,24 @@ def crop_window(
 def render_item(
     capture: dict[str, np.ndarray],
     texture: np.ndarray,
-    background: np.ndarray | None,
+    background: Any,
     rng: np.random.Generator,
     settings: dict[str, Any],
 ) -> tuple[np.ndarray, np.ndarray]:
-    """(photo, center-aligned flattener map MAP_HW) of one item."""
+    """(photo, center-aligned flattener map MAP_HW) of one item. ``background`` is None
+    (keep the photo's surroundings) or a function of the photo size returning one."""
     out_hw = tuple(settings["photo_hw"])
     flipped = flip(capture, bool(rng.random() < 0.5), bool(rng.random() < 0.5))
     height, width = flipped["photo"].shape[:2]
     shade = float(rng.uniform(*settings.get("shade", (0.65, 0.85))))
-    composed = compose(flipped, texture, background, shade)
     margin = rng.uniform(*settings.get("margin", (0.02, 0.15)), size=4)
     x0, y0, x1, y1 = crop_window(flipped["grid"], (height, width), out_hw, margin)
-    crop = Image.fromarray(composed[y0:y1, x0:x1]).resize(
-        (out_hw[1], out_hw[0]), Image.Resampling.BILINEAR
-    )
+    view = shrink(flipped, (x0, y0, x1, y1), out_hw, settings.get("device", "cpu"))
+    photo = compose(view, texture, None if background is None else background(out_hw), shade)
     scale = np.array([out_hw[1] / (x1 - x0), out_hw[0] / (y1 - y0)])
     pixels = (flipped["grid"] - [x0, y0] + 0.5) * scale - 0.5  # pixel centers at integers
     values = pixels_to_flattener(pixels, out_hw)
-    forward = grid_to_map(values, MAP_HW)
-    return np.asarray(crop), forward
+    return photo, grid_to_map(values, MAP_HW)
 
 
 def run_capture(task: dict[str, Any]) -> dict[str, Any]:
@@ -229,6 +255,7 @@ def run_capture(task: dict[str, Any]) -> dict[str, Any]:
     build = _crumple_build()
     capture = load_capture(Path(settings["raw_root"]), capture_id)
     out_hw = tuple(settings["photo_hw"])
+    device = settings.get("device") or "cpu"
     rows, skipped = [], 0
     for index, record in zip(task["indices"], task["items"], strict=True):
         rng = np.random.default_rng(_seed(settings["name"], split, index))
@@ -237,21 +264,26 @@ def run_capture(task: dict[str, Any]) -> dict[str, Any]:
             if own:
                 texture = build.own_texture(rng, f"{settings['name']}-{split}-{index}")
             else:
-                texture = build.flat_texture(record)
+                texture = build.flat_texture(record, device=device)
             if rng.random() < settings.get("capture_background_prob", 0.0):
                 background = None
             else:
-                height, width = capture["photo"].shape[:2]
-                bank = build._bank(settings["background_dir"])
-                if bank is not None and len(bank) and rng.random() < 0.75:
-                    background = bank.draw(rng, (height, width))
-                else:
-                    background = procedural_background(rng, (height, width))
-                background = np.clip(background, 0, 255).astype(np.uint8)
+
+                def background(size, rng=rng):
+                    bank = build._bank(settings["background_dir"])
+                    if bank is not None and len(bank) and rng.random() < 0.75:
+                        drawn = bank.draw(rng, size)
+                    else:
+                        drawn = procedural_background(rng, size)
+                    return np.clip(drawn, 0, 255).astype(np.uint8)
+
             photo, forward = render_item(capture, texture, background, rng, settings)
         except (OSError, ValueError, RuntimeError):
             skipped += 1
             continue
+        finally:
+            if device.startswith("cuda"):
+                torch.cuda.empty_cache()
         if not np.isfinite(forward).all() or np.abs(forward).max() > 1.0:
             skipped += 1
             continue
@@ -299,7 +331,9 @@ def captures(raw: Path, exclude: Path | None) -> list[str]:
     return ids
 
 
-def build(spec_path: Path, output: Path, *, workers: int, limit: int | None) -> dict[str, Any]:
+def build(
+    spec_path: Path, output: Path, *, workers: int, limit: int | None, device: str = "cpu"
+) -> dict[str, Any]:
     spec = json.loads(spec_path.read_text(encoding="utf-8"))
     if spec.get("schema") != BUILD_SCHEMA:
         raise SystemExit(f"error: {spec_path}: schema must be {BUILD_SCHEMA}")
@@ -338,7 +372,8 @@ def build(spec_path: Path, output: Path, *, workers: int, limit: int | None) -> 
         settings = {key: spec.get(key) for key in ("name", "photo_hw", "own_texture_prob",
                                                    "capture_background_prob", "shade",
                                                    "margin")}  # fmt: skip
-        settings.update(split=split, raw_root=str(raw), background_dir=background_dir)
+        settings.update(split=split, raw_root=str(raw), background_dir=background_dir,
+                        device=device)  # fmt: skip
         for capture, indices in assigned.items():
             tasks.append({"key": f"{split}-{capture}", "settings": settings,
                           "output": str(output), "capture": capture, "indices": indices,
@@ -393,8 +428,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--limit", type=int, help="items per split, for a trial")
+    parser.add_argument("--device", default="cpu", help="where pages are laid (cuda on home)")
     args = parser.parse_args(argv)
-    print(json.dumps(build(args.spec, args.output, workers=args.workers, limit=args.limit)))
+    result = build(args.spec, args.output, workers=args.workers, limit=args.limit,
+                   device=args.device)  # fmt: skip
+    print(json.dumps(result))
     return 0
 
 
