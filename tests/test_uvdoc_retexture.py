@@ -139,3 +139,29 @@ def test_renders_of_one_doc3d_mesh_share_a_split():
     split = tool.split_captures(ids, {"name": "d", "val_share": 0.2}, tool.doc3d_group)
     meshes = {side: {tool.doc3d_group(i) for i in split[side]} for side in ("train", "val")}
     assert meshes["val"] and not meshes["train"] & meshes["val"]
+
+
+def test_cleaning_divides_a_render_s_light_out_of_the_page():
+    tool = _tool()
+    page = np.full((256, 180, 3), 235.0, np.float32)  # white paper with lines of text
+    rng = np.random.default_rng(0)
+    for row in range(12, 244, 10):
+        for start in range(10, 160, 30):
+            page[row : row + 4, start : start + int(rng.integers(10, 26))] = 30
+    light = 0.5 + 0.45 * np.linspace(0, 1, 256)[:, None, None]  # dark at the top
+    lit = (page * light).clip(0, 255).astype(np.uint8)
+    clean = tool.clean_texture(lit).astype(np.float32)
+    paper = page[..., 0] > 100
+    before = lit[..., 0][:40][paper[:40]].mean() / lit[..., 0][-40:][paper[-40:]].mean()
+    after = clean[..., 0][:40][paper[:40]].mean() / clean[..., 0][-40:][paper[-40:]].mean()
+    assert before < 0.6 and after > 0.9, (before, after)
+    ink = clean[..., 0][~paper].mean()
+    assert ink < 0.4 * clean[..., 0][paper].mean()  # the text stays dark
+
+
+def test_pattern_backgrounds_are_busy_and_vary():
+    tool = _tool()
+    drawn = [tool.pattern_background(np.random.default_rng(seed), (90, 60)) for seed in range(8)]
+    assert all(d.shape == (90, 60, 3) and d.dtype == np.uint8 for d in drawn)
+    assert all(d.astype(np.float32).std() > 5 for d in drawn)
+    assert len({d.tobytes() for d in drawn}) == 8

@@ -54,7 +54,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageFilter
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
@@ -209,6 +209,78 @@ def _blur(image, sigma: float):
     out = F.pad(image, (radius, radius, radius, radius), mode="replicate")
     out = F.conv2d(out, taps.view(1, 1, 1, -1).repeat(channels, 1, 1, 1), groups=channels)
     return F.conv2d(out, taps.view(1, 1, -1, 1).repeat(channels, 1, 1, 1), groups=channels)
+
+
+def clean_texture(rgb: np.ndarray, device: str = "cpu") -> np.ndarray:
+    """A flattened render with its own light divided out, so its creases and shadows do not
+    reach the new photo as false shading: the paper's brightness is estimated per block
+    (1/64 of the long side) as the 90th percentile of luminance, median-filtered over 3x3
+    blocks (so a picture on the page does not count as paper) and enlarged bicubically;
+    each pixel is brightened by the paper's 95th-percentile level over that estimate (gain
+    1-1.8), the paper is balanced to white from its brightest fifth, and a light unsharp
+    mask (0.5, sigma 1) restores edges the flattening softened."""
+    import torch
+    import torch.nn.functional as F
+
+    image = torch.from_numpy(np.ascontiguousarray(rgb)).to(device).float().permute(2, 0, 1)[None]
+    image = image / 255
+    height, width = image.shape[-2:]
+    block = max(8, round(max(height, width) / 64))
+    lum = image.mean(dim=1, keepdim=True)
+    rows, cols = -(-height // block), -(-width // block)
+    padded = F.pad(lum, (0, cols * block - width, 0, rows * block - height), mode="replicate")
+    tiles = F.unfold(padded, block, stride=block)[0]  # (block * block, rows * cols)
+    paper = torch.quantile(tiles, 0.9, dim=0).view(1, 1, rows, cols)
+    near = F.unfold(F.pad(paper, (1, 1, 1, 1), mode="replicate"), 3)[0]
+    paper = near.median(dim=0).values.view(1, 1, rows, cols)
+    level = torch.quantile(paper.flatten(), 0.95)
+    light = F.interpolate(paper, size=(height, width), mode="bicubic", align_corners=False)
+    image = image * (level / light.clamp_min(0.05)).clamp(1.0, 1.8)
+    bright = lum.flatten() >= torch.quantile(lum.flatten(), 0.8)
+    white = image.flatten(2)[0][:, bright].median(dim=1).values.clamp_min(0.05)
+    image = image * (0.97 / white).view(1, 3, 1, 1)
+    image = image + 0.5 * (image - _blur(image, 1.0))
+    return (image[0].permute(1, 2, 0).clamp(0, 1) * 255 + 0.5).byte().cpu().numpy()
+
+
+def pattern_background(rng: np.random.Generator, size: tuple[int, int]) -> np.ndarray:
+    """A busy patterned surface like a textile or printed paper: stripes, checks, a thin
+    mesh, dots, zigzags or blotches in two or three colours, at a random angle and scale,
+    softened and lit by a gentle gradient."""
+    height, width = size
+    y, x = np.mgrid[0:height, 0:width].astype(np.float32)
+    angle = rng.uniform(0, np.pi)
+    u = x * np.cos(angle) + y * np.sin(angle)
+    v = -x * np.sin(angle) + y * np.cos(angle)
+    period = rng.uniform(6, 48)
+    kind = rng.integers(6)
+    if kind == 0:  # stripes
+        mask = (u / period) % 1 < rng.uniform(0.2, 0.6)
+    elif kind == 1:  # checks
+        mask = ((u // period) + (v // (period * rng.uniform(0.6, 1.6)))) % 2 == 0
+    elif kind == 2:  # thin mesh
+        line = rng.uniform(0.06, 0.2)
+        mask = ((u / period) % 1 < line) | ((v / period) % 1 < line)
+    elif kind == 3:  # dots
+        du, dv = (u / period) % 1 - 0.5, (v / period) % 1 - 0.5
+        mask = du**2 + dv**2 < rng.uniform(0.04, 0.16)
+    elif kind == 4:  # zigzag
+        wave = np.abs((v / (period * rng.uniform(0.5, 2))) % 2 - 1) * period
+        mask = ((u + wave) / period) % 1 < 0.5
+    else:  # blotches
+        small = rng.normal(size=(max(2, height // 24), max(2, width // 24))).astype(np.float32)
+        field = np.asarray(Image.fromarray(small).resize((width, height), Image.BICUBIC))
+        mask = field > rng.uniform(-0.5, 0.5)
+    colours = rng.uniform(0, 255, size=(3, 3)).astype(np.float32)
+    image = np.where(mask[..., None], colours[0], colours[1])
+    if rng.random() < 0.5:  # a third colour in a second, coarser pattern
+        coarse = (v / (period * rng.uniform(2, 6))) % 1 < 0.5
+        image = np.where(coarse[..., None], image * 0.6 + colours[2] * 0.4, image)
+    image = np.asarray(Image.fromarray(image.astype(np.uint8)).filter(
+        ImageFilter.GaussianBlur(rng.uniform(0, 1.5))), np.float32)  # fmt: skip
+    gx, gy = rng.uniform(-0.3, 0.3, size=2)
+    light = 1 + gx * (x / width - 0.5) + gy * (y / height - 0.5)
+    return np.clip(image * light[..., None], 0, 255).astype(np.uint8)
 
 
 def crop_window(
@@ -470,11 +542,15 @@ def run_capture(task: dict[str, Any]) -> dict[str, Any]:
                     texture = build.own_texture(rng, f"{settings['name']}-{split}-{index}")
                 else:
                     texture = build.flat_texture(record, device=device)
+                    if settings.get("clean_texture"):
+                        texture = clean_texture(texture, device)
                 if not doc3d and rng.random() < settings.get("capture_background_prob", 0.0):
                     background = None
                 else:
 
                     def background(size, rng=rng):
+                        if rng.random() < settings.get("pattern_background_prob", 0.0):
+                            return pattern_background(rng, size)
                         bank = build._bank(settings["background_dir"])
                         if bank is not None and len(bank) and rng.random() < 0.75:
                             drawn = bank.draw(rng, size)
@@ -587,7 +663,8 @@ def build(
             assigned.setdefault(geometries[order[index % len(geometries)]], []).append(index)
         settings = {key: spec.get(key) for key in ("name", "photo_hw", "own_texture_prob",
                                                    "capture_background_prob", "shade",
-                                                   "margin", "geometry")}  # fmt: skip
+                                                   "margin", "geometry", "clean_texture",
+                                                   "pattern_background_prob")}  # fmt: skip
         settings.update(split=split, raw_root=str(raw), background_dir=background_dir,
                         device=device)  # fmt: skip
         groups = [{"capture": capture, "indices": indices,
