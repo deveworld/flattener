@@ -90,3 +90,52 @@ def test_builds_naming_one_split_hold_out_the_same_captures():
     assert 0 < len(first["val"]) < 60 and len(first["val"]) + len(first["train"]) == len(ids)
     assert tool.split_captures(ids, {"name": "b", "split_name": "a"}) == first
     assert tool.split_captures(ids, {"name": "b"})["val"] != first["val"]
+
+
+def _doc3d_geometry():
+    """A flat page in a Doc3D-sized render: nodes at origin + A @ (u, v), 45x31 of them."""
+    origin = np.array([110.0, 40.0])
+    axes = np.array([[230.0, 40.0], [-30.0, 330.0]])
+    v, u = np.meshgrid(np.linspace(0, 1, 45), np.linspace(0, 1, 31), indexing="ij")
+    grid = origin + np.stack([u, v], -1) @ axes.T
+    grid3d = np.stack([np.zeros_like(u), u * 1.6 - 0.8, v * 2.2 - 1.1], -1)
+    return {"grid": grid, "grid3d": grid3d}
+
+
+def test_a_doc3d_page_flattens_back_through_its_map():
+    tool = _tool()
+    texture = _texture()
+    settings = {"photo_hw": [240, 180], "shade": [1.0, 1.0], "margin": [0.05, 0.1]}
+
+    def background(size):
+        return np.full((*size, 3), 90, np.uint8)
+
+    for seed in range(6):
+        photo, forward = tool.render_doc3d_item(
+            _doc3d_geometry(), texture, background, np.random.default_rng(seed), settings
+        )
+        assert photo.shape == (240, 180, 3) and forward.shape == (177, 121, 2)
+        flat = _unwarp(photo, forward, (160, 120)).mean(-1)[8:-8, 8:-8]
+        page = texture.astype(np.float32).mean(-1)[8:-8, 8:-8]
+        same = np.corrcoef(flat.ravel(), page.ravel())[0, 1]
+        mirrored = np.corrcoef(flat.ravel(), page[:, ::-1].ravel())[0, 1]
+        assert same > 0.9 and same > mirrored + 0.3, (seed, same, mirrored)
+
+
+def test_a_page_turned_over_in_view_is_found():
+    tool = _tool()
+    flat = torch.from_numpy(_doc3d_geometry()["grid"]).float()
+    assert not tool.folded(flat)
+    over = flat.clone()
+    over[:, 20:, 0] = 2 * over[:, 19:20, 0] - over[:, 20:, 0]  # the right part folds back
+    assert tool.folded(over)
+
+
+def test_renders_of_one_doc3d_mesh_share_a_split():
+    tool = _tool()
+    assert tool.doc3d_group("1/1000_4-pp_Page_847-Pwi0001") == "1000"
+    assert tool.doc3d_group("7/1_106_1-pp_Page_361-mTF0001") == "1_106"
+    ids = [f"{f}/{m}_{k}-tc_Page_{k:03d}-x0001" for f in (1, 2) for m in range(60) for k in (1, 2)]
+    split = tool.split_captures(ids, {"name": "d", "val_share": 0.2}, tool.doc3d_group)
+    meshes = {side: {tool.doc3d_group(i) for i in split[side]} for side in ("train", "val")}
+    assert meshes["val"] and not meshes["train"] & meshes["val"]

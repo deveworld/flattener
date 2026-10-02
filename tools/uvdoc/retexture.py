@@ -27,7 +27,17 @@ mirrors), crops a window around the page, lays the page at the photo size (textu
 coordinates averaged over each output pixel) and stores the exact page grid as a
 center-aligned flattener map in the converted layout, with
 ``manifest.jsonl`` rows like ``tools/crumple/build.py``. Captures are processed one at a
-time (all items of a capture share its files); parts resume.
+time (all items of a capture share its files), ``chunk`` of them per task; parts resume.
+
+``"geometry": "doc3d_grid"`` takes the paper's shape from Doc3D instead (MIT, (c) 2020
+CVLab@StonyBrook): ``raw_root`` holds ``grid2D/<folder>/<name>.mat`` (45x31 node positions
+in the 448x448 render) and ``grid3D`` (the nodes in space), as in UVDoc's
+``Doc3D_grid.zip``. Doc3D's renders, albedo and lighting are never read. Each grid is
+refined bicubically to the map's 177x121 nodes, the page is drawn through it (points
+splatted at most half a pixel apart, at twice the photo size), lit by a Lambertian
+light from its 3-D shape with a paper colour, a soft gradient and grain, and the refined
+grid is the stored map. A page that turns over in view is skipped. Renders of one mesh
+share a split.
 """
 
 from __future__ import annotations
@@ -202,11 +212,14 @@ def _blur(image, sigma: float):
 
 
 def crop_window(
-    grid: np.ndarray, size: tuple[int, int], out_hw: tuple[int, int], margin: np.ndarray
-) -> tuple[int, int, int, int]:
+    grid: np.ndarray,
+    size: tuple[int, int] | None,
+    out_hw: tuple[int, int],
+    margin: np.ndarray,
+) -> tuple[float, float, float, float]:
     """(x0, y0, x1, y1) around the page with ``margin`` (left, top, right, bottom, share of
-    the page's extent) widened to the photo's aspect where the image allows, clipped."""
-    height, width = size
+    the page's extent) widened to the photo's aspect, clipped to whole pixels of an image
+    of ``size``; ``size`` None keeps the exact window (nothing but the page is drawn)."""
     low, high = grid.reshape(-1, 2).min(0), grid.reshape(-1, 2).max(0)
     extent = high - low
     x0, y0 = low - margin[:2] * extent
@@ -218,6 +231,9 @@ def crop_window(
     else:
         grow = (y1 - y0) / aspect - (x1 - x0)
         x0, x1 = x0 - grow / 2, x1 + grow / 2
+    if size is None:
+        return float(x0), float(y0), float(x1), float(y1)
+    height, width = size
     x0, y0 = max(0, int(np.floor(x0))), max(0, int(np.floor(y0)))
     x1, y1 = min(width, int(np.ceil(x1))), min(height, int(np.ceil(y1)))
     return x0, y0, x1, y1
@@ -246,78 +262,266 @@ def render_item(
     return photo, grid_to_map(values, MAP_HW)
 
 
+DOC3D_SOURCE = (
+    "Doc3D geometry: grid2D/grid3D of UVDoc's Doc3D_grid.zip (igl.ethz.ch/projects/uvdoc), "
+    "derived from Doc3D (MIT, (c) 2020 CVLab@StonyBrook); renders, albedo and lighting unused"
+)
+DOC3D_SIZE = 448  # side of the renders grid2D's pixel coordinates refer to
+
+
+def doc3d_ids(root: Path) -> list[str]:
+    """``<folder>/<name>`` of the grid2D files under ``root`` (.mat or .npy)."""
+    ids = {
+        f"{path.parent.name}/{path.stem}"
+        for path in (root / "grid2D").glob("*/*")
+        if path.suffix in (".mat", ".npy") and not path.name.startswith(".")
+    }
+    return sorted(ids)
+
+
+def doc3d_group(sample_id: str) -> str:
+    """The mesh a Doc3D render was made from (``1/1000_4-pp_Page_847-Pwi0001`` -> ``1000``),
+    so that renders of one mesh share a split."""
+    return sample_id.split("/")[-1].split("-")[0].rsplit("_", 1)[0]
+
+
+def load_doc3d(root: Path, sample_id: str) -> dict[str, np.ndarray]:
+    """One Doc3D geometry: ``grid`` (45, 31, 2), pixel coordinates in the 448x448 render,
+    rows down the page, and ``grid3d`` (45, 31, 3), the same nodes in space."""
+    folder, name = sample_id.split("/")
+    geometry = {}
+    for key, field in (("grid2D", "grid"), ("grid3D", "grid3d")):
+        npy = root / key / folder / f"{name}.npy"
+        if npy.is_file():
+            array = np.load(npy, allow_pickle=False)
+        else:
+            array = read_matrix(root / key / folder / f"{name}.mat", key)
+        if array.shape[0] < array.shape[1]:
+            array = array.transpose(1, 0, 2)
+        geometry[field] = array.astype(np.float64)
+    return geometry
+
+
+def flip_doc3d(geometry: dict[str, np.ndarray], horizontal: bool, vertical: bool) -> dict:
+    """``flip`` for a geometry without a photo: the nodes mirror in the render and their
+    order follows, so the page reads the same way round."""
+    grid, grid3d = geometry["grid"].copy(), geometry["grid3d"]
+    if horizontal:
+        grid[..., 0] = DOC3D_SIZE - 1 - grid[..., 0]
+        grid, grid3d = grid[:, ::-1], grid3d[:, ::-1]
+    if vertical:
+        grid[..., 1] = DOC3D_SIZE - 1 - grid[..., 1]
+        grid, grid3d = grid[::-1], grid3d[::-1]
+    return {"grid": np.ascontiguousarray(grid), "grid3d": np.ascontiguousarray(grid3d)}
+
+
+def _refine(grid: np.ndarray, hw: tuple[int, int], device: str):
+    """An edge-aligned grid resampled bicubically to ``hw`` nodes, (H, W, C) on ``device``."""
+    import torch
+    import torch.nn.functional as F
+
+    array = torch.from_numpy(np.ascontiguousarray(grid, dtype=np.float32)).to(device)
+    array = F.interpolate(array.permute(2, 0, 1)[None], size=hw, mode="bicubic", align_corners=True)
+    return array[0].permute(1, 2, 0)
+
+
+def folded(points) -> bool:
+    """Whether the page turns over in view: some cell of the (H, W, 2) image positions is
+    wound against the rest or nearly edge-on (under 5% of the median cell area). The
+    page then hides part of itself, which a grid cannot draw."""
+    down = points[1:, :-1] - points[:-1, :-1]
+    right = points[:-1, 1:] - points[:-1, :-1]
+    area = right[..., 0] * down[..., 1] - right[..., 1] * down[..., 0]
+    sign = 1.0 if float(area.sum()) >= 0 else -1.0
+    return bool(((area * sign) < 0.05 * area.abs().median()).any())
+
+
+def paper_light(grid3d, rng: np.random.Generator):
+    """Lambertian light on the page from its (H, W, 3) shape: a light within 55 degrees
+    of the page's mean normal (the camera's side), ambient 0.35-0.6, brightest 1."""
+    import torch
+
+    du = torch.gradient(grid3d, dim=1)[0]
+    dv = torch.gradient(grid3d, dim=0)[0]
+    normal = torch.linalg.cross(du, dv, dim=-1)
+    normal = normal / normal.norm(dim=-1, keepdim=True).clamp_min(1e-9)
+    mean = normal.mean(dim=(0, 1))
+    mean = mean / mean.norm().clamp_min(1e-9)
+    side = torch.from_numpy(rng.normal(size=3).astype(np.float32)).to(grid3d.device)
+    side = side - (side @ mean) * mean
+    side = side / side.norm().clamp_min(1e-9)
+    angle = np.deg2rad(rng.uniform(0.0, 55.0))
+    light = mean * float(np.cos(angle)) + side * float(np.sin(angle))
+    ambient = float(rng.uniform(0.35, 0.6))
+    shade = ambient + (1 - ambient) * (normal @ light).clamp_min(0)
+    return shade / shade.max().clamp_min(1e-6)
+
+
+def doc3d_view(points, light, out_hw: tuple[int, int], rng: np.random.Generator,
+               supersample: int = 2) -> dict[str, Any]:  # fmt: skip
+    """A ``shrink``-like view of a page drawn from its refined grid: ``points`` (H, W, 2)
+    pixel positions in the photo (centers at integers), ``light`` (H, W). Points spread
+    over each cell at most half a pixel apart (at ``supersample`` times the photo size)
+    are splatted with their texture coordinates and light; the photo of the blank paper is
+    that light times a paper colour, a soft gradient across the photo and fine grain."""
+    import torch
+    import torch.nn.functional as F
+
+    device = points.device
+    height, width = out_hw
+    big = (height * supersample, width * supersample)
+    scaled = (points + 0.5) * supersample - 0.5
+    step = max(float((scaled[1:] - scaled[:-1]).norm(dim=-1).max()),
+               float((scaled[:, 1:] - scaled[:, :-1]).norm(dim=-1).max()))  # fmt: skip
+    k = int(min(max(np.ceil(2 * step), 1), 24))
+    rows, cols = (points.shape[0] - 1) * k + 1, (points.shape[1] - 1) * k + 1
+    stack = torch.cat([scaled.permute(2, 0, 1), light[None]])[None]
+    dense = F.interpolate(stack, size=(rows, cols), mode="bilinear", align_corners=True)[0]
+    u = torch.linspace(0, 1, cols, device=device).expand(rows, cols)
+    v = torch.linspace(0, 1, rows, device=device)[:, None].expand(rows, cols)
+    x, y = dense[0].round().long(), dense[1].round().long()
+    keep = (x >= 0) & (x < big[1]) & (y >= 0) & (y < big[0])
+    index = (y * big[1] + x)[keep]
+    ones = torch.ones_like(index, dtype=torch.float32)
+    values = torch.stack([u[keep], v[keep], dense[2][keep], ones])
+    sums = torch.zeros(4, big[0] * big[1], device=device).index_add_(1, index, values)
+    sums = sums.view(4, *big)
+    # A pixel the points missed, among at least five covered neighbours, takes their mean.
+    near = F.avg_pool2d(sums[None], 3, stride=1, padding=1)[0] * 9
+    count = F.avg_pool2d((sums[3:] > 0).float()[None], 3, stride=1, padding=1)[0, 0] * 9
+    hole = (sums[3] == 0) & (count >= 5)
+    sums = torch.where(hole[None], near, sums)
+    covered = (sums[3] > 0).float()
+    mean = sums[:3] / sums[3].clamp_min(1e-6)
+    pooled = F.avg_pool2d(torch.cat([mean * covered, covered[None]])[None], supersample)[0]
+    share = pooled[3]
+    uv = (pooled[:2] / share.clamp_min(1e-6)).permute(1, 2, 0)
+    shade = pooled[2] / share.clamp_min(1e-6)
+    tint = torch.from_numpy((rng.uniform(0.84, 0.97) + rng.uniform(-0.03, 0.03, 3)).astype(
+        np.float32)).to(device)  # fmt: skip
+    yy = torch.linspace(-1, 1, height, device=device)[:, None]
+    xx = torch.linspace(-1, 1, width, device=device)[None]
+    angle, strength = rng.uniform(0, 2 * np.pi), rng.uniform(0.0, 0.15)
+    ramp = 1 + strength * (np.cos(angle) * xx + np.sin(angle) * yy)
+    grain = torch.from_numpy(rng.normal(0, 0.012, (1, 1, height, width)).astype(np.float32))
+    grain = _blur(grain.to(device), 0.7)[0, 0]
+    photo = (shade * ramp)[..., None] * tint + grain[..., None]
+    return {"photo": photo.clamp(0, 1), "uv": uv, "inside": share > 0.5}
+
+
+def render_doc3d_item(
+    geometry: dict[str, np.ndarray],
+    texture: np.ndarray,
+    background: Any,
+    rng: np.random.Generator,
+    settings: dict[str, Any],
+) -> tuple[np.ndarray, np.ndarray]:
+    """``render_item`` for a Doc3D geometry: the page is drawn through its grid refined to
+    MAP_HW nodes, lit from its 3-D shape, and that refined grid is the stored map.
+    ``background`` is a function of the photo size. Raises ValueError when the page
+    turns over in view."""
+    out_hw = tuple(settings["photo_hw"])
+    device = settings.get("device", "cpu")
+    flipped = flip_doc3d(geometry, bool(rng.random() < 0.5), bool(rng.random() < 0.5))
+    shade = float(rng.uniform(*settings.get("shade", (0.65, 0.85))))
+    margin = rng.uniform(*settings.get("margin", (0.02, 0.15)), size=4)
+    fine = _refine(flipped["grid"], MAP_HW, device)
+    if folded(fine):
+        raise ValueError("the page turns over in view")
+    x0, y0, x1, y1 = crop_window(fine.cpu().numpy(), None, out_hw, margin)
+    scale = fine.new_tensor([out_hw[1] / (x1 - x0), out_hw[0] / (y1 - y0)])
+    points = (fine - fine.new_tensor([x0, y0]) + 0.5) * scale - 0.5
+    light = paper_light(_refine(flipped["grid3d"], MAP_HW, device), rng)
+    view = doc3d_view(points, light, out_hw, rng)
+    photo = compose(view, texture, background(out_hw), shade)
+    values = pixels_to_flattener(points.cpu().numpy().astype(np.float64), out_hw)
+    return photo, grid_to_map(values, MAP_HW)
+
+
 def run_capture(task: dict[str, Any]) -> dict[str, Any]:
+    """Items of the captures (or Doc3D geometries) of one task."""
     import torch
 
     torch.set_num_threads(1)
     settings, output = task["settings"], Path(task["output"])
-    split, capture_id = settings["split"], task["capture"]
+    split = settings["split"]
+    doc3d = settings.get("geometry") == "doc3d_grid"
+    prefix, source = ("doc3d", DOC3D_SOURCE) if doc3d else ("uvdoc", SOURCE)
     folder = output / "files" / split
     folder.mkdir(parents=True, exist_ok=True)
     build = _crumple_build()
-    capture = load_capture(Path(settings["raw_root"]), capture_id)
-    out_hw = tuple(settings["photo_hw"])
     device = settings.get("device") or "cpu"
     rows, skipped = [], 0
-    for index, record in zip(task["indices"], task["items"], strict=True):
-        rng = np.random.default_rng(_seed(settings["name"], split, index))
+    for group in task["captures"]:
+        capture_id = group["capture"]
         try:
-            own = rng.random() < settings.get("own_texture_prob", 0.0)
-            if own:
-                texture = build.own_texture(rng, f"{settings['name']}-{split}-{index}")
+            if doc3d:
+                capture = load_doc3d(Path(settings["raw_root"]), capture_id)
             else:
-                texture = build.flat_texture(record, device=device)
-            if rng.random() < settings.get("capture_background_prob", 0.0):
-                background = None
-            else:
-
-                def background(size, rng=rng):
-                    bank = build._bank(settings["background_dir"])
-                    if bank is not None and len(bank) and rng.random() < 0.75:
-                        drawn = bank.draw(rng, size)
-                    else:
-                        drawn = procedural_background(rng, size)
-                    return np.clip(drawn, 0, 255).astype(np.uint8)
-
-            photo, forward = render_item(capture, texture, background, rng, settings)
-        except (OSError, ValueError, RuntimeError):
-            skipped += 1
+                capture = load_capture(Path(settings["raw_root"]), capture_id)
+        except (OSError, KeyError, ValueError):
+            skipped += len(group["indices"])
             continue
-        finally:
-            if device.startswith("cuda"):
-                torch.cuda.empty_cache()
-        if not np.isfinite(forward).all() or np.abs(forward).max() > 1.0:
-            skipped += 1
-            continue
-        ident = f"uvdoc-{split}-{index:07d}"
-        buffer = io.BytesIO()
-        Image.fromarray(photo).save(buffer, "JPEG", quality=92)
-        image_bytes = buffer.getvalue()
-        (folder / f"{ident}.jpg").write_bytes(image_bytes)
-        map_buffer = io.BytesIO()
-        np.save(map_buffer, forward.astype(np.float16))
-        map_bytes = map_buffer.getvalue()
-        (folder / f"{ident}.bm.npy").write_bytes(map_bytes)
-        rows.append(
-            {
-                "schema": "flattener-dewarp-sample-1",
-                "sample_id": ident,
-                "split": split,
-                "image": f"files/{split}/{ident}.jpg",
-                "backward_map": f"files/{split}/{ident}.bm.npy",
-                "backward_map_convention": "flattener",
-                "image_size": list(out_hw),
-                "track": record["track"],
-                "license_class": "own" if own else record["license_class"],
-                "image_sha256": hashlib.sha256(image_bytes).hexdigest(),
-                "image_bytes": len(image_bytes),
-                "backward_map_sha256": hashlib.sha256(map_bytes).hexdigest(),
-                "backward_map_bytes": len(map_bytes),
-                "texture_sample_id": None if own else record["sample_id"],
-                "capture": capture_id,
-                "geometry_source": SOURCE,
-            }
-        )
+        for index, record in zip(group["indices"], group["items"], strict=True):
+            rng = np.random.default_rng(_seed(settings["name"], split, index))
+            try:
+                own = rng.random() < settings.get("own_texture_prob", 0.0)
+                if own:
+                    texture = build.own_texture(rng, f"{settings['name']}-{split}-{index}")
+                else:
+                    texture = build.flat_texture(record, device=device)
+                if not doc3d and rng.random() < settings.get("capture_background_prob", 0.0):
+                    background = None
+                else:
+
+                    def background(size, rng=rng):
+                        bank = build._bank(settings["background_dir"])
+                        if bank is not None and len(bank) and rng.random() < 0.75:
+                            drawn = bank.draw(rng, size)
+                        else:
+                            drawn = procedural_background(rng, size)
+                        return np.clip(drawn, 0, 255).astype(np.uint8)
+
+                render = render_doc3d_item if doc3d else render_item
+                photo, forward = render(capture, texture, background, rng, settings)
+            except (OSError, ValueError, RuntimeError):
+                skipped += 1
+                continue
+            finally:
+                if device.startswith("cuda"):
+                    torch.cuda.empty_cache()
+            if not np.isfinite(forward).all() or np.abs(forward).max() > 1.0:
+                skipped += 1
+                continue
+            ident = f"{prefix}-{split}-{index:07d}"
+            buffer = io.BytesIO()
+            Image.fromarray(photo).save(buffer, "JPEG", quality=92)
+            image_bytes = buffer.getvalue()
+            (folder / f"{ident}.jpg").write_bytes(image_bytes)
+            map_buffer = io.BytesIO()
+            np.save(map_buffer, forward.astype(np.float16))
+            map_bytes = map_buffer.getvalue()
+            (folder / f"{ident}.bm.npy").write_bytes(map_bytes)
+            rows.append(
+                {
+                    "schema": "flattener-dewarp-sample-1",
+                    "sample_id": ident,
+                    "split": split,
+                    "image": f"files/{split}/{ident}.jpg",
+                    "backward_map": f"files/{split}/{ident}.bm.npy",
+                    "backward_map_convention": "flattener",
+                    "image_size": list(settings["photo_hw"]),
+                    "track": record["track"],
+                    "license_class": "own" if own else record["license_class"],
+                    "image_sha256": hashlib.sha256(image_bytes).hexdigest(),
+                    "image_bytes": len(image_bytes),
+                    "backward_map_sha256": hashlib.sha256(map_bytes).hexdigest(),
+                    "backward_map_bytes": len(map_bytes),
+                    "texture_sample_id": None if own else record["sample_id"],
+                    "capture": capture_id,
+                    "geometry_source": source,
+                }
+            )
     return {"key": task["key"], "rows": rows, "skipped": skipped}
 
 
@@ -333,12 +537,14 @@ def captures(raw: Path, exclude: Path | None) -> list[str]:
     return ids
 
 
-def split_captures(ids: list[str], spec: dict[str, Any]) -> dict[str, list[str]]:
-    """Captures per split: ``val_share`` of them to val by a hash of the id and
-    ``split_name`` (the spec's name when absent), the rest to train."""
+def split_captures(ids: list[str], spec: dict[str, Any], group=None) -> dict[str, list[str]]:
+    """Captures per split: ``val_share`` of them to val by a hash of the id (or of
+    ``group(id)``, so a group stays together) and ``split_name`` (the spec's name when
+    absent), the rest to train."""
     share = spec.get("val_share", 0.05)
     name = spec.get("split_name", spec["name"])
-    val = [c for c in ids if _seed(name, "split", c) % 1000 < share * 1000]
+    key = group or (lambda capture: capture)
+    val = [c for c in ids if _seed(name, "split", key(c)) % 1000 < share * 1000]
     held = set(val)
     return {"val": val, "train": [c for c in ids if c not in held]}
 
@@ -354,10 +560,12 @@ def build(
     exclude = (
         Path(expand_path(spec["exclude_benchmark"])) if spec.get("exclude_benchmark") else None
     )
-    ids = captures(raw, exclude)
+    doc3d = spec.get("geometry", "uvdoc_raw") == "doc3d_grid"
+    ids = doc3d_ids(raw) if doc3d else captures(raw, exclude)
     if not ids:
-        raise SystemExit(f"error: no captures under {raw / 'samples' / 'rgb'}")
-    by_split = split_captures(ids, spec)
+        raise SystemExit(f"error: no captures or geometries under {raw}")
+    by_split = split_captures(ids, spec, doc3d_group if doc3d else None)
+    chunk = int(spec.get("chunk", 1))
     build_module = _crumple_build()
     orient = build_module._orient_builder()
     dewarp_spec = Path(base, expand_path(spec["dewarp_spec"])).resolve()
@@ -379,13 +587,17 @@ def build(
             assigned.setdefault(geometries[order[index % len(geometries)]], []).append(index)
         settings = {key: spec.get(key) for key in ("name", "photo_hw", "own_texture_prob",
                                                    "capture_background_prob", "shade",
-                                                   "margin")}  # fmt: skip
+                                                   "margin", "geometry")}  # fmt: skip
         settings.update(split=split, raw_root=str(raw), background_dir=background_dir,
                         device=device)  # fmt: skip
-        for capture, indices in assigned.items():
-            tasks.append({"key": f"{split}-{capture}", "settings": settings,
-                          "output": str(output), "capture": capture, "indices": indices,
-                          "items": [records[int(picks[i])] for i in indices]})  # fmt: skip
+        groups = [{"capture": capture, "indices": indices,
+                   "items": [records[int(picks[i])] for i in indices]}
+                  for capture, indices in assigned.items()]  # fmt: skip
+        for start in range(0, len(groups), chunk):
+            part = groups[start : start + chunk]
+            name = part[0]["capture"] if chunk == 1 else f"{start // chunk:05d}"
+            tasks.append({"key": f"{split}-{name.replace('/', '_')}", "settings": settings,
+                          "output": str(output), "captures": part})  # fmt: skip
     pending = [t for t in tasks if not (parts / f"{t['key']}.jsonl").is_file()]
     started, done = time.perf_counter(), 0
     context = multiprocessing.get_context("spawn")
@@ -396,7 +608,7 @@ def build(
             done += 1
             if done % 20 == 0 or done == len(pending):
                 rate = done / max(time.perf_counter() - started, 1e-9)
-                print(json.dumps({"captures": done, "of": len(pending), "per_sec": round(rate, 2)}))
+                print(json.dumps({"tasks": done, "of": len(pending), "per_sec": round(rate, 2)}))
     rows = []
     for task in tasks:
         rows.extend(
@@ -411,7 +623,7 @@ def build(
         "spec_sha256": hashlib.sha256(canonical_json(spec)).hexdigest(),
         "captures": {split: len(by_split[split]) for split in by_split},
         "excluded_benchmark": str(exclude) if exclude else None,
-        "geometry_source": SOURCE,
+        "geometry_source": DOC3D_SOURCE if doc3d else SOURCE,
         "pages": described,
         "records": len(rows),
     }
