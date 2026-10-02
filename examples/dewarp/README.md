@@ -139,6 +139,17 @@ LD and AD worsen (4.98, 0.121) and DIR300 OCR CER rises from 0.156 to 0.175. The
 blend of the two (`tools/soup.py`) lands between them (tight crop: DocUNet 0.574 / 4.92 /
 0.213, UVDoc bench 0.753 / 4.72 / 0.110, DIR300 0.702 / 4.22 / 0.142; CER 0.180).
 
+`doc3d-retexture-release-v1.json` lays the same clean pages on Doc3D's page geometry
+(`"geometry": "doc3d_grid"`; the 45x31 grids of UVDoc's `Doc3D_grid.zip`, MIT, about
+100k renders; Doc3D's renders, albedo and lighting are not used): the grid is refined
+to 177x121 nodes, the page drawn through it and lit from its 3-D shape. 59,053 of
+60,000 items were kept (the rest turn over in view). `train-release-uvdoc-doc3d-ft.json`
+gives them half of the UVDoc share (SyntheticDoc .5, UVDoc .25, Doc3D .25, from the
+50% 40k model): with the tight crop DocUNet 0.568 / 4.97 / 0.215, UVDoc bench 0.738 /
+4.69 / 0.122 and DIR300 0.695 / 4.33 / 0.142, below the 50% row on all three
+benchmarks, while DocUNet OCR CER improved (0.142 against 0.169). Doc3D's shapes with
+our synthetic light do not replace real captures.
+
 The start record of a fine-tune carries the parent's data spec, so
 `python -m flattener.scan.shippable` checks every training step of the chain from the
 child's sidecar alone. Fine-tunes trained before that record only the spec's sha256: the
