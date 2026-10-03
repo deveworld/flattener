@@ -165,3 +165,25 @@ def test_pattern_backgrounds_are_busy_and_vary():
     assert all(d.shape == (90, 60, 3) and d.dtype == np.uint8 for d in drawn)
     assert all(d.astype(np.float32).std() > 5 for d in drawn)
     assert len({d.tobytes() for d in drawn}) == 8
+
+
+def test_the_uvdoc_recipe_keeps_the_page_where_its_map_says():
+    tool = _tool()
+    capture, texture = _capture(), _texture()
+    settings = {"photo_hw": [240, 180], "shade": [1.0, 1.0], "margin": [0.05, 0.1],
+                "recipe": "uvdoc"}  # fmt: skip
+
+    def background(size):
+        return np.full((*size, 3), (30, 140, 60), np.uint8)
+
+    for seed in range(4):
+        photo, forward = tool.render_item(
+            capture, texture, background, np.random.default_rng(seed), settings
+        )
+        flat = _unwarp(photo, forward, (160, 120))
+        expected = texture.astype(np.float32) * 200 / 255
+        inner = (slice(8, -8), slice(8, -8))
+        assert np.abs(flat[inner] - expected[inner]).mean() < 12
+        # the paper shows a little past its labelled edge: the map's border samples paper
+        edge = flat[[0, -1]].reshape(-1, 3).mean(0)
+        assert edge[1] < 120 or edge[0] > 60  # not the green background

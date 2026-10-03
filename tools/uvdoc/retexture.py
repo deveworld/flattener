@@ -196,6 +196,58 @@ def compose(
     return (out.clamp(0, 1) * 255 + 0.5).byte().cpu().numpy()
 
 
+def _spread(values, valid, steps: int):
+    """``values`` (C, H, W) carried ``steps`` pixels past ``valid`` (H, W) by repeated
+    3x3 means of the valid neighbours (the nearest-value fill of create_final.py)."""
+    import torch.nn.functional as F
+
+    valid = valid.float()
+    for _ in range(steps):
+        total = F.avg_pool2d((values * valid)[None], 3, stride=1, padding=1)[0]
+        count = F.avg_pool2d(valid[None, None], 3, stride=1, padding=1)[0, 0]
+        grown = (count > 0) & (valid == 0)
+        values = values.where(~grown[None], total / count.clamp_min(1e-6))
+        valid = valid.maximum(grown.float())
+    return values
+
+
+def compose_uvdoc(
+    view: dict[str, Any], texture: np.ndarray, background: np.ndarray, shade: float
+) -> np.ndarray:
+    """``compose`` as UVDoc's create_final.py does it (MIT): the page and its light are
+    carried past the page's edge, the blend mask is the page blurred (sigma 0.75) and
+    grown twice by 3x3, so the paper shows about two pixels beyond its labelled edge,
+    and the background is shifted toward the paper's colour cast (per channel, within
+    +-64/255) and, when darker, a fifth of the way to its brightness."""
+    import torch
+    import torch.nn.functional as F
+
+    photo, uv, inside = view["photo"], view["uv"], view["inside"]
+    device = photo.device
+    small = -F.max_pool2d(-inside.float()[None, None], 3, stride=1, padding=1)[0, 0] > 0.5
+    coords = torch.where(inside[..., None], uv * 2 - 1, torch.full_like(uv, -2.0))
+    source = torch.from_numpy(np.ascontiguousarray(texture)).to(device)
+    source = source.permute(2, 0, 1)[None].float() / 255
+    warped = F.grid_sample(source, coords[None], align_corners=False)[0]
+    warped = _spread(warped, small, 4)
+    warped = _blur(warped[None], 0.5)[0]
+    light = _spread(photo.permute(2, 0, 1), small, 4)
+    page = light * (shade * warped + (1 - shade))
+    mask = _blur(inside.float()[None, None], 0.75)
+    mask = F.max_pool2d(F.max_pool2d(mask, 3, stride=1, padding=1), 3, stride=1, padding=1)[0]
+    surround = torch.from_numpy(np.ascontiguousarray(background)).to(device).float() / 255
+    surround = surround.permute(2, 0, 1)
+    paper = photo[small]
+    if len(paper):
+        cast = paper.mean(dim=0)
+        cast = (cast - cast.median()).clamp(-0.25, 0.25)
+        surround = (surround + cast[:, None, None]).clamp(0, 1)
+        diff = float(paper.mean()) * (shade * 0.556 + 1 - shade) - float(surround.mean())
+        surround = (surround + (0.2 * diff if diff > 0 else diff)).clamp(0, 1)
+    out = page * mask + surround * (1 - mask)
+    return (out.permute(1, 2, 0).clamp(0, 1) * 255 + 0.5).byte().cpu().numpy()
+
+
 def _blur(image, sigma: float):
     """Gaussian blur of an (N, C, H, W) tensor, per channel, edges replicated."""
     import torch
@@ -327,7 +379,10 @@ def render_item(
     margin = rng.uniform(*settings.get("margin", (0.02, 0.15)), size=4)
     x0, y0, x1, y1 = crop_window(flipped["grid"], (height, width), out_hw, margin)
     view = shrink(flipped, (x0, y0, x1, y1), out_hw, settings.get("device", "cpu"))
-    photo = compose(view, texture, None if background is None else background(out_hw), shade)
+    if settings.get("recipe") == "uvdoc" and background is not None:
+        photo = compose_uvdoc(view, texture, background(out_hw), shade)
+    else:
+        photo = compose(view, texture, None if background is None else background(out_hw), shade)
     scale = np.array([out_hw[1] / (x1 - x0), out_hw[0] / (y1 - y0)])
     pixels = (flipped["grid"] - [x0, y0] + 0.5) * scale - 0.5  # pixel centers at integers
     values = pixels_to_flattener(pixels, out_hw)
@@ -664,7 +719,8 @@ def build(
         settings = {key: spec.get(key) for key in ("name", "photo_hw", "own_texture_prob",
                                                    "capture_background_prob", "shade",
                                                    "margin", "geometry", "clean_texture",
-                                                   "pattern_background_prob")}  # fmt: skip
+                                                   "pattern_background_prob",
+                                                   "recipe")}  # fmt: skip
         settings.update(split=split, raw_root=str(raw), background_dir=background_dir,
                         device=device)  # fmt: skip
         groups = [{"capture": capture, "indices": indices,
