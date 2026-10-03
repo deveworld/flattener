@@ -312,6 +312,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--threads", type=_positive_int, default=2, help="torch threads; default %(default)s"
     )
     rectify300.add_argument(
+        "--workers",
+        type=_positive_int,
+        default=1,
+        help="photos rectified at once in threads (same images); default %(default)s",
+    )
+    rectify300.add_argument(
         "--force-render",
         action="store_true",
         help="write images whose map fails the geometry checks (the failures are still "
@@ -689,6 +695,7 @@ def main(argv: list[str] | None = None) -> int:
             snap=args.snap_border,
             rect=args.rect,
             refine=args.refine,
+            workers=args.workers,
         )
         print(json.dumps(record["counts"]))
         return 0 if record["counts"]["failed"] == 0 else 1

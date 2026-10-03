@@ -198,6 +198,7 @@ def predict_dir300(
     snap: bool = False,
     rect: bool = False,
     refine: bool = False,
+    workers: int = 1,
 ) -> dict[str, Any]:
     """Rectify ``dist/{k}.png`` into ``output_dir/{k}.png`` at the photo's own size.
 
@@ -206,7 +207,8 @@ def predict_dir300(
     except for input and output limits of ``MAX_PHOTO_PIXELS``. The record also names
     the input folder, the photo hashes and whether they matched the official photos.
     ``rerun`` and ``deskew`` add crop passes, ``perspective`` makes them perspective passes
-    (``flattener.dewarp.predict.rerun_grid``).
+    (``flattener.dewarp.predict.rerun_grid``). ``workers`` photos are rectified at once
+    (``rectify_batch``), with the same images as one at a time.
     """
     from ..contracts import RenderConfig
     from ..dewarp.predict import BatchInput, load_rgb, rectify_batch
@@ -241,6 +243,7 @@ def predict_dir300(
         snap=snap,
         rect=rect,
         refine=refine,
+        workers=workers,
     )
 
 

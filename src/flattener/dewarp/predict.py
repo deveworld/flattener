@@ -65,8 +65,10 @@ import hashlib
 import json
 import re
 import sys
+import threading
 import time
 from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
@@ -255,9 +257,13 @@ def model_input(dewarper: Dewarper, image: NDArray[np.uint8]) -> torch.Tensor:
     )
 
 
+# ``ieee_float32`` sets process-wide flags, so model calls from batch threads take turns.
+_MODEL_LOCK = threading.Lock()
+
+
 def predict_input(dewarper: Dewarper, tensor: torch.Tensor) -> NDArray[np.float32]:
     """Raw 2-D model output for a model input, as (Gh, Gw, 2)."""
-    with torch.inference_mode(), ieee_float32():
+    with _MODEL_LOCK, torch.inference_mode(), ieee_float32():
         grid2d, _ = dewarper.model(tensor)
     return grid2d[0].permute(1, 2, 0).float().cpu().numpy()
 
@@ -1128,7 +1134,10 @@ def _batch_item(
         return item
     if result.image is not None:
         atomic_write(
-            target, lambda stream, pixels=result.image: Image.fromarray(pixels).save(stream, "PNG")
+            target,
+            lambda stream, pixels=result.image: Image.fromarray(pixels).save(
+                stream, "PNG", compress_level=1
+            ),
         )
     else:
         target.unlink(missing_ok=True)  # an older image no longer matches the record
@@ -1243,6 +1252,19 @@ def recorded_pipeline(record: dict[str, Any] | None) -> dict[str, Any]:
     return value if isinstance(value, dict) else dict(DEFAULT_PIPELINE)
 
 
+class _Serial:
+    """``ThreadPoolExecutor``'s ``map`` in the calling thread."""
+
+    def __enter__(self) -> _Serial:
+        return self
+
+    def __exit__(self, *args: Any) -> None:
+        return None
+
+    def map(self, function: Callable[..., Any], items: Any) -> Iterator[Any]:
+        return map(function, items)
+
+
 def rectify_batch(
     dewarper: Dewarper,
     inputs: list[BatchInput],
@@ -1262,6 +1284,7 @@ def rectify_batch(
     snap: bool = False,
     rect: bool = False,
     refine: bool = False,
+    workers: int = 1,
 ) -> dict[str, Any]:
     """Rectify ``inputs`` into ``output_dir`` and record every item in ``predictions.json``.
 
@@ -1288,8 +1311,14 @@ def rectify_batch(
     settings arguments are then only recorded. When the pipeline record has a
     ``protocol``, the recorded quantization, inset and rerun settings are its own;
     arguments that are not the defaults must agree with it.
+
+    ``workers`` above 1 rectifies that many inputs at once in threads (``rectify`` only;
+    model calls take turns); items are recorded in input order and every image is the
+    one a single worker makes. Images are PNG at zlib level 1.
     """
     check_quantize(quantize)
+    if workers < 1 or (workers > 1 and rectifier is not None):
+        raise _rerun_error("workers must be 1, or more with the default rectify")
     if rectifier is not None and pipeline is None:
         raise _rerun_error("a rectifier needs a pipeline record")
     if rectifier is None and pipeline is not None and pipeline_record(pipeline) != DEFAULT_PIPELINE:
@@ -1375,13 +1404,16 @@ def rectify_batch(
         "items": [],
     }
     write_json(report_path, report)
-    for task in inputs:
-        target = output_dir / task.output
+
+    def one(task: BatchInput) -> dict[str, Any]:
         previous = previous_items.get(task.output)
-        item = _batch_item(task, target, previous, force_render, rectifier)
-        report["items"].append(item)
-        report["counts"] = _count(report["items"])
-        write_json(report_path, report)
+        return _batch_item(task, output_dir / task.output, previous, force_render, rectifier)
+
+    with ThreadPoolExecutor(workers) if workers > 1 else _Serial() as pool:
+        for item in pool.map(one, inputs):
+            report["items"].append(item)
+            report["counts"] = _count(report["items"])
+            write_json(report_path, report)
     report["complete"] = True
     write_json(report_path, report)
     return report

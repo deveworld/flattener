@@ -614,3 +614,33 @@ def test_the_batch_writes_what_rectify_renders_and_refuses_another_pipeline(tmp_
     with pytest.raises(FlattenerError, match="another pipeline"):
         rectify_batch(dewarper, inputs, tmp_path)
     assert prediction_record(tmp_path)["pipeline"] == other
+
+
+def test_batch_workers_write_the_images_of_one_worker_in_input_order(tmp_path):
+    dewarper = _tilted_dewarper()
+    images = [
+        np.random.default_rng(seed).integers(0, 256, (150, 200, 3), np.uint8) for seed in range(6)
+    ]
+    one = rectify_batch(dewarper, _inputs(images), tmp_path / "one", force_render=True, rerun=1)
+    many = rectify_batch(
+        dewarper, _inputs(images), tmp_path / "many", force_render=True, rerun=1, workers=3
+    )
+    strip = ("seconds", "created_utc")
+    assert [item["output"] for item in many["items"]] == [item["output"] for item in one["items"]]
+    for a, b in zip(one["items"], many["items"], strict=True):
+        assert {k: v for k, v in a.items() if k not in strip} == {
+            k: v for k, v in b.items() if k not in strip
+        }
+    for index in range(len(images)):
+        with Image.open(tmp_path / "one" / f"{index}.png") as a:
+            with Image.open(tmp_path / "many" / f"{index}.png") as b:
+                assert np.asarray(a).tobytes() == np.asarray(b).tobytes()
+    with pytest.raises(FlattenerError, match="workers"):
+        rectify_batch(
+            dewarper,
+            _inputs(images),
+            tmp_path / "other",
+            rectifier=_pipeline_rectifier(dewarper, []),
+            pipeline={"name": "flattener.scan", "passes": 1},
+            workers=2,
+        )
