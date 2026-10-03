@@ -126,6 +126,7 @@ further build sets `split_name` to the first build's name.
 | `train-release-uvdoc-half-ft2.json` | 50% | the row above, 40k more | 0.575 / 5.20 / 0.227 | 0.725 / 5.07 / 0.111 | 0.684 / 4.70 / 0.175 |
 | `train-release-uvdoc-70-ft.json` | 70% | the 50% 40k row, 40k more | 0.573 / 5.33 / 0.230 | 0.726 / 4.97 / 0.108 | 0.686 / 4.63 / 0.172 |
 | `train-release-uvdoc-clean-ft.json` | 50% (v3, v4: cleaned pages, patterns) | the 50% 40k row, 40k more | 0.582 / 5.16 / 0.227 | 0.734 / 5.07 / 0.109 | 0.691 / 4.48 / 0.166 |
+| `train-release-uvdoc-clean70-ft.json` | 70% (v3, v4) | the 50% 40k row, 40k more | 0.577 / 5.22 / 0.234 | 0.738 / 4.59 / 0.098 | 0.693 / 4.42 / 0.166 |
 | `train-release-uvdoc-recipe-ft.json` | 50% (v5, v6: UVDoc's recipe) | the 50% 40k row, 40k more | 0.582 / 5.26 / 0.234 | 0.756 / 6.64 / 0.128 | 0.688 / 4.63 / 0.174 |
 
 Scores are MS-SSIM / LD / AD from one prediction. With AADD's tight turned crop and two
@@ -148,8 +149,12 @@ pages looked. They were SyntheticDoc renders flattened through their ground trut
 they kept the render's creases, shadows and grey cast, which then sat on another
 capture's shape as false shading. `clean_texture` divides that light out and
 `pattern_background` adds busy patterned surfaces (v3, v4); the fine-tune on them is the
-scanner's dewarp model (`bundle-v6.json`; tight crop: DocUNet 0.579 / 4.97 / 0.215,
-UVDoc bench 0.754 / 4.85 / 0.116, DIR300 0.706 / 4.12 / 0.139). The UVDoc benchmark
+dewarp model of `bundle-v6.json` (tight crop: DocUNet 0.579 / 4.97 / 0.215, UVDoc bench
+0.754 / 4.85 / 0.116, DIR300 0.706 / 4.12 / 0.139). At 70% (`bundle-v7.json`, the
+scanner's) the tight crop gives DIR300 0.710 / 3.98 / 0.134 and UVDoc bench 0.756 / 4.84 /
+0.106, while DocUNet drops to 0.574 / 5.10 / 0.218; real photos stay as they were. The
+axis-alignment loss on these items (`train-release-uvdoc-clean-axis*-ft.json`, weight
+25 and 200, up to a third of the grid term) left DIR300 AD at 0.1385. The UVDoc benchmark
 itself is made by UVDoc's `create_final.py` from held-out captures. Copying its recipe
 (`"recipe": "uvdoc"`: the paper shown about two pixels past its labelled edge, the
 background toned to the paper, 712x488; v5, v6) raised UVDoc-bench MS-SSIM to 0.776
