@@ -125,6 +125,8 @@ further build sets `split_name` to the first build's name.
 | `train-release-uvdoc-half-ft.json` | 50% (v1, v2) | dewarp-v2, 40k steps | 0.575 / 5.29 / 0.231 | 0.725 / 5.08 / 0.114 | 0.684 / 4.70 / 0.176 |
 | `train-release-uvdoc-half-ft2.json` | 50% | the row above, 40k more | 0.575 / 5.20 / 0.227 | 0.725 / 5.07 / 0.111 | 0.684 / 4.70 / 0.175 |
 | `train-release-uvdoc-70-ft.json` | 70% | the 50% 40k row, 40k more | 0.573 / 5.33 / 0.230 | 0.726 / 4.97 / 0.108 | 0.686 / 4.63 / 0.172 |
+| `train-release-uvdoc-clean-ft.json` | 50% (v3, v4: cleaned pages, patterns) | the 50% 40k row, 40k more | 0.582 / 5.16 / 0.227 | 0.734 / 5.07 / 0.109 | 0.691 / 4.48 / 0.166 |
+| `train-release-uvdoc-recipe-ft.json` | 50% (v5, v6: UVDoc's recipe) | the 50% 40k row, 40k more | 0.582 / 5.26 / 0.234 | 0.756 / 6.64 / 0.128 | 0.688 / 4.63 / 0.174 |
 
 Scores are MS-SSIM / LD / AD from one prediction. With AADD's tight turned crop and two
 more predictions (`--rerun 2 --rect`) the last row scores DocUNet 0.576 / 4.97 / 0.212,
@@ -132,12 +134,27 @@ UVDoc bench 0.748 / 4.68 / 0.110 and DIR300 0.700 / 4.23 / 0.143. Unlike the pro
 renders, these fine-tunes kept real book photos close to dewarp-v2; two of 68 got worse
 (one spread left unsplit, one close-up whose page runs past the photo returned as the
 original). Twice the steps at the same share changed each score by at most 0.004. The
-80k-step 50% model is the scanner's dewarp model (`bundle-v5.json`). At 70% the
+80k-step 50% model was the scanner's dewarp model in `bundle-v5.json`. At 70% the
 benchmarks pull apart: with the tight crop DIR300 rises to 0.703 / 4.17 / 0.140 and the
 UVDoc bench to 0.752 MS-SSIM, while DocUNet falls to 0.571 / 5.09 / 0.218, UVDoc-bench
 LD and AD worsen (4.98, 0.121) and DIR300 OCR CER rises from 0.156 to 0.175. The 50/50
 blend of the two (`tools/soup.py`) lands between them (tight crop: DocUNet 0.574 / 4.92 /
 0.213, UVDoc bench 0.753 / 4.72 / 0.110, DIR300 0.702 / 4.22 / 0.142; CER 0.180).
+
+A research-only check (never shipped) fine-tuned the same start on UVDoc's own
+composites, which lay pages on the same captures with identical labels: one prediction
+scored DocUNet 0.584, UVDoc bench 0.793 and DIR300 0.700. The difference was how our
+pages looked. They were SyntheticDoc renders flattened through their ground truth, so
+they kept the render's creases, shadows and grey cast, which then sat on another
+capture's shape as false shading. `clean_texture` divides that light out and
+`pattern_background` adds busy patterned surfaces (v3, v4); the fine-tune on them is the
+scanner's dewarp model (`bundle-v6.json`; tight crop: DocUNet 0.579 / 4.97 / 0.215,
+UVDoc bench 0.754 / 4.85 / 0.116, DIR300 0.706 / 4.12 / 0.139). The UVDoc benchmark
+itself is made by UVDoc's `create_final.py` from held-out captures. Copying its recipe
+(`"recipe": "uvdoc"`: the paper shown about two pixels past its labelled edge, the
+background toned to the paper, 712x488; v5, v6) raised UVDoc-bench MS-SSIM to 0.776
+with the tight crop but worsened its LD from 4.85 to 7.22 and lowered DIR300: the model
+learns to set the border inside the visible edge, which suits only that benchmark.
 
 `doc3d-retexture-release-v1.json` lays the same clean pages on Doc3D's page geometry
 (`"geometry": "doc3d_grid"`; the 45x31 grids of UVDoc's `Doc3D_grid.zip`, MIT, about
