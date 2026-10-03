@@ -264,35 +264,8 @@ def _blur(image, sigma: float):
 
 
 def clean_texture(rgb: np.ndarray, device: str = "cpu") -> np.ndarray:
-    """A flattened render with its own light divided out, so its creases and shadows do not
-    reach the new photo as false shading: the paper's brightness is estimated per block
-    (1/64 of the long side) as the 90th percentile of luminance, median-filtered over 3x3
-    blocks (so a picture on the page does not count as paper) and enlarged bicubically;
-    each pixel is brightened by the paper's 95th-percentile level over that estimate (gain
-    1-1.8), the paper is balanced to white from its brightest fifth, and a light unsharp
-    mask (0.5, sigma 1) restores edges the flattening softened."""
-    import torch
-    import torch.nn.functional as F
-
-    image = torch.from_numpy(np.ascontiguousarray(rgb)).to(device).float().permute(2, 0, 1)[None]
-    image = image / 255
-    height, width = image.shape[-2:]
-    block = max(8, round(max(height, width) / 64))
-    lum = image.mean(dim=1, keepdim=True)
-    rows, cols = -(-height // block), -(-width // block)
-    padded = F.pad(lum, (0, cols * block - width, 0, rows * block - height), mode="replicate")
-    tiles = F.unfold(padded, block, stride=block)[0]  # (block * block, rows * cols)
-    paper = torch.quantile(tiles, 0.9, dim=0).view(1, 1, rows, cols)
-    near = F.unfold(F.pad(paper, (1, 1, 1, 1), mode="replicate"), 3)[0]
-    paper = near.median(dim=0).values.view(1, 1, rows, cols)
-    level = torch.quantile(paper.flatten(), 0.95)
-    light = F.interpolate(paper, size=(height, width), mode="bicubic", align_corners=False)
-    image = image * (level / light.clamp_min(0.05)).clamp(1.0, 1.8)
-    bright = lum.flatten() >= torch.quantile(lum.flatten(), 0.8)
-    white = image.flatten(2)[0][:, bright].median(dim=1).values.clamp_min(0.05)
-    image = image * (0.97 / white).view(1, 3, 1, 1)
-    image = image + 0.5 * (image - _blur(image, 1.0))
-    return (image[0].permute(1, 2, 0).clamp(0, 1) * 255 + 0.5).byte().cpu().numpy()
+    """``tools/crumple/build.py``'s ``clean_texture``: the render's own light divided out."""
+    return _crumple_build().clean_texture(rgb, device)
 
 
 def pattern_background(rng: np.random.Generator, size: tuple[int, int]) -> np.ndarray:
@@ -598,7 +571,7 @@ def run_capture(task: dict[str, Any]) -> dict[str, Any]:
                 else:
                     texture = build.flat_texture(record, device=device)
                     if settings.get("clean_texture"):
-                        texture = clean_texture(texture, device)
+                        texture = build.clean_texture(texture, device)
                 if not doc3d and rng.random() < settings.get("capture_background_prob", 0.0):
                     background = None
                 else:

@@ -11,6 +11,8 @@ keeps its length), ``grid3d`` (also write the surface's shape in the page frame,
 ``curve``'s steep, close camera), and ``gloss_prob`` and ``shadow_prob`` (``render.render``'s
 highlight and cast shadow); modes ``book``, ``leaf`` and ``spread`` put an own page on
 the facing side (``spread`` maps both).
+``clean_texture`` divides each flattened render's own light out (``clean_texture``), so
+its creases and shadows do not reach the new shape as false shading.
 Each item flattens one
 SyntheticDoc render through its ground truth into a page texture (the aspect from the
 grid's arc lengths), crumples and photographs it (``render.render``) on a CC0 or
@@ -100,6 +102,53 @@ def flat_texture(record: dict[str, Any], long_side: int = 1024, device: str = "c
     return flat[0].permute(1, 2, 0).clamp(0, 255).round().byte().cpu().numpy()
 
 
+def _gaussian(image, sigma: float):
+    """Gaussian blur of an (N, C, H, W) tensor, per channel, edges replicated."""
+    import torch
+    import torch.nn.functional as F
+
+    radius = max(1, int(np.ceil(3 * sigma)))
+    offsets = torch.arange(-radius, radius + 1, dtype=torch.float32, device=image.device)
+    taps = torch.exp(-(offsets**2) / (2 * sigma**2))
+    taps = taps / taps.sum()
+    channels = image.shape[1]
+    out = F.pad(image, (radius, radius, radius, radius), mode="replicate")
+    out = F.conv2d(out, taps.view(1, 1, 1, -1).repeat(channels, 1, 1, 1), groups=channels)
+    return F.conv2d(out, taps.view(1, 1, -1, 1).repeat(channels, 1, 1, 1), groups=channels)
+
+
+def clean_texture(rgb: np.ndarray, device: str = "cpu") -> np.ndarray:
+    """A flattened render with its own light divided out, so its creases and shadows do not
+    reach the new photo as false shading: the paper's brightness is estimated per block
+    (1/64 of the long side) as the 90th percentile of luminance, median-filtered over 3x3
+    blocks (so a picture on the page does not count as paper) and enlarged bicubically;
+    each pixel is brightened by the paper's 95th-percentile level over that estimate (gain
+    1-1.8), the paper is balanced to white from its brightest fifth, and a light unsharp
+    mask (0.5, sigma 1) restores edges the flattening softened."""
+    import torch
+    import torch.nn.functional as F
+
+    image = torch.from_numpy(np.ascontiguousarray(rgb)).to(device).float().permute(2, 0, 1)[None]
+    image = image / 255
+    height, width = image.shape[-2:]
+    block = max(8, round(max(height, width) / 64))
+    lum = image.mean(dim=1, keepdim=True)
+    rows, cols = -(-height // block), -(-width // block)
+    padded = F.pad(lum, (0, cols * block - width, 0, rows * block - height), mode="replicate")
+    tiles = F.unfold(padded, block, stride=block)[0]  # (block * block, rows * cols)
+    paper = torch.quantile(tiles, 0.9, dim=0).view(1, 1, rows, cols)
+    near = F.unfold(F.pad(paper, (1, 1, 1, 1), mode="replicate"), 3)[0]
+    paper = near.median(dim=0).values.view(1, 1, rows, cols)
+    level = torch.quantile(paper.flatten(), 0.95)
+    light = F.interpolate(paper, size=(height, width), mode="bicubic", align_corners=False)
+    image = image * (level / light.clamp_min(0.05)).clamp(1.0, 1.8)
+    bright = lum.flatten() >= torch.quantile(lum.flatten(), 0.8)
+    white = image.flatten(2)[0][:, bright].median(dim=1).values.clamp_min(0.05)
+    image = image * (0.97 / white).view(1, 3, 1, 1)
+    image = image + 0.5 * (image - _gaussian(image, 1.0))
+    return (image[0].permute(1, 2, 0).clamp(0, 1) * 255 + 0.5).byte().cpu().numpy()
+
+
 def own_texture(rng: np.random.Generator, page_id: str) -> np.ndarray:
     """An own page (``tools/orient/pages.py``: documents, forms, printouts), tinted paper."""
     pages = _orient_builder().pages
@@ -155,6 +204,8 @@ def run_chunk(task: dict[str, Any]) -> dict[str, Any]:
                 texture = own_texture(rng, f"{settings['name']}-{settings['split']}-{index}")
             else:
                 texture = flat_texture(record, device=settings["device"])
+                if settings.get("clean_texture"):
+                    texture = clean_texture(texture, settings["device"])
             bank = _bank(settings["background_dir"])
             if bank is not None and len(bank) and rng.random() < 0.75:
                 background = bank.draw(rng, out_hw)
@@ -283,7 +334,8 @@ def build(
                     "grid3d": spec.get("grid3d", False),
                     "close_prob": spec.get("close_prob"),
                     "gloss_prob": spec.get("gloss_prob"),
-                    "shadow_prob": spec.get("shadow_prob")}  # fmt: skip
+                    "shadow_prob": spec.get("shadow_prob"),
+                    "clean_texture": spec.get("clean_texture", False)}  # fmt: skip
         for start in range(0, count, spec.get("chunk", 200)):
             stop = min(count, start + spec.get("chunk", 200))
             tasks.append({"key": f"{split}-{start:07d}", "settings": settings,
