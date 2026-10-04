@@ -17,8 +17,10 @@ where the paper goes on.
 
 With ``stack_prob`` a page of another sample lies under the placed page, a sheet of a
 stack: turned, scaled a little and moved so that it shows past one or two of the page's
-sides. The target stays the top page, so the model learns to follow its edge where
-similar paper goes on underneath.
+sides, and the top page casts a thin contact shadow along its edge (paper thickness).
+The target stays the top page, so the model learns to follow its edge where similar
+paper goes on underneath. Without that shadow the only cue was the change of content,
+and a model trained so took column rules and header bands inside pages for page edges.
 
 ``tilt_transform`` builds the ``tilt`` evaluation view of ``data.evaluation_view``: the
 page crop seen by a tilted camera, the frame corners moved by up to a fixed fraction.
@@ -681,14 +683,15 @@ def _draw_under(
     out_hw: tuple[int, int],
     config: CompositeConfig,
     rng: np.random.Generator,
-) -> None:
+) -> bool:
     """Draw another sample's page onto ``surface`` as the sheet under the placed page
     (corners ``placed``, output px): turned by up to ``stack_angle`` degrees about the
     page's centre, scaled by 0.95-1.1 and moved along one or both page axes by
-    ``stack_shift`` of the page size, so it shows past those sides."""
+    ``stack_shift`` of the page size, so it shows past those sides. Returns whether it
+    was drawn."""
     image, grid, valid = under
     if not valid.all():
-        return
+        return False
     if not isinstance(image, Image.Image):
         image = Image.fromarray(image)
     width, height = image.size
@@ -704,7 +707,7 @@ def _draw_under(
             target = target + rng.choice((-1.0, 1.0)) * rng.uniform(*config.stack_shift) * axis
     box = polygon_box(target, out_hw)
     if box is None or abs(polygon_area(target)) < 1.0:
-        return
+        return False
     transform = corner_homography(source, target)
     step = math.sqrt(abs(polygon_area(source)) / abs(polygon_area(target)))
     pixels = warp_homography(image, transform, out_hw, step=step, box=box)
@@ -713,6 +716,7 @@ def _draw_under(
     region = surface[y0:y1, x0:x1]
     gain = np.float32(rng.uniform(*config.page_gain))
     region += alpha * (pixels.astype(np.float32) * gain - region)
+    return True
 
 
 def _fold_shade(
@@ -762,9 +766,10 @@ def compose(
     placed = apply_homography(transform, page)
     box = polygon_box(placed, out_hw)
     surface = _background(config, bank, rng, out_hw)
+    stacked = False
     if under is not None:
         placed_corners = apply_homography(transform, _corners(nodes_px))
-        _draw_under(surface, under, placed_corners, out_hw, config, rng)
+        stacked = _draw_under(surface, under, placed_corners, out_hw, config, rng)
     fold = None
     if neighbor is not None:
         corners = apply_homography(transform, _corners(nodes_px))
@@ -782,6 +787,10 @@ def compose(
         mask = Image.fromarray(np.rint(moved * 255.0).astype(np.uint8))
         shade = _shadow(mask, rng.uniform(3.0, 18.0))
         surface *= (1.0 - rng.uniform(0.1, 0.45) * shade)[..., None]
+    if stacked:  # the top sheet's thin contact shadow on what lies under it
+        mask = Image.fromarray(np.rint(alpha * 255.0).astype(np.uint8))
+        contact = _shadow(mask, rng.uniform(1.0, 3.0))
+        surface *= (1.0 - rng.uniform(0.15, 0.4) * contact)[..., None]
     gain = rng.uniform(*config.page_gain)
     result = surface
     if box is not None:

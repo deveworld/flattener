@@ -478,7 +478,7 @@ def test_a_sheet_under_the_page_shows_past_its_sides_and_the_target_stays_the_pa
             x, y = corner + (corner - middle) * 0.08
             if 0 <= x < OUT[1] and 0 <= y < OUT[0]:
                 r, g, b = image[:, int(y), int(x)].tolist()
-                past += r >= 245 and g <= 5 and b <= 5
+                past += 120 <= r < 250 and g <= 5 and b <= 5  # red, in the contact shadow
     assert past >= 3
     with pytest.raises(ValueError):
         CompositeConfig(stack_shift=(0.2, 0.6))
