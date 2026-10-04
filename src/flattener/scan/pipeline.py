@@ -42,7 +42,9 @@ plan and checks the plan's map; ``render(source, planned)`` makes the image of a
   with more than 5 % of its output outside the photo, unless at most 25 % lies outside and
   OrientNet settled the quarter twice (accepted before the dewarp, upright on the flat
   preview): that page is flattened with a ``page_cut_off`` warning (evidence
-  ``outside``). Against a manual quad, coverage
+  ``outside``). The gate's own ``page_cut_off`` warning (mask along a photo side) stays
+  only for the sides the accepted page comes within 1 % of (a facing page cut by the frame
+  leaves the mask there while the page itself is whole). Against a manual quad, coverage
   below 0.95 fails. The median node drift between the last two
   passes must stay within 4 % of the page diagonal.
 * ``plan``: ``scan.output_policy.plan_output`` (auto size, standard-ratio snap) and a
@@ -179,6 +181,11 @@ VERIFY: dict[str, Any] = {
     # close-ups OrientNet alone was wrong with 0.99 confidence (KR-Real dev b05-031), and
     # its flat-preview check disagreed.
     "cut_off_flatten_outside": 0.25,
+    # The gate's page_cut_off warning (mask along a photo side) stays only for the sides
+    # the accepted page comes within this share of the side of: a neighbouring page cut by
+    # the frame leaves the mask along a side while the flattened page lies well inside
+    # (KR-Real dev: cut sides <= -0.05, complete pages >= 0.04).
+    "cut_off_edge_gap": 0.01,
     # A grid the gate mask reaches past must look like paper (scan.look.paper).
     "page_max_saturation": 0.28,
     "page_max_dark": 0.35,
@@ -516,6 +523,40 @@ def _orientation_confirmed(orientation: _Orientation) -> bool:
     pre = orientation.result
     post = (orientation.post or {}).get("result") or {}
     return pre is not None and pre.accepted and bool(post.get("accepted")) and post.get("k") == 0
+
+
+def _edge_gaps(grid: NDArray) -> dict[str, float]:
+    """How far the grid stays inside each image side, as a share of that side (negative:
+    the page reaches past it)."""
+    x, y = grid[..., 0], grid[..., 1]
+    return {
+        "top": float(y.min() + 1) / 2,
+        "right": float(1 - x.max()) / 2,
+        "bottom": float(1 - y.max()) / 2,
+        "left": float(x.min() + 1) / 2,
+    }
+
+
+def _cut_off_on_page(reasons: list[Reason], grid: NDArray) -> list[Reason]:
+    """``reasons`` with the gate's ``page_cut_off`` warning (evidence ``mask`` or
+    ``mask_and_outline``) narrowed to the sides the accepted page reaches
+    (``VERIFY["cut_off_edge_gap"]``; evidence gains ``_and_page`` and the gaps). A warning
+    with no such side is dropped: the page itself is whole. A split page narrows its
+    spread's warning again with its own grid."""
+    gaps = _edge_gaps(grid)
+    kept = []
+    for item in reasons:
+        evidence = str(item.detail.get("evidence")).removesuffix("_and_page")
+        if item.code != "page_cut_off" or evidence not in ("mask", "mask_and_outline"):
+            kept.append(item)
+            continue
+        sides = [s for s in item.detail.get("sides", []) if gaps[s] <= VERIFY["cut_off_edge_gap"]]
+        if sides:
+            gap = {side: round(gaps[side], 4) for side in sides}
+            kept.append(
+                reason("page_cut_off", sides=sides, evidence=f"{evidence}_and_page", gap=gap)
+            )
+    return kept
 
 
 def _outside_sides(grid: NDArray) -> list[str]:
@@ -1198,7 +1239,11 @@ class Scanner:
             "fold_found": found,
             "reflatten": reflatten,
         }
-        record.reasons = [*planned.record.reasons, reason("two_pages", **detail)]
+        record.reasons = _cut_off_on_page(
+            [*planned.record.reasons, reason("two_pages", **detail)], grid
+        )
+        record.guidance = collect_guidance(record.reasons)
+        record.outcome = decide_outcome(page_plan.kind, record.reasons)
         record.plan = page_plan
         page = PlannedScan(page_plan, None, src, record, options, overrides, clock=clock)
         with clock.stage("render"):
@@ -2072,6 +2117,8 @@ class Scanner:
         record = planned.record
         if outcome["rerun_discarded"]:
             reasons.append(reason("rerun_discarded", failures=outcome["failures"]))
+        if plan.kind == "dewarp":
+            reasons[:] = _cut_off_on_page(reasons, plan.grid)
         cut = outcome["checks"].get("cut_off")
         if cut is not None:
             detail = {"sides": cut["sides"], "evidence": "outside", "outside": cut["outside"]}

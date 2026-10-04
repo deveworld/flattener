@@ -35,8 +35,9 @@ from flattener.scan.pipeline import (
     Scanner,
     ScanOptions,
     ScanOverrides,
+    _cut_off_on_page,
 )
-from flattener.scan.records import Outcome, ScanPlan
+from flattener.scan.records import Outcome, ScanPlan, reason
 
 SIZE = (240, 320)
 TRUE = Page((170, 125), (150, 190), 7.0)
@@ -787,3 +788,30 @@ def test_a_spread_splits_into_two_pages_in_reading_order():
     assert first.image[..., 0].mean() > second.image[..., 0].mean()
     whole = scanner.scan_pages(image, ScanOptions(pages=1))
     assert len(whole) == 1 and whole[0].plan.output.width > whole[0].plan.output.height
+
+
+def _box_grid(left, top, right, bottom):
+    x = np.linspace(left, right, 5)
+    y = np.linspace(top, bottom, 4)
+    return np.stack(np.meshgrid(x, y), axis=-1)
+
+
+def test_a_cut_neighbouring_page_gives_no_cut_off_warning_for_a_whole_page():
+    # The gate mask runs along the left and bottom photo sides (a facing page cut by the
+    # frame), but the flattened page stays 20 % and 2.5 % of those sides inside.
+    mask_warning = reason("page_cut_off", sides=["left", "bottom"], evidence="mask")
+    outside = reason("page_cut_off", sides=["top"], evidence="outside", outside=0.1)
+    neighbour = reason("neighbor_page_partial", boxes=[])
+    inside = _box_grid(-0.6, -0.9, 0.8, 0.95)
+    kept = _cut_off_on_page([mask_warning, neighbour, outside], inside)
+    assert kept == [neighbour, outside]
+    # A page that reaches the left side keeps that side, with the gap as evidence.
+    reaching = _box_grid(-1.02, -0.9, 0.8, 0.95)
+    (narrowed,) = _cut_off_on_page([mask_warning], reaching)
+    assert narrowed.detail["sides"] == ["left"]
+    assert narrowed.detail["evidence"] == "mask_and_page"
+    assert narrowed.detail["gap"] == {"left": -0.01}
+    # A split page narrows its spread's warning again with its own grid.
+    assert _cut_off_on_page([narrowed], inside) == []
+    assert _cut_off_on_page([narrowed], reaching)[0].detail["evidence"] == "mask_and_page"
+    assert VERIFY["cut_off_edge_gap"] == 0.01
