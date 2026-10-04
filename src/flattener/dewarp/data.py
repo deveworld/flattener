@@ -1395,9 +1395,11 @@ class DewarpDataset(torch.utils.data.Dataset):
         rng = np.random.default_rng([self.seed, int(position), COMPOSITE_STREAM])
         if rng.random() >= place.prob:
             return None
-        neighbor = None
+        neighbor = under = None
         if place.neighbor_prob > 0 and rng.random() < place.neighbor_prob:
             neighbor = self._neighbor(int(rng.integers(len(self))))
+        if place.stack_prob > 0 and rng.random() < place.stack_prob:
+            under = self._neighbor(int(rng.integers(len(self))))
         try:
             return composite.compose(
                 sample.image,
@@ -1408,13 +1410,16 @@ class DewarpDataset(torch.utils.data.Dataset):
                 rng,
                 self.backgrounds,
                 None if neighbor is None else (neighbor.image, neighbor.grid, neighbor.valid),
+                None if under is None else (under.image, under.grid, under.valid),
             )
         finally:
-            if neighbor is not None and isinstance(neighbor.image, Image.Image):
-                neighbor.image.close()
+            for other in (neighbor, under):
+                if other is not None and isinstance(other.image, Image.Image):
+                    other.image.close()
 
     def _neighbor(self, flat: int) -> RawSample:
-        """Another sample of the set, for the facing page of a composite."""
+        """Another sample of the set, for the facing page or the sheet under the page of a
+        composite."""
         which = bisect.bisect_right(self.offsets, flat) - 1
         other = self.sources[which].load(flat - self.offsets[which])
         if self.track == "release" and other.meta["track"] != "release":

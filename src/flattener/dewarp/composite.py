@@ -15,6 +15,11 @@ right edge, sharing that edge like the facing page of an open book, with a fold 
 across both. The target stays the placed page, so the model learns to stop at the fold
 where the paper goes on.
 
+With ``stack_prob`` a page of another sample lies under the placed page, a sheet of a
+stack: turned, scaled a little and moved so that it shows past one or two of the page's
+sides. The target stays the top page, so the model learns to follow its edge where
+similar paper goes on underneath.
+
 ``tilt_transform`` builds the ``tilt`` evaluation view of ``data.evaluation_view``: the
 page crop seen by a tilted camera, the frame corners moved by up to a fixed fraction.
 """
@@ -81,6 +86,11 @@ class CompositeConfig:
     - ``neighbor_fold``: largest change of the facing page's far edge, as a fraction of
       its length (scale) and of the page height (shift), for a page lifted at the fold.
     - ``fold_shadow``: strength range of the shadow along the fold (0 to 1).
+    - ``stack_prob``: chance that a composite shows another sample's page under the placed
+      page (passed to ``compose`` as ``under``), as a sheet of a stack.
+    - ``stack_shift``: how far that sheet shows past the page along one or both page
+      axes, as a fraction of the page size, drawn uniformly per axis.
+    - ``stack_angle``: largest turn of that sheet against the page, in degrees.
     """
 
     prob: float = 0.0
@@ -106,9 +116,14 @@ class CompositeConfig:
     neighbor_width: tuple[float, float] = (0.3, 1.0)
     neighbor_fold: float = 0.15
     fold_shadow: tuple[float, float] = (0.05, 0.45)
+    stack_prob: float = 0.0
+    stack_shift: tuple[float, float] = (0.03, 0.25)
+    stack_angle: float = 12.0
 
     def __post_init__(self) -> None:
-        pairs = ("area", "page_gain", "jpeg_quality", "neighbor_width", "fold_shadow")
+        pairs = (
+            "area", "page_gain", "jpeg_quality", "neighbor_width", "fold_shadow", "stack_shift"
+        )  # fmt: skip
         for name in (*pairs, "turns"):
             object.__setattr__(self, name, tuple(getattr(self, name)))
         for item in fields(self):
@@ -143,6 +158,9 @@ class CompositeConfig:
         low, high = self.fold_shadow
         if len(self.fold_shadow) != 2 or not 0 <= low <= high < 1 or self.neighbor_fold > 0.5:
             raise ValueError("fold_shadow must be (low, high) within [0, 1); neighbor_fold <= 0.5")
+        low, high = self.stack_shift
+        if len(self.stack_shift) != 2 or not 0 <= low <= high <= 0.5 or self.stack_angle > 45:
+            raise ValueError("stack_shift must be (low, high) within [0, 0.5]; stack_angle <= 45")
 
     @property
     def enabled(self) -> bool:
@@ -656,6 +674,47 @@ def _draw_neighbor(
     return fold, target
 
 
+def _draw_under(
+    surface: NDArray[np.float32],
+    under: tuple[Image.Image | NDArray[np.uint8], NDArray, NDArray],
+    placed: NDArray,
+    out_hw: tuple[int, int],
+    config: CompositeConfig,
+    rng: np.random.Generator,
+) -> None:
+    """Draw another sample's page onto ``surface`` as the sheet under the placed page
+    (corners ``placed``, output px): turned by up to ``stack_angle`` degrees about the
+    page's centre, scaled by 0.95-1.1 and moved along one or both page axes by
+    ``stack_shift`` of the page size, so it shows past those sides."""
+    image, grid, valid = under
+    if not valid.all():
+        return
+    if not isinstance(image, Image.Image):
+        image = Image.fromarray(image)
+    width, height = image.size
+    source = _corners((grid.astype(np.float64) + 1.0) / 2.0 * np.array([width, height]))
+    angle = math.radians(rng.uniform(-config.stack_angle, config.stack_angle))
+    turn = np.array([[math.cos(angle), -math.sin(angle)], [math.sin(angle), math.cos(angle)]])
+    centre = placed.mean(axis=0)
+    target = centre + (placed - centre) @ turn.T * rng.uniform(0.95, 1.1)
+    axes = (placed[1] - placed[0], placed[3] - placed[0])  # across and down the page
+    which = int(rng.integers(3))  # 0: across, 1: down, 2: both
+    for index, axis in enumerate(axes):
+        if which in (index, 2):
+            target = target + rng.choice((-1.0, 1.0)) * rng.uniform(*config.stack_shift) * axis
+    box = polygon_box(target, out_hw)
+    if box is None or abs(polygon_area(target)) < 1.0:
+        return
+    transform = corner_homography(source, target)
+    step = math.sqrt(abs(polygon_area(source)) / abs(polygon_area(target)))
+    pixels = warp_homography(image, transform, out_hw, step=step, box=box)
+    x0, y0, x1, y1 = box
+    alpha = page_alpha(target, box, rng.uniform(0.0, config.edge_trim))[..., None]
+    region = surface[y0:y1, x0:x1]
+    gain = np.float32(rng.uniform(*config.page_gain))
+    region += alpha * (pixels.astype(np.float32) * gain - region)
+
+
 def _fold_shade(
     fold: NDArray, page_width: float, out_hw: tuple[int, int], strength: float, rng
 ) -> NDArray[np.float32]:
@@ -678,11 +737,13 @@ def compose(
     rng: np.random.Generator,
     bank: BackgroundBank | None = None,
     neighbor: tuple[Image.Image | NDArray[np.uint8], NDArray, NDArray] | None = None,
+    under: tuple[Image.Image | NDArray[np.uint8], NDArray, NDArray] | None = None,
 ) -> tuple[torch.Tensor, NDArray[np.float32], int] | None:
     """The composite of one sample: (3, H, W) uint8 image, target grid in output
     flattener values, quarter turn index. ``nodes`` are the sample's edge-aligned grid
     values with respect to ``image``. ``neighbor`` (image, grid values, valid) is another
-    sample whose page is drawn as the facing page.
+    sample whose page is drawn as the facing page; ``under`` likewise one whose page lies
+    under the placed page.
 
     Returns None when the sample cannot be placed exactly: an invalid node, or a page
     outline that leaves the source image (its pixels would be missing).
@@ -701,6 +762,9 @@ def compose(
     placed = apply_homography(transform, page)
     box = polygon_box(placed, out_hw)
     surface = _background(config, bank, rng, out_hw)
+    if under is not None:
+        placed_corners = apply_homography(transform, _corners(nodes_px))
+        _draw_under(surface, under, placed_corners, out_hw, config, rng)
     fold = None
     if neighbor is not None:
         corners = apply_homography(transform, _corners(nodes_px))

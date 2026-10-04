@@ -451,3 +451,34 @@ def test_a_facing_page_shows_at_the_fold_and_the_target_stays_the_page():
                 r, g, b = image[:, int(y), int(x)].tolist()
                 beside += r >= 245 and g <= 5 and b <= 5
     assert beside >= 3
+
+
+def test_a_sheet_under_the_page_shows_past_its_sides_and_the_target_stays_the_page():
+    size = (120, 90)
+    nodes, valid = _values(_nodes(size), size), np.ones(GRID, bool)
+    red = np.zeros((*size, 3), np.uint8)
+    red[..., 0] = 250  # the sheet underneath is plain red
+    config = CompositeConfig(
+        prob=1.0, area=(0.1, 0.2), stack_prob=1.0, stack_shift=(0.1, 0.2), panel_prob=0.0, **PLAIN
+    )
+    expected = _sample_at(torch.from_numpy(_ramp(size)).permute(2, 0, 1), nodes)
+    inner = (slice(1, -1), slice(1, -1))
+    past = 0
+    for seed in range(6):
+        plain = compose(_ramp(size), nodes, valid, OUT, config, np.random.default_rng(seed))
+        image, target, _ = compose(
+            _ramp(size), nodes, valid, OUT, config, np.random.default_rng(seed),
+            under=(red, nodes, valid),
+        )  # fmt: skip
+        np.testing.assert_array_equal(target, plain[1])  # the sheet leaves the target alone
+        np.testing.assert_allclose(_sample_at(image, target)[inner], expected[inner], atol=3)
+        corners = (target[[0, 0, -1, -1], [0, -1, -1, 0]] + 1) / 2 * [OUT[1], OUT[0]]
+        middle = corners.mean(axis=0)
+        for corner in corners:  # just past each corner, away from the page
+            x, y = corner + (corner - middle) * 0.08
+            if 0 <= x < OUT[1] and 0 <= y < OUT[0]:
+                r, g, b = image[:, int(y), int(x)].tolist()
+                past += r >= 245 and g <= 5 and b <= 5
+    assert past >= 3
+    with pytest.raises(ValueError):
+        CompositeConfig(stack_shift=(0.2, 0.6))
