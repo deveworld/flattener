@@ -39,7 +39,10 @@ plan and checks the plan's map; ``render(source, planned)`` makes the image of a
   or more of its edges is a close-up whose page runs out of the photo: ``page_cut_off``
   ends the chain. So does a grid holding less than 45 % of a gate page that fills the
   frame (the page runs past the photo on every side the grid does not reach), and a plan
-  with more than 5 % of its output outside the photo. Against a manual quad, coverage
+  with more than 5 % of its output outside the photo, unless at most 25 % lies outside and
+  OrientNet settled the quarter twice (accepted before the dewarp, upright on the flat
+  preview): that page is flattened with a ``page_cut_off`` warning (evidence
+  ``outside``). Against a manual quad, coverage
   below 0.95 fails. The median node drift between the last two
   passes must stay within 4 % of the page diagonal.
 * ``plan``: ``scan.output_policy.plan_output`` (auto size, standard-ratio snap) and a
@@ -167,6 +170,12 @@ VERIFY: dict[str, Any] = {
     # A plan with more of its output outside the photo than this: the page runs out of
     # the photo there (set on KR-Real dev photos: cut pages 0.10-0.12, others <= 0.006).
     "cut_off_outside": 0.05,
+    # Such a page is flattened anyway, with a warning, when at most this share of the
+    # output lies outside and its orientation is settled twice (confident before the
+    # dewarp, upright on the flat preview); otherwise the original comes back. On cut-off
+    # close-ups OrientNet alone was wrong with 0.99 confidence (KR-Real dev b05-031), and
+    # its flat-preview check disagreed.
+    "cut_off_flatten_outside": 0.25,
     # A grid the gate mask reaches past must look like paper (scan.look.paper).
     "page_max_saturation": 0.28,
     "page_max_dark": 0.35,
@@ -490,6 +499,25 @@ class _Orientation:
 
 def _post_accepted(post: dict[str, Any] | None) -> bool:
     return bool(((post or {}).get("result") or {}).get("accepted"))
+
+
+def _orientation_confirmed(orientation: _Orientation) -> bool:
+    """OrientNet settled the quarter twice: accepted before the dewarp and the flat
+    preview of the result accepted as upright (no turn left)."""
+    pre = orientation.result
+    post = (orientation.post or {}).get("result") or {}
+    return pre is not None and pre.accepted and bool(post.get("accepted")) and post.get("k") == 0
+
+
+def _outside_sides(grid: NDArray) -> list[str]:
+    """Image sides past which the grid's outline reaches (the page runs out of the photo)."""
+    beyond = {
+        "top": grid[..., 1].min() < -1,
+        "right": grid[..., 0].max() > 1,
+        "bottom": grid[..., 1].max() > 1,
+        "left": grid[..., 0].min() < -1,
+    }
+    return [side for side, out in beyond.items() if out]
 
 
 @dataclass(eq=False)
@@ -1977,7 +2005,15 @@ class Scanner:
             outside = (checked.result.metadata.get("validation") or {}).get(
                 "out_of_bounds_fraction"
             )
-            if not strict and outside is not None and outside > VERIFY["cut_off_outside"]:
+            cut_off = not strict and outside is not None and outside > VERIFY["cut_off_outside"]
+            if (
+                cut_off
+                and outside <= VERIFY["cut_off_flatten_outside"]
+                and _orientation_confirmed(orientation)
+            ):
+                checks["cut_off"] = {"outside": outside, "sides": _outside_sides(grid)}
+                cut_off = False
+            if cut_off:
                 bad = reason(
                     "page_cut_off",
                     status=Status.MODEL_ERROR,
@@ -2025,6 +2061,10 @@ class Scanner:
         record = planned.record
         if outcome["rerun_discarded"]:
             reasons.append(reason("rerun_discarded", failures=outcome["failures"]))
+        cut = outcome["checks"].get("cut_off")
+        if cut is not None:
+            detail = {"sides": cut["sides"], "evidence": "outside", "outside": cut["outside"]}
+            reasons.append(reason("page_cut_off", **detail))
         coverage = outcome["checks"].get("coverage")
         if coverage is not None and coverage < VERIFY["min_coverage"]:
             excess = outcome["checks"].get("excess")

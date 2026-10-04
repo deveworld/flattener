@@ -341,6 +341,27 @@ def test_a_zoomed_piece_of_the_page_returns_the_original(monkeypatch):
     assert result.reason_code == "page_cut_off" and result.reasons[-1].detail["check"] == "outside"
 
 
+def test_a_cut_page_settled_upright_twice_is_flattened_with_a_warning(monkeypatch):
+    cut = Page((60, 125), (150, 190), 7.0)
+    # OrientNet sure before the dewarp and the flat preview upright: flattened, warned.
+    scanner, _ = _scanner(cut, orienter=FakeOrienter(cut, SIZE))
+    result = scanner.scan(ramp_scene(SIZE, cut))
+    assert result.status == Status.SUCCESS and result.plan is not None
+    warning = [item for item in result.reasons if item.code == "page_cut_off"][-1]
+    assert warning.detail["evidence"] == "outside" and warning.detail["outside"] > 0.05
+    assert warning.detail["sides"] and result.guidance
+    # Either check unsure: the original comes back as before.
+    for pre, post in ((False, True), (True, False)):
+        scanner, _ = _scanner(cut, orienter=FakeOrienter(cut, SIZE, pre=pre, post=post))
+        result = scanner.scan(ramp_scene(SIZE, cut))
+        assert result.reason_code == "page_cut_off" and result.plan is None
+    # Too much of the page outside: the original too.
+    monkeypatch.setitem(VERIFY, "cut_off_flatten_outside", 0.06)
+    scanner, _ = _scanner(cut, orienter=FakeOrienter(cut, SIZE))
+    result = scanner.scan(ramp_scene(SIZE, cut))
+    assert result.reason_code == "page_cut_off" and result.plan is None
+
+
 def test_without_a_gate_the_outline_is_used_unverified():
     scanner, model = _scanner(gate=False)
     image = ramp_scene(SIZE, TRUE)
