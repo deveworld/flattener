@@ -60,6 +60,7 @@ from .pipeline import (
     ScanOverrides,
 )
 from .records import EXIT_FALLBACK, EXIT_SCANNED, EXIT_USAGE, SCANNED_OUTCOMES, Outcome
+from .sharpen import DEFAULT_AMOUNT
 from .timing import append_jsonl, megapixel_bucket
 
 DEBUG_LONG_SIDE = 1024
@@ -205,6 +206,12 @@ def parser() -> argparse.ArgumentParser:
     output.add_argument("--aspect", type=_aspect, default="auto")
     output.add_argument("--inset", type=parse_inset, default=None)
     output.add_argument("--border", type=float, default=0.0)
+    output.add_argument(
+        "--sharpen",
+        type=float,
+        default=DEFAULT_AMOUNT,
+        help=f"sharpening amount on the flattened page, 0 for none (default {DEFAULT_AMOUNT:g})",
+    )
     output.add_argument("--format", default="jpg", choices=sorted({*FORMATS, "jpg"}))
     output.add_argument(
         "--fallback",
@@ -239,6 +246,7 @@ def _options(args: argparse.Namespace) -> ScanOptions:
         orient="none" if args.no_orient else "model",
         inset=args.inset,
         border=args.border,
+        sharpen=args.sharpen,
         fallback=args.fallback,
         on_error=args.on_error,
         fast_check=not args.full_check,

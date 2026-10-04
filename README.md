@@ -26,6 +26,7 @@ python -m flattener.scan IMG... --out DIR --weights DEWARP.pt [--gate GATE.pt] [
 - 가중치는 배포 검사(아래 "모델")를 통과해야 불러옵니다. `--research`를 주면 통과하지 못한 가중치도 불러오고, 기록에 `research: true`가 남습니다.
 - `--device`의 기본값은 `cpu`입니다.
 - 수동 수정: `--region L,T,R,B`, `--quad x1,y1,...,x4,y4`(왼쪽 위부터 시계 방향), `--quarter 0..3`, `--no-dewarp`, `--long-side N`, `--output-size H,W`, `--aspect`.
+- 편 이미지에는 기본으로 샤프닝을 겁니다(`--sharpen`, 기본 1.0, `--sharpen 0`이면 끔). 밝기만 선명하게 하므로 색은 그대로이고, 실패해서 돌려주는 원본에는 걸지 않습니다. 기본 모델이 편 벤치마크 결과에 걸어 보면 DocUNet 글자 인식 오류율(CER, DocTr 60장)이 0.158에서 0.119로 줄었습니다. DIR300은 편집 거리 평균이 406에서 361로 줄었고, CER 평균은 정답 스캔에서 175자만 읽히는 사진 한 장 때문에 0.141에서 0.184로 올랐습니다(그 사진을 빼면 0.118에서 0.103).
 - 모든 옵션: `python -m flattener.scan --help`.
 
 ```python

@@ -53,6 +53,8 @@ plan and checks the plan's map; ``render(source, planned)`` makes the image of a
   own timings). With ``fast_check`` a dewarp plan is checked by ``scan.fast_check`` in
   ``plan`` (the renderer's decisions from the grid; ``flattener.render`` runs on a proxy
   of at most 2 MP and 1/16 of the output) and ``render`` samples the full size once.
+  The plan's ``sharpen`` amount then runs ``scan.sharpen`` on the image
+  (``render_sharpen``); the original photo given back on failure is never sharpened.
 * ``preview``: the preview image, sampled from the plan's map on a source level.
 
 Stage names that extend another (``infer_pass_*``, ``render_*``) time parts of that
@@ -117,6 +119,7 @@ from ..renderer import render as flattener_render
 from ..validation import validate_image
 from . import locate as locating
 from . import look
+from . import sharpen as sharpening
 from .fast_check import FastCheck, fast_check
 from .io import SourceImage, read_source
 from .orient import Orienter, OrientResult, ViewGeometry
@@ -223,11 +226,12 @@ class ScanOptions:
     of a preview image sampled from the same map (``None``: no preview). ``chain``: try
     the other candidates after ``default`` fails.
     ``use_focal``: take the EXIF focal length into the aspect estimate. ``fill_rgb``: the
-    color of output pixels outside the source; the plan keeps it with ``quantize``, so a
-    stored plan renders the same image. ``pages`` (for ``Scanner.split``): ``"auto"``
-    splits an open-book spread at its fold (``look.fold``), ``2`` always splits (at the
-    middle when no fold is found), ``1`` keeps one image. ``page_order``: ``"ltr"`` numbers
-    the left page first, ``"rtl"`` the right one.
+    color of output pixels outside the source; the plan keeps it with ``quantize`` and
+    ``sharpen``, so a stored plan renders the same image. ``sharpen``: the amount of
+    ``scan.sharpen`` on the flattened image (0 turns it off). ``pages`` (for
+    ``Scanner.split``): ``"auto"`` splits an open-book spread at its fold (``look.fold``),
+    ``2`` always splits (at the middle when no fold is found), ``1`` keeps one image.
+    ``page_order``: ``"ltr"`` numbers the left page first, ``"rtl"`` the right one.
     """
 
     passes: str | int = "auto"
@@ -247,6 +251,7 @@ class ScanOptions:
     chain: bool = True
     use_focal: bool = True
     fill_rgb: tuple[int, int, int] = (255, 255, 255)
+    sharpen: float = sharpening.DEFAULT_AMOUNT
     pages: str | int = "auto"
     page_order: str = "ltr"
 
@@ -266,6 +271,10 @@ class ScanOptions:
         for name in ("deskew", "fast_check", "chain", "use_focal"):
             if not isinstance(getattr(self, name), bool):
                 raise _option_error(f"{name} must be a bool")
+        try:
+            sharpening.check_amount(self.sharpen)
+        except ValueError as error:
+            raise _option_error(str(error)) from None
         try:
             resolve_inset(self.inset)
         except FlattenerError as error:
@@ -1636,6 +1645,7 @@ class Scanner:
             quantize=options.quantize,
             nodes=self.dewarper.config.grid_convention,
             fill_rgb=tuple(options.fill_rgb),
+            sharpen=float(options.sharpen),
             models=tuple(self.models),
             thresholds={"locate": locating.THRESHOLDS, "verify": VERIFY},
             provenance=self._provenance(located, orientation, overrides),
@@ -1727,6 +1737,7 @@ class Scanner:
             border=float(options.border),
             quantize=options.quantize,
             fill_rgb=tuple(options.fill_rgb),
+            sharpen=float(options.sharpen),
             models=tuple(self.models),
             thresholds={"locate": locating.THRESHOLDS, "verify": VERIFY},
             provenance=self._provenance(located, orientation, overrides),
@@ -2318,11 +2329,15 @@ class Scanner:
         if planned.plan is not None and planned.checked is not None:
             result = planned.checked.result
             fast = planned.checked.fast
+            plan = planned.plan
             if fast is not None and result.image is None:
-                plan = planned.plan
                 with clock.stage("render"), clock.stage("render_sample"):
                     result.image = fast.sample(src.image, plan.fill_rgb, plan.quantize)
             record.image = result.image
+            if plan.sharpen > 0 and result.image is not None:
+                with clock.stage("render"), clock.stage("render_sharpen"):
+                    record.image = sharpening.sharpen(result.image, plan.sharpen, result.valid_mask)
+                record.metadata["sharpen"] = sharpening.record(plan.sharpen)
             record.valid_mask = result.valid_mask
             record.plan = planned.plan
             record.metadata["renderer"] = result.metadata

@@ -44,6 +44,7 @@ from numpy.typing import NDArray
 
 from ..contracts import FlattenerError, Status
 from .output_policy import OutputPlan, focal_px_from_35mm
+from .sharpen import check_amount
 
 PLAN_SCHEMA = "flattener-scan-plan-1"
 RECORD_SCHEMA = "flattener-scan-record-1"
@@ -66,6 +67,7 @@ PLAN_KEYS = frozenset(
         "quantize",
         "nodes",
         "fill_rgb",
+        "sharpen",
         "models",
         "thresholds",
         "provenance",
@@ -601,7 +603,9 @@ class ScanPlan:
     ``provenance`` ``auto`` or ``manual`` per stage. ``nodes`` says where the output
     places the grid nodes (``scan.placement.dense_map``): ``flattener`` (edge-aligned) or
     ``uvdoc`` (align_corners=True, the upstream UVDoc weights). ``fill_rgb`` fills output
-    pixels outside the source.
+    pixels outside the source. ``sharpen`` is the amount of ``scan.sharpen`` on the
+    rendered image (0: none); the plan's JSON holds it only when it is above 0, so plans
+    stored before it existed keep their ``plan_sha256``.
     """
 
     source: SourceInfo
@@ -619,6 +623,7 @@ class ScanPlan:
     quantize: str = "round"
     nodes: str = "flattener"
     fill_rgb: tuple[int, int, int] = (255, 255, 255)
+    sharpen: float = 0.0
     models: tuple[dict[str, Any], ...] = ()
     thresholds: dict[str, Any] = field(default_factory=dict)
     provenance: dict[str, str] = field(default_factory=dict)
@@ -675,6 +680,10 @@ class ScanPlan:
             raise _plan_error("fill_rgb must be three integers in 0..255")
         put("fill_rgb", tuple(int(v) for v in fill))
         try:
+            put("sharpen", check_amount(self.sharpen))
+        except ValueError as exc:
+            raise _plan_error(str(exc)) from None
+        try:
             put("region", None if self.region is None else json_plain(dict(self.region)))
             put("views", tuple(json_plain(dict(view)) for view in self.views))
             put("models", tuple(json_plain(dict(model)) for model in self.models))
@@ -687,7 +696,7 @@ class ScanPlan:
 
     def body(self) -> dict[str, Any]:
         """The plan as JSON data without ``plan_sha256``."""
-        return {
+        body = {
             "schema": PLAN_SCHEMA,
             "kind": self.kind,
             "source": self.source.to_dict(),
@@ -710,6 +719,9 @@ class ScanPlan:
             "thresholds": self.thresholds,
             "provenance": self.provenance,
         }
+        if self.sharpen > 0:
+            body["sharpen"] = self.sharpen
+        return body
 
     @cached_property
     def plan_sha256(self) -> str:
@@ -744,6 +756,7 @@ class ScanPlan:
                 quantize=data.get("quantize", "round"),
                 nodes=data.get("nodes", "flattener"),
                 fill_rgb=tuple(data.get("fill_rgb", (255, 255, 255))),
+                sharpen=data.get("sharpen", 0.0),
                 models=tuple(data.get("models", ())),
                 thresholds=data.get("thresholds", {}),
                 provenance=data.get("provenance", {}),

@@ -441,7 +441,7 @@ def test_whole_image_passes_render_what_rectify_renders(convention):
     config = RenderConfig(on_error="return")
     for passes, deskew in ((0, False), (1, False), (1, True)):
         options = ScanOptions(
-            passes=passes, deskew=deskew, orient="none", output=SIZE, fast_check=False
+            passes=passes, deskew=deskew, orient="none", output=SIZE, fast_check=False, sharpen=0
         )
         result = scanner.scan(image, options, whole)
         assert result.status == Status.SUCCESS and not result.qa["rerun_discarded"]
@@ -479,15 +479,24 @@ def test_plan_then_render_matches_scan_and_plans_round_trip(tmp_path):
     record = read_scan_record(paths["record"])
     assert record.plan.plan_sha256 == plan.plan_sha256
     assert record.outcome == result.outcome and "save" in record.timings
-    # Fill and quantization belong to the plan: other options do not change a stored plan.
-    options = ScanOptions(quantize="truncate", preview=4096, fill_rgb=(0, 0, 255))
+    # Fill, quantization and sharpening belong to the plan: other options do not change a
+    # stored plan.
+    options = ScanOptions(quantize="truncate", preview=4096, fill_rgb=(0, 0, 255), sharpen=0)
     planned = scanner.plan(image, options)
     filled = scanner.render(image, planned)
     assert planned.plan.fill_rgb == (0, 0, 255) and planned.plan.quantize == "truncate"
-    assert planned.preview.tobytes() == filled.image.tobytes()  # preview = saved image
+    assert planned.preview.tobytes() == filled.image.tobytes()  # preview = unsharpened image
+    assert "sharpen" not in filled.metadata
     stored = ScanPlan.from_dict(json.loads(json.dumps(planned.plan.to_dict())))
     again = scanner.render(image, stored, ScanOptions(fill_rgb=(9, 9, 9)))
     assert again.image.tobytes() == filled.image.tobytes()
+    planned = scanner.plan(image, replace(options, sharpen=2.0))
+    sharp = scanner.render(image, planned)
+    assert planned.plan.sharpen == 2.0 and sharp.metadata["sharpen"]["amount"] == 2.0
+    assert sharp.image.tobytes() != filled.image.tobytes()
+    stored = ScanPlan.from_dict(json.loads(json.dumps(planned.plan.to_dict())))
+    again = scanner.render(image, stored, ScanOptions(sharpen=0))
+    assert again.image.tobytes() == sharp.image.tobytes()
 
 
 def test_batches_record_the_scanners_pipeline_and_protocol(tmp_path):
@@ -694,9 +703,11 @@ def test_plan_and_check_errors_are_candidate_failures():
     assert result.outcome == Outcome.ORIGINAL_RETURNED and result.used_fallback
     assert result.reason_code == "degenerate_grid" and result.status == Status.INVALID_TRANSFORM
     assert result.guidance[-1].code == "degenerate_grid"
-    with pytest.raises(FlattenerError) as error:
-        ScanOptions(output=(9000, 9000))
-    assert error.value.reason_code == "invalid_scan_option"
+    assert result.image.tobytes() == image.tobytes()  # the original is never sharpened
+    for options in ({"output": (9000, 9000)}, {"sharpen": -1}, {"sharpen": True}):
+        with pytest.raises(FlattenerError) as error:
+            ScanOptions(**options)
+        assert error.value.reason_code == "invalid_scan_option"
     with pytest.raises(FlattenerError) as error:
         ScanOverrides(aspect="square")
     assert error.value.reason_code == "invalid_scan_option"

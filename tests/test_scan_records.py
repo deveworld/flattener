@@ -85,6 +85,7 @@ def test_plans_round_trip_exactly_and_refuse_changes():
     assert make_plan(quantize="truncate").plan_sha256 != plan.plan_sha256
     assert make_plan(nodes="uvdoc").plan_sha256 != plan.plan_sha256
     assert make_plan(fill_rgb=(0, 0, 0)).plan_sha256 != plan.plan_sha256
+    assert make_plan(sharpen=1.0).plan_sha256 != plan.plan_sha256
     reordered = {"drift": 0.04, "coverage": 0.95, "version": "v0"}
     assert make_plan(thresholds=reordered).plan_sha256 == plan.plan_sha256
     assert hash(make_plan()) == hash(plan)
@@ -101,12 +102,16 @@ def test_plans_round_trip_exactly_and_refuse_changes():
     with pytest.raises(FlattenerError) as caught:
         rec.ScanPlan.from_dict(extra)
     assert caught.value.reason_code == "invalid_plan"
-    assert set(make_plan().to_dict()) == rec.PLAN_KEYS
+    # A plan without sharpening stores no sharpen key, so older plans keep their hash.
+    assert set(make_plan().to_dict()) == rec.PLAN_KEYS - {"sharpen"}
+    sharpened = make_plan(sharpen=1.5)
+    assert set(sharpened.to_dict()) == rec.PLAN_KEYS
+    assert rec.ScanPlan.from_dict(json_round_trip(sharpened.to_dict())).sharpen == 1.5
     broken = {key: value for key, value in perspective.to_dict().items() if key != "output"}
     with pytest.raises(FlattenerError) as caught:
         rec.ScanPlan.from_dict(broken)
     assert caught.value.reason_code == "invalid_plan"
-    for changes in ({"nodes": "center"}, {"fill_rgb": (0, 0)}):
+    for changes in ({"nodes": "center"}, {"fill_rgb": (0, 0)}, {"sharpen": -1.0}):
         with pytest.raises(FlattenerError) as caught:
             make_plan(**changes)
         assert (caught.value.status, caught.value.reason_code) == (
