@@ -648,7 +648,7 @@ def test_batch_workers_write_the_images_of_one_worker_in_input_order(tmp_path):
         )
 
 
-def test_flip_tta_averages_in_the_mirror_and_is_mirror_symmetric():
+def test_flip_tta_averages_in_the_mirror_and_is_mirror_symmetric(monkeypatch):
     torch.manual_seed(0)
     dewarper = Dewarper(UVDocNet(TINY).eval(), TINY, torch.device("cpu"))
     flipped = with_tta(dewarper, "flip")
@@ -656,11 +656,15 @@ def test_flip_tta_averages_in_the_mirror_and_is_mirror_symmetric():
     image = rng.integers(0, 256, size=(80, 60, 3), dtype=np.uint8)
     mirror = np.ascontiguousarray(image[:, ::-1])
     plain, plain_mirror = predict_grid(dewarper, image), predict_grid(dewarper, mirror)
+    monkeypatch.setattr(predict, "TTA_MAX_GAP", 10.0)  # a random model's mirror disagrees
     turned_back = plain_mirror[:, ::-1] * np.array([-1.0, 1.0], np.float32)
     np.testing.assert_allclose(predict_grid(flipped, image), (plain + turned_back) / 2, atol=1e-6)
     # The averaged grid of the mirror image is the mirrored averaged grid.
     both = predict_grid(flipped, mirror)[:, ::-1] * np.array([-1.0, 1.0], np.float32)
     np.testing.assert_allclose(both, predict_grid(flipped, image), atol=1e-6)
+    # A mirror that disagrees by more than TTA_MAX_GAP leaves the input's grid alone.
+    monkeypatch.setattr(predict, "TTA_MAX_GAP", -1.0)
+    np.testing.assert_array_equal(predict_grid(flipped, image), plain)
     assert "tta" not in prediction_evidence(dewarper, "round")
     assert prediction_evidence(flipped, "round")["tta"] == "flip"
     with pytest.raises(FlattenerError):

@@ -145,8 +145,12 @@ DESKEW_MAX_DEG = 45.0  # a page estimated to turn further is cropped without tur
 DESKEW_MIN_AGREEMENT = 0.5  # least mean resultant length of the edge directions
 MIN_CROP_PIXELS = 2  # a crop box narrower or lower than this skips the pass
 # Test-time augmentation of every model call: "flip" averages in the grid of the mirror
-# image, turned back.
+# image, turned back, unless the two grids disagree by more than TTA_MAX_GAP (median node
+# distance as a share of the image side). A larger gap means the page's extent is in doubt
+# (a facing page, a page cut by the frame), and the average would land between two answers
+# (KR-Real dev: clean calls at most 0.022, such photos 0.036 and up).
 TTA_MODES = ("none", "flip")
+TTA_MAX_GAP = 0.03
 
 
 @dataclass(slots=True)
@@ -278,7 +282,8 @@ def predict_input(dewarper: Dewarper, tensor: torch.Tensor) -> NDArray[np.float3
     """Raw 2-D model output for a model input, as (Gh, Gw, 2). With ``tta="flip"`` the
     input and its mirror image run as one batch; the mirror's grid, turned back (columns
     reversed, x negated: both grid conventions are symmetric about the image centre), is
-    averaged with the input's."""
+    averaged with the input's when their median node distance is at most ``TTA_MAX_GAP``
+    of the image side, else the input's grid stands alone."""
     flip = dewarper.tta == "flip"
     batch = torch.cat([tensor, tensor.flip(-1)]) if flip else tensor
     with _MODEL_LOCK, torch.inference_mode(), ieee_float32():
@@ -287,7 +292,9 @@ def predict_input(dewarper: Dewarper, tensor: torch.Tensor) -> NDArray[np.float3
     if flip:
         mirror = grid[1].flip(-1)
         mirror[0] = -mirror[0]
-        return ((grid[0] + mirror) / 2).permute(1, 2, 0).cpu().numpy()
+        gap = float((grid[0] - mirror).norm(dim=0).median()) / 2.0
+        if gap <= TTA_MAX_GAP:
+            return ((grid[0] + mirror) / 2).permute(1, 2, 0).cpu().numpy()
     return grid[0].permute(1, 2, 0).cpu().numpy()
 
 
