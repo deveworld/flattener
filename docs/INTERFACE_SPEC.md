@@ -118,7 +118,7 @@ CPU `float32`로 RGB를 [0,1]로 바꾸고 `grid_sample(mode="bilinear", padding
 
 ## 휨 보정 예측
 
-`python -m flattener.dewarp.predict --weights CKPT {image,docunet}`의 예측은 `flattener.render`의 검사(좌표 범위, 덮는 비율, 접힘)를 거칩니다. 검사에 실패한 사진은 저장하지 않고 상태(`invalid_transform`과 이유)를 출력과 `predictions.json`에 남기며, 명령은 종료 코드 1로 끝납니다. `--force-render`는 실패한 사진도 저장합니다. 공개 방법들과 같은 방식으로 벤치마크를 채점할 때 씁니다. 이때도 실패 기록과 종료 코드 1은 그대로이고, 보고서의 `prediction_failures`가 실패한 사진 수를 셉니다. `--weights`에는 UVDoc 공개 가중치 `best_model.pkl`도 넣을 수 있습니다.
+`python -m flattener.dewarp.predict --weights CKPT {image,docunet}`의 예측은 `flattener.render`의 검사(좌표 범위, 덮는 비율, 접힘)를 거칩니다. `--tta flip`은 모델을 부를 때마다 입력과 좌우를 뒤집은 입력을 한 묶음으로 예측해, 뒤집은 쪽 격자를 되돌린 뒤(열 순서를 뒤집고 x 부호를 바꿈) 평균합니다. 두 격자의 노드 거리 중앙값이 이미지 변의 3%(`TTA_MAX_GAP`)를 넘으면 원래 입력의 격자만 씁니다. 예측 기록의 evidence에 `tta`가 남습니다. 스캐너는 번들의 `dewarp` 항목 `"tta"`로 켭니다. 검사에 실패한 사진은 저장하지 않고 상태(`invalid_transform`과 이유)를 출력과 `predictions.json`에 남기며, 명령은 종료 코드 1로 끝납니다. `--force-render`는 실패한 사진도 저장합니다. 공개 방법들과 같은 방식으로 벤치마크를 채점할 때 씁니다. 이때도 실패 기록과 종료 코드 1은 그대로이고, 보고서의 `prediction_failures`가 실패한 사진 수를 셉니다. `--weights`에는 UVDoc 공개 가중치 `best_model.pkl`도 넣을 수 있습니다.
 
 - `--quantize truncate`는 샘플링한 값을 `floor(x*255)`로 저장합니다(기본값 `round`). UVDoc·SyntheticDoc 논문 수치는 이렇게 저장한 결과를 UVDoc 스크립트 방식(`--ref-resize uvdoc_view2_double`)으로 채점한 값입니다. 반올림과 내림만 바꿔도 LD가 0.3 정도 달라집니다.
 - `--inset`은 렌더링 전에 예측한 페이지 윤곽을 안쪽으로 옮깁니다. 출력 좌표 u(−1…1)가 예측 격자의 (1−e)·u 위치를 보여 주므로 각 변이 페이지 크기의 e/2만큼 안으로 들어옵니다. 값은 프리셋 이름, `E`, `EX,EY`입니다. 프리셋 `syntheticdoc_half_cell`(x 1/177, y 1/121)은 SyntheticDoc 추론이 121×177 맵을 `align_corners=True`로 키울 때 생기는 반 칸 이동입니다.
