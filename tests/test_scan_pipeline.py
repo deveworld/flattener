@@ -36,6 +36,7 @@ from flattener.scan.pipeline import (
     ScanOptions,
     ScanOverrides,
     _cut_off_on_page,
+    _outline_fold,
 )
 from flattener.scan.records import Outcome, ScanPlan, reason
 
@@ -788,6 +789,25 @@ def test_a_spread_splits_into_two_pages_in_reading_order():
     assert first.image[..., 0].mean() > second.image[..., 0].mean()
     whole = scanner.scan_pages(image, ScanOptions(pages=1))
     assert len(whole) == 1 and whole[0].plan.output.width > whole[0].plan.output.height
+
+
+def test_a_spread_without_a_blank_gutter_is_found_by_the_bend_of_its_outline():
+    spread = Page((165, 122), (260, 180), 4.0)
+    scanner, _ = _scanner(spread)
+    plan = scanner.plan(ramp_scene(SIZE, spread), ScanOptions(orient="none")).plan
+    assert plan.output.width > plan.output.height and _outline_fold(plan, SIZE) is None
+    grid = plan.grid.copy()
+    middle = (grid.shape[1] - 1) // 2
+    step = grid[0, middle + 1, 0] - grid[0, middle, 0]
+    grid[0, middle, 1] += 0.4 * step  # the top edge dips into the page at the fold
+    found = _outline_fold(replace(plan, grid=grid), SIZE)
+    assert found["evidence"] == "outline" and found["bend_deg"] >= VERIFY["fold_min_bend_deg"]
+    assert abs(found["u"] - 0.5) < 0.1
+    rising = plan.grid.copy()
+    rising[0, middle, 1] -= 0.4 * step  # a bump out of the page is no fold
+    assert _outline_fold(replace(plan, grid=rising), SIZE) is None
+    tall = replace(plan, grid=grid, output=replace(plan.output, width=plan.output.height // 2))
+    assert _outline_fold(tall, SIZE) is None  # a single page is taller than wide
 
 
 def _box_grid(left, top, right, bottom):

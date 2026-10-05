@@ -204,6 +204,11 @@ VERIFY: dict[str, Any] = {
     "continue_min_paper": 0.5,
     "look_photo_long_side": 768,
     "max_drift": 0.04,  # median node drift between passes, fraction of the page diagonal
+    # A spread whose preview shows no blank gutter (a picture runs to the fold) is found by
+    # its outline: the top or bottom edge bends into the page at the fold by at least this
+    # many degrees over two grid columns either side (KR-Real dev: spread 15.5, single
+    # pages at most 3.4).
+    "fold_min_bend_deg": 8.0,
     "low_resolution_density": 0.5,  # source pixels per output pixel below this warn
     "post_preview_long_side": 768,
 }
@@ -236,8 +241,8 @@ class ScanOptions:
     color of output pixels outside the source; the plan keeps it with ``quantize`` and
     ``sharpen``, so a stored plan renders the same image. ``sharpen``: the amount of
     ``scan.sharpen`` on the flattened image (0 turns it off). ``pages`` (for
-    ``Scanner.split``): ``"auto"`` splits an open-book spread at its fold (``look.fold``),
-    ``2`` always splits (at the middle when no fold is found), ``1`` keeps one image.
+    ``Scanner.split``): ``"auto"`` splits an open-book spread at its fold (``look.fold``,
+    else the bend of its outline), ``2`` always splits (at the middle when no fold is found), ``1`` keeps one image.
     ``page_order``: ``"ltr"`` numbers the left page first, ``"rtl"`` the right one.
     """
 
@@ -753,6 +758,37 @@ def split_grid(grid: NDArray, low: float, high: float) -> NDArray[np.float64]:
     return array[:, left] * (1.0 - weight) + array[:, left + 1] * weight
 
 
+def _outline_fold(plan: ScanPlan, source_size: tuple[int, int]) -> dict[str, Any] | None:
+    """The fold of a spread by its outline, for a preview with no blank gutter: the plan is
+    wider than tall (``look.FOLD_MIN_ASPECT``) and its top edge bends down or its bottom
+    edge up by at least ``VERIFY["fold_min_bend_deg"]`` at a grid column in
+    ``look.FOLD_BAND``. ``u`` is the fold's share of the preview width, as ``look.fold``."""
+    aspect = plan.output.width / plan.output.height
+    if aspect < look.FOLD_MIN_ASPECT:
+        return None
+    height, width = source_size
+    nodes = (np.asarray(plan.grid, dtype=np.float64) + 1.0) / 2.0 * np.array([width, height])
+    columns, step = nodes.shape[1], 2
+    low, high = (round(share * (columns - 1)) for share in look.FOLD_BAND)
+    best = (-math.inf, 0)
+    for edge, inward in ((nodes[0], -1.0), (nodes[-1], 1.0)):  # source y runs down
+        for j in range(max(low, step), min(high, columns - 1 - step) + 1):
+            a, b = edge[j] - edge[j - step], edge[j + step] - edge[j]
+            bend = inward * math.degrees(math.atan2(a[0] * b[1] - a[1] * b[0], a @ b))
+            best = max(best, (bend, j))
+    if best[0] < VERIFY["fold_min_bend_deg"]:
+        return None
+    extent = 1.0 - plan.inset[0] + plan.border  # page extent the preview width shows
+    x = 2.0 * best[1] / (columns - 1) - 1.0
+    return {
+        "u": (x / extent + 1.0) / 2.0,
+        "aspect": aspect,
+        "text_ratio": None,
+        "bend_deg": round(best[0], 2),
+        "evidence": "outline",
+    }
+
+
 def preview_size(output_size: tuple[int, int], long_side: int) -> tuple[int, int]:
     height, width = output_size
     scale = min(1.0, long_side / max(height, width))
@@ -1157,10 +1193,11 @@ class Scanner:
 
     def split(self, planned: PlannedScan) -> list[PlannedScan]:
         """The pages of a planned scan (``ScanOptions.pages``). A spread splits at its fold
-        on the flat preview into two plans over the two halves of the grid, each sized,
-        checked and recorded on its own (reason ``two_pages``); a page whose check fails
-        falls back alone. Other scans, perspective plans and grids with ``uvdoc`` nodes
-        stay one."""
+        on the flat preview (``look.fold``), or, when the preview shows no blank gutter, at
+        the bend of its outline (``_outline_fold``), into two plans over the two halves of
+        the grid, each sized, checked and recorded on its own (reason ``two_pages``); a
+        page whose check fails falls back alone. Other scans, perspective plans and grids
+        with ``uvdoc`` nodes stay one."""
         options, plan = planned.options, planned.plan
         if options.pages == 1 or plan is None or plan.kind != "dewarp":
             return [planned]
@@ -1169,6 +1206,8 @@ class Scanner:
         src, clock = planned.source, planned.clock
         with clock.stage("verify"):
             found = look.fold(_preview(src, plan, look.SIZE))
+            if found is None:
+                found = _outline_fold(plan, src.info.size)
         if found is None:
             if options.pages == "auto":
                 return [planned]
