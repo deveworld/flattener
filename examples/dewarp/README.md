@@ -1,190 +1,131 @@
-# Dewarp training examples
+# Dewarp training
+
+These configs rebuild the scanner's dewarp model, the one in `bundle-v9.json`.
+The checkpoints of every step are in the private Hugging Face backup `DevWorld/flattener`:
+`ancestors/` holds steps 1-3, `parents/` holds step 4, and `soup-c70-ck/` holds step 5.
 
 The configs name machine-specific locations with environment variables. The trainer
-expands `${VAR}` in `data_spec`, `output_dir`, `init_path` and in data-spec source roots;
-an unset variable stops the run with its name. The data-spec hash keeps the unexpanded
+expands `${VAR}` in `data_spec`, `output_dir`, `init_path` and in data-spec source roots.
+An unset variable stops the run with its name. The data-spec hash keeps the unexpanded
 roots, so a run resumes on another machine with the same spec.
 
-| Variable | Used by | Points to |
-|---|---|---|
-| `FLATTENER_CACHE` | `data-release.json`, `train-release-perspective*.json` | directory holding `syntheticdoc-release/`, the copy written by `tools/syntheticdoc/compact.py`, and `backgrounds/` |
-| `FLATTENER_DATA` | `data-research-doc3d-uvdoc.json`, `data-release-raw.json` | data root with `research/doc3d` and `research/uvdoc_final`, or with `release/syntheticdoc` (the full-resolution SyntheticDoc download of `tools/syntheticdoc/sdtool.py`) |
-| `FLATTENER_RUNS` | `train-*.json` | parent directory of run outputs |
-| `FLATTENER_UVDOC_WEIGHTS` | `train-release-uvdoc-init.json` | UVDoc `model/best_model.pkl` (MIT; sha256 `7e90861b…da23`) |
-| `FLATTENER_INIT_CHECKPOINT` | `train-release-hr.json`, `train-release-grid89.json`, `train-release-perspective-ft.json` | release-track dewarp checkpoint to fine-tune (its `.pt.json` sidecar next to it) |
+| Variable | Points to |
+|---|---|
+| `FLATTENER_CACHE` | directory holding `syntheticdoc-release/` (written by `tools/syntheticdoc/compact.py`), `backgrounds/`, the re-textured UVDoc builds and the crease/fold build |
+| `FLATTENER_RUNS` | parent directory of run outputs |
+| `FLATTENER_INIT_CHECKPOINT` | the checkpoint a fine-tune starts from, with its `.pt.json` sidecar next to it |
+| `FLATTENER_DATA` | data root with `release/syntheticdoc` (the full-resolution SyntheticDoc download read by `data-release-raw.json`, which the OrientNet data specs use) and the research-track data |
 
-Build the compact release copy from a finished (or partial) SyntheticDoc download, then train:
+## Data
 
 ```sh
+# SyntheticDoc renders (CC BY 4.0), compact copy at 0.75 scale
 python tools/syntheticdoc/compact.py --source <download-root>/release/syntheticdoc \
     --output "$FLATTENER_CACHE/syntheticdoc-release" --workers 8
-python -m flattener.dewarp.train --config examples/dewarp/train-release-uvdoc-init.json
-```
-
-`train-release-hr.json` fine-tunes a release checkpoint at 1440x1024 input with the
-backbone's own 90x64 grid. It reads the full-resolution download through
-`data-release-raw.json`, since the compact copy (0.75 scale, 1080x768) is smaller than
-that input. The raw val split selects the same 2,000 samples as the compact one. Weights
-trained at 712x488 do not carry over to another input size without training: on 400
-val samples a 712x488 checkpoint scored 2.4 px docunet EPE at its own size, 73 px at
-1024x704 and 146 px at 1440x1024. channels_last trained ~1.55x faster than NCHW on an
-RTX 5090 (199 against 129 samples/s at batch 32, 12 GiB).
-
-`train-release-grid89.json` fine-tunes a release checkpoint at 712x488 input with an
-89x61 output grid, about twice the backbone's 45x31 nodes per side (UVDoc's own target
-grid size). The model resizes the bridge features to the grid before the heads
-(bilinear, align_corners), so every other node sits on a backbone feature; targets,
-losses, validation and `predict` all follow `model.grid_size`. It reads the compact
-copy through `data-release.json`. The page extent that places training and validation
-crops comes from the grid nodes, so about 5% of the crops differ from the 45x31 ones and
-the validation signature differs from a 45x31 run. On the first 400 val samples a
-712x488 checkpoint scored 2.40 px docunet EPE at its own grid, 2.41 px with its 45x31
-output resized to 89x61 (the like-for-like figure on 89x61 nodes) and 12.7 px as the
-89x61 model before training. The 45x31 target resized to 89x61 has a mean EPE of 0.04 px
-against the 89x61 target, so on SyntheticDoc maps the denser grid adds little the 45x31
-grid cannot represent.
-
-`train-release-perspective.json` repeats the recipe of the best release model so far
-(scratch, 9.0M samples at batch 64) with composites on 30% of the samples: the page is placed on a new background with one
-homography (in-plane tilt, corner shifts up to 12% of the page, page area 5-100% of the
-frame) that maps the image and the target grid alike. Models trained on SyntheticDoc
-alone undo only about two thirds of the foreshortening of a tilted camera, which is most
-of the gap to UVDoc on its benchmark. The backgrounds are CC0 textures:
-
-```sh
+# CC0 background textures for the training composites
 python tools/backgrounds/fetch_polyhaven.py --output "$FLATTENER_CACHE/backgrounds/polyhaven-768" \
     --count 300 --categories floor wall wood fabric plaster plaster-concrete concrete tiles \
     leather metal indoor clean cotton denim wool fleece "raw wood"
+# Clean pages laid on UVDoc's raw captures of deformed paper (MIT, unpacked to
+# $FLATTENER_CACHE/uvdoc_raw), 60,000 items each; repeat for v2, v3 and v4
+python tools/uvdoc/retexture.py --spec examples/dewarp/uvdoc-retexture-release-v1.json \
+    --output "$FLATTENER_CACHE/uvdoc-retexture-release-v1"
+# Crease and fold renders on cleaned pages
+python tools/crumple/build.py --spec examples/dewarp/crumple-release-v7.json \
+    --output "$FLATTENER_CACHE/crumple-release-v7"
 ```
 
-The `tilt15` validation view shows the same pages through a tilted camera (frame
-corners moved by up to 15%). `python -m flattener.dewarp.probe` compares a checkpoint's
-page and tilt views on the val split: grid error in percent of the page diagonal and
-the under-correction factor (0: the foreshortening is undone, 1: it is left in). On 200
-local SyntheticDoc val renders that best release model scored 0.27% / 0.01 on the page
-view and 2.02% / 0.40 on the tilted view.
+`retexture.py` lays pages on UVDoc's raw photos of blank paper through their texture
+coordinate maps. The paper's shape and shading come from real captures, while the pages,
+backgrounds and stored maps are ours. The captures of the UVDoc benchmark are left out.
+v1 and v2 use SyntheticDoc renders flattened through their ground truth. v3 and v4
+divide the render's light out of those pages (`clean_texture`) and put 30% of them on
+patterned backgrounds; their `split_name` reuses v1's capture split.
 
-`train-release-perspective-ft.json` is the short version for an RTX 3060 Ti (8 GB): it
-fine-tunes a release checkpoint with the same composites (30%, corner shifts up to 12%,
-no quarter turns) on the compact copy through `data-release.json`. 40,000 steps at
-batch 32 are 1.28M samples, about 3 h at the 120 samples/s the 3060 Ti trained a
-712x488 model at (NCHW, AMP, 2.9 GiB peak at batch 32), plus about 15 min of validation.
-The learning rate is 5e-5 with 1,000 warmup steps and cosine decay, the rate of the
-1440x1024 fine-tune and, per sample, of the 89x61 one. channels_last stays off: it ran
-about 4x slower on that card. `max_seconds` (4.5 h) stops a slower run near the end of
-the schedule, and a rerun resumes it. Seed 1 keeps the augmentation draws apart from
-those of the seed-0 parent; validation does not depend on the seed, so its EPE compares
-with the parent's.
+## Steps
 
-`crumple-release-v*.json` are build specs for `tools/crumple/build.py`: each item
-flattens a SyntheticDoc render (or draws an own page), bends it with a procedural
-surface (`tools/crumple/render.py`), photographs it through a pinhole camera onto a
-background and stores the exact map, in the converted layout. `data-release-crumple*.json`
-add a build to the compact copy, and `train-release-crumple*-ft.json` fine-tune a release
-checkpoint on it like `train-release-perspective-ft.json`.
+| Step | Config | Starts from | Data |
+|---|---|---|---|
+| 1. `dewarp-v1` | trained before this folder; its sidecar records the run | scratch | SyntheticDoc (`release-clean-v3-extra`), 140,625 steps at batch 64 |
+| 2. `dewarp-v2` | `train-release-perspective-fold-ft.json` | step 1 | `data-release.json`, with perspective and facing-page composites |
+| 3. `dewarp-uvdoch` | `train-release-uvdoc-half-ft.json` | step 2 | `data-release-uvdoc-half.json`: SyntheticDoc .5, re-textured v1 .25, v2 .25 |
+| 4a. `dewarp-uvdocc70` | `train-release-uvdoc-clean70-ft.json` | step 3 | `data-release-uvdoc-clean70.json`: SyntheticDoc .3, v3 .35, v4 .35 |
+| 4b. `dewarp-uvdocck` | `train-release-uvdoc-clean-crumple-ft.json` | step 3 | `data-release-uvdoc-clean-crumple.json`: SyntheticDoc .35, v3 .25, v4 .25, crease/fold v7 .15 |
+| 5. `soup-c70-ck` | `python tools/soup.py OUT 4a 4b --weight 0.5` | 4a, 4b | none (a 50/50 weight blend) |
 
-| Build | Surfaces | Camera | Paper | 40k-step fine-tune from dewarp-v2 |
-|---|---|---|---|---|
-| v1 | crumple | tilt up to 32° | stretched on slopes | DIR300 +0.022 MS-SSIM; two real book photos worse |
-| v2 | crumple .55, curve .45 | curve: steep and close | stretched | DIR300 0.670, UVDoc bench 0.666; two book photos worse |
-| v5 | crease .25, fold .2, curve .15, flat .15, spread .25 | 40% of every mode close | keeps its length, 3-D shape stored | best UVDoc-bench AD and DIR300 LD; DocUNet -0.015; book photos worse |
-| v6 | as v5, spread .2, leaf .15 | as v5 | as v5 | no better on book photos; pages cut off by the photo cropped again |
+Each fine-tune runs 40,000 steps at batch 32, with learning rate 5e-5 (1,000 warmup
+steps, cosine decay) and seed 1. That takes about 3 h on an RTX 3060 Ti at about 120
+samples/s, with NCHW and AMP; channels_last ran about 4x slower on that card.
 
-The v1-v2 renderer put each texture point straight above its place on the ground plane,
-so folds and curls stretched the paper where real paper keeps its length and
-foreshortens text. From v5 the surface is laid flat first (`isometric`), and each sample
-also stores the surface's shape in the page's own frame (`grid3d`), which becomes the
-model's 3-D target (`loss_grid3d`; `train-release-crumple6-no3d-ft.json` turns it off:
-DocUNet 0.563 against 0.558 with it). `spread` maps both pages of an open book (the
-scanner splits them at the gutter); `leaf` maps one page whose facing page mostly leaves
-the photo.
+```sh
+FLATTENER_INIT_CHECKPOINT=<step 2>/step_00040000.pt \
+    python -m flattener.dewarp.train --config examples/dewarp/train-release-uvdoc-half-ft.json
+```
 
-Every fine-tune on these renders raised the single-sheet benchmarks (DIR300, UVDoc bench)
-and made real book photos worse: the facing page taken into the page, pages cut off by
-the photo cropped to their visible text, spreads left unsplit. The renders hold single
-sheets with all four edges in view, as SyntheticDoc does. `tools/soup.py` blends a
-fine-tune with its parent; the 50/50 blend of the v2 fine-tune with dewarp-v2 kept the
-real photos close to dewarp-v2 and scored DocUNet 0.576 / 5.33 / 0.234, while the blend
-with the v5 fine-tune (whose 3-D head had trained) fell below both parents.
+Step 4b on its own pulls a curled facing page into one real book photo. The blend keeps
+4b's DIR300 gains without that. `bundle-v9.json` runs the blend with flip test-time
+augmentation (`"tta": "flip"` on the dewarp entry). Each model call also predicts the
+mirror image and averages the turned-back grid in, unless the two disagree by more than
+3% of the image side.
 
-`uvdoc-retexture-release-v*.json` are build specs for `tools/uvdoc/retexture.py`, which
-lays clean pages (SyntheticDoc renders flattened through their ground truth, or own
-generated pages) on UVDoc's raw photos of deformed blank paper through their texture
-coordinate maps (MIT, (c) 2023 Tanguy Magne). The paper's shape and shading come from
-real captures; pages, backgrounds and the stored map are ours. UVDoc's own composites
-stay off the release track (DTD backgrounds, partly non-commercial pages). The captures
-of the UVDoc benchmark are left out. Each spec builds 60,000 training items from 962
-captures; `data-release-uvdoc*.json` add the builds to the compact copy. The spec's name
-seeds the draws and also the capture split, so v2 trains on 44 of the 46 captures v1
-holds out: the UVDoc validation error of the runs that read v2 is not held out. A
-further build sets `split_name` to the first build's name.
+## Scores
 
-| Fine-tune | UVDoc share | Start | DocUNet | UVDoc bench | DIR300 |
-|---|---|---|---|---|---|
-| `train-release-uvdoc-ft.json` | 30% (v1) | dewarp-v2, 40k steps | 0.575 / 5.20 / 0.230 | 0.710 / 5.28 / 0.136 | 0.679 / 4.85 / 0.180 |
-| `train-release-uvdoc-half-ft.json` | 50% (v1, v2) | dewarp-v2, 40k steps | 0.575 / 5.29 / 0.231 | 0.725 / 5.08 / 0.114 | 0.684 / 4.70 / 0.176 |
-| `train-release-uvdoc-half-ft2.json` | 50% | the row above, 40k more | 0.575 / 5.20 / 0.227 | 0.725 / 5.07 / 0.111 | 0.684 / 4.70 / 0.175 |
-| `train-release-uvdoc-70-ft.json` | 70% | the 50% 40k row, 40k more | 0.573 / 5.33 / 0.230 | 0.726 / 4.97 / 0.108 | 0.686 / 4.63 / 0.172 |
-| `train-release-uvdoc-clean-ft.json` | 50% (v3, v4: cleaned pages, patterns) | the 50% 40k row, 40k more | 0.582 / 5.16 / 0.227 | 0.734 / 5.07 / 0.109 | 0.691 / 4.48 / 0.166 |
-| `train-release-uvdoc-clean70-ft.json` | 70% (v3, v4) | the 50% 40k row, 40k more | 0.577 / 5.22 / 0.234 | 0.738 / 4.59 / 0.098 | 0.693 / 4.42 / 0.166 |
-| `train-release-uvdoc-clean-crumple-ft.json` | 50% (v3, v4) and crumple-release-v7 15% | the 50% 40k row, 40k more | 0.582 / 5.18 / 0.227 | 0.741 / 4.75 / 0.106 | – |
-| `train-release-uvdoc-recipe-ft.json` | 50% (v5, v6: UVDoc's recipe) | the 50% 40k row, 40k more | 0.582 / 5.26 / 0.234 | 0.756 / 6.64 / 0.128 | 0.688 / 4.63 / 0.174 |
+Scores are MS-SSIM / LD / AD from the calibrated evaluator (`python -m flattener.benchmark`).
+"One pass" is a single prediction. "Tight crop" adds two turned tight-crop passes
+(`--rerun 2 --rect`).
 
-Scores are MS-SSIM / LD / AD from one prediction. With AADD's tight turned crop and two
-more predictions (`--rerun 2 --rect`) the last row scores DocUNet 0.576 / 4.97 / 0.212,
-UVDoc bench 0.748 / 4.68 / 0.110 and DIR300 0.700 / 4.23 / 0.143. Unlike the procedural
-renders, these fine-tunes kept real book photos close to dewarp-v2; two of 68 got worse
-(one spread left unsplit, one close-up whose page runs past the photo returned as the
-original). Twice the steps at the same share changed each score by at most 0.004. The
-80k-step 50% model was the scanner's dewarp model in `bundle-v5.json`. At 70% the
-benchmarks pull apart: with the tight crop DIR300 rises to 0.703 / 4.17 / 0.140 and the
-UVDoc bench to 0.752 MS-SSIM, while DocUNet falls to 0.571 / 5.09 / 0.218, UVDoc-bench
-LD and AD worsen (4.98, 0.121) and DIR300 OCR CER rises from 0.156 to 0.175. The 50/50
-blend of the two (`tools/soup.py`) lands between them (tight crop: DocUNet 0.574 / 4.92 /
-0.213, UVDoc bench 0.753 / 4.72 / 0.110, DIR300 0.702 / 4.22 / 0.142; CER 0.180).
+| Model | DocUNet | UVDoc bench | DIR300 |
+|---|---|---|---|
+| 2. `dewarp-v2`, one pass | 0.573 / 5.42 / 0.240 | 0.652 / 7.11 / 0.211 | 0.643 / 6.70 / 0.255 |
+| 3. `dewarp-uvdoch`, one pass | 0.575 / 5.29 / 0.231 | 0.725 / 5.08 / 0.114 | 0.684 / 4.70 / 0.176 |
+| 4a. `dewarp-uvdocc70`, one pass | 0.577 / 5.22 / 0.234 | 0.738 / 4.59 / 0.098 | 0.693 / 4.42 / 0.166 |
+| 4b. `dewarp-uvdocck`, one pass | 0.582 / 5.18 / 0.227 | 0.741 / 4.75 / 0.106 | – |
+| 5. blend, one pass | 0.581 / 5.16 / 0.228 | 0.739 / 4.69 / 0.103 | 0.699 / 4.31 / 0.159 |
+| 5. blend, tight crop | 0.581 / 4.98 / 0.214 | 0.753 / 4.80 / 0.109 | 0.714 / 3.95 / 0.133 |
+| 5. blend, tight crop, flip TTA (`bundle-v9`) | 0.589 / 4.91 / 0.208 | 0.767 / 4.53 / 0.088 | 0.718 / 3.78 / 0.126 |
+| best published | 0.571 / 5.51 / 0.218 | 0.800 / 5.83 / 0.098 | 0.702 / 4.26 / 0.131 |
 
-A research-only check (never shipped) fine-tuned the same start on UVDoc's own
-composites, which lay pages on the same captures with identical labels: one prediction
-scored DocUNet 0.584, UVDoc bench 0.793 and DIR300 0.700. The difference was how our
-pages looked. They were SyntheticDoc renders flattened through their ground truth, so
-they kept the render's creases, shadows and grey cast, which then sat on another
-capture's shape as false shading. `clean_texture` divides that light out and
-`pattern_background` adds busy patterned surfaces (v3, v4); the fine-tune on them is the
-dewarp model of `bundle-v6.json` (tight crop: DocUNet 0.579 / 4.97 / 0.215, UVDoc bench
-0.754 / 4.85 / 0.116, DIR300 0.706 / 4.12 / 0.139). At 70% (`bundle-v7.json`, the
-dewarp model of `bundle-v7.json`) the tight crop gives DIR300 0.710 / 3.98 / 0.134 and
-UVDoc bench 0.756 / 4.84 / 0.106, while DocUNet drops to 0.574 / 5.10 / 0.218; real
-photos stay as they were. 15% crease and fold renders on cleaned pages
-(`crumple-release-v7.json`) with the 50% mix raise DIR300 to 0.715 / 3.86 / 0.133 and
-DocUNet to 0.583 / 5.11 / 0.216 with the tight crop, but on one real book photo the page
-takes in the curled facing page. The 50/50 blend of that model with the 70% one
-(`tools/soup.py`) is the scanner's (`bundle-v8.json`): DIR300 0.714 / 3.95 / 0.133,
-DocUNet 0.581 / 4.98 / 0.214, UVDoc bench 0.753 / 4.80 / 0.109 with the tight crop, and
-every real photo as with the 70% model. The
-axis-alignment loss on these items (`train-release-uvdoc-clean-axis*-ft.json`, weight
-25 and 200, up to a third of the grid term) left DIR300 AD at 0.1385. The UVDoc benchmark
-itself is made by UVDoc's `create_final.py` from held-out captures. Copying its recipe
-(`"recipe": "uvdoc"`: the paper shown about two pixels past its labelled edge, the
-background toned to the paper, 712x488; v5, v6) raised UVDoc-bench MS-SSIM to 0.776
-with the tight crop but worsened its LD from 4.85 to 7.22 and lowered DIR300: the model
-learns to set the border inside the visible edge, which suits only that benchmark.
+The UVDoc benchmark is made by UVDoc's own `create_final.py` from held-out captures, so
+its MS-SSIM rewards copying that generator's look. Real photos (KR-Real, DocUNet,
+DIR300) decide.
 
-`doc3d-retexture-release-v1.json` lays the same clean pages on Doc3D's page geometry
-(`"geometry": "doc3d_grid"`; the 45x31 grids of UVDoc's `Doc3D_grid.zip`, MIT, about
-100k renders; Doc3D's renders, albedo and lighting are not used): the grid is refined
-to 177x121 nodes, the page drawn through it and lit from its 3-D shape. 59,053 of
-60,000 items were kept (the rest turn over in view). `train-release-uvdoc-doc3d-ft.json`
-gives them half of the UVDoc share (SyntheticDoc .5, UVDoc .25, Doc3D .25, from the
-50% 40k model): with the tight crop DocUNet 0.568 / 4.97 / 0.215, UVDoc bench 0.738 /
-4.69 / 0.122 and DIR300 0.695 / 4.33 / 0.142, below the 50% row on all three
-benchmarks, while DocUNet OCR CER improved (0.142 against 0.169). Doc3D's shapes with
-our synthetic light do not replace real captures.
+```sh
+python -m flattener.dewarp.predict --weights W --device cuda --tta flip docunet \
+    --input-dir CROPS --output-dir OUT --force-render --quantize truncate --rerun 2 --rect
+python -m flattener.benchmark docunet OUT --ref-resize uvdoc_view2_double --references-dir REFS --output R.json
+python -m flattener.benchmark dir300-predict --weights W --device cuda --tta flip --inputs-dir DIST \
+    --output-dir OUT3 --force-render --quantize truncate --rerun 2 --rect
+python -m flattener.benchmark dir300 OUT3 --references-dir GT --output R3.json
+python -m flattener.benchmark uvdoc-predict --weights W --device cuda --tta flip --output-dir OUTU \
+    --root UVDOC --rerun 2 --rect
+python -m flattener.benchmark uvdoc OUTU --root UVDOC --output RU.json
+```
+
+## Tried and dropped
+
+These were trained and scored. Their configs were removed, but the code options remain.
+
+| Change | Result |
+|---|---|
+| 1440x1024 input with a 90x64 grid | worse on every benchmark: the backbone's grid is input/16, so a bigger input shrinks its view of the page |
+| an 89x61 output grid at 712x488 | no gain: the 45x31 target resized to 89x61 is 0.04 px from the 89x61 one |
+| procedural crumple renders alone (`tools/crumple`, v1-v6) | DIR300 and UVDoc bench rose, but real book photos got worse (facing page taken in, cut pages cropped, spreads unsplit) |
+| 3-D target from the crumple surfaces (`loss_grid3d`) | DocUNet worse with it |
+| 30% and 70% shares of the raw re-textured items | 50% balanced the benchmarks best; 70% raised DIR300 and lowered DocUNet |
+| Doc3D page geometry with our light (`"geometry": "doc3d_grid"`) | below the UVDoc-capture model on all three benchmarks |
+| UVDoc's compositing recipe (`"recipe": "uvdoc"`) | UVDoc-bench MS-SSIM 0.776 but LD 7.22 and DIR300 down: it teaches a border inside the page |
+| axis-alignment and page-space losses | no change in DIR300 AD |
+| a second seed, and seed blends | within run noise |
+| sheets of paper under the page (`stack_prob`, with and without a contact shadow) | fixed a stacked-paper photo, but DIR300 single-pass LD rose from 4.42 to 5.00-5.35: the model cut pages short at column rules and header bands |
+
+## Notes
 
 The start record of a fine-tune carries the parent's data spec, so
 `python -m flattener.scan.shippable` checks every training step of the chain from the
-child's sidecar alone. Fine-tunes trained before that record only the spec's sha256: the
-gate then reads the parent's sidecar at the recorded `init_path`, or takes the parent's
-sidecar or spec file through `--spec`, and otherwise answers `unverified_data_spec`.
+child's sidecar alone.
+
+`train-research-uvdoc-recipe.json` with `data-research-doc3d-uvdoc.json` maps the
+upstream UVDoc training recipe (research track, never shipped).
 
 On Windows `cmd.exe`, set the variables with `set FLATTENER_CACHE=E:\cache` and so on.
 Command-line options (`--output-dir`, `--data-spec`, `--init-path`, `--num-workers`, ...)

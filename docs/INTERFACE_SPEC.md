@@ -86,7 +86,7 @@ CPU `float32`로 RGB를 [0,1]로 바꾸고 `grid_sample(mode="bilinear", padding
 
 `gate_page_region(probability, source_size, *, config=None)`과 `gate_page(image, segmenter, *, config=None)`는 `detect_region`을 면적 상한 1.0으로 돌려 페이지 상자를 정합니다. 마스크가 화면의 90%를 넘거나 테두리 세 면 이상에 닿으면 `fills_frame=True`, `reasons=("page_fills_frame",)`이고 상자는 이미지 전체입니다. 이 경우는 성공입니다. `page_not_found`, `page_area_rejected`, `ambiguous_page_region`, `uncertain_page_region`은 `model_error` 상태의 `FlattenerError`로 알립니다. `confident`는 dominance ≥0.95이고 평균 확률 ≥0.85일 때 참입니다.
 
-기본 가중치는 v1.2(`bundle-v3.json`의 `page-gate-v1.2/best.pt`, `region-context-1`)입니다. 채널 16/32/64/128, 파라미터 561,025개, 입력 192×144입니다. 합성 장면과 SmartDoc 촬영 영상 프레임으로 처음부터 학습했습니다. 펼친 책의 두 쪽은 한 영역으로 잡고, 밑에 깔린 문서, 책상 위 물건, 벽은 페이지로 잡지 않습니다. 자료, 학습, 결과는 [`examples/gate/README.md`](../examples/gate/README.md)에 있습니다.
+기본 가중치는 v1.2(`bundle-v9.json`의 `page-gate-v1.2/best.pt`, `region-context-1`)입니다. 채널 16/32/64/128, 파라미터 561,025개, 입력 192×144입니다. 합성 장면과 SmartDoc 촬영 영상 프레임으로 처음부터 학습했습니다. 펼친 책의 두 쪽은 한 영역으로 잡고, 밑에 깔린 문서, 책상 위 물건, 벽은 페이지로 잡지 않습니다. 자료, 학습, 결과는 [`examples/gate/README.md`](../examples/gate/README.md)에 있습니다.
 
 이전 v0 가중치는 위치 추정 연구의 `best.pt`(파라미터 140,545개, 입력 192×144)입니다. 처음부터 8 epoch 학습했고, 학습 자료는 자체 합성 장면 3,840장, SmartDoc 원본 문서로 만든 휨 합성 1,584장, SmartDoc 촬영 사진 528장입니다.
 
