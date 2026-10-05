@@ -1,0 +1,643 @@
+import './style.css';
+import { emptyMask, maskCount } from './cleanup';
+import { MaskEditor } from './mask-editor';
+import type {
+  EditReply,
+  EditRequest,
+  EditSettings,
+  Mask,
+  Options,
+  ProcessingStep,
+  ScanMetadata,
+  WorkerReply,
+  WorkerRequest,
+} from './types';
+
+const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
+const fileInput = $<HTMLInputElement>('file-input'),
+  scanButton = $<HTMLButtonElement>('scan');
+const originalImage = $<HTMLImageElement>('original-image'),
+  scanImage = $<HTMLImageElement>('scan-image');
+let worker: Worker | undefined, selected: File | undefined;
+let originalURL = '',
+  resultURL = '',
+  resultBlob: Blob | undefined,
+  metadata: ScanMetadata | undefined;
+let busy = false,
+  editing = false,
+  photoReady = false;
+let focusAction = false;
+let rawBlob: Blob | undefined, suggestion: Mask | undefined, settings: EditSettings | undefined;
+let editWorker: Worker | undefined,
+  editId = 0,
+  editorOpen = false;
+let pendingEdit: { settings: EditSettings; history: 'push' | 'pop' | 'reset' } | undefined;
+const editHistory: EditSettings[] = [];
+const steps = new Map<string, ProcessingStep & { url: string; button: HTMLButtonElement }>();
+const maskEditor = new MaskEditor();
+const cloneSettings = (s: EditSettings): EditSettings => ({
+  ...s,
+  mask: { ...s.mask, data: s.mask.data.slice() },
+});
+
+function showError(message: string) {
+  $('error').textContent = message;
+  $('error').hidden = false;
+}
+function message(title: string, detail = '') {
+  $('stage-title').textContent = title;
+  $('stage-detail').textContent = detail;
+  $('stage-detail').hidden = !detail;
+}
+function busyState(value: boolean) {
+  busy = value;
+  const locked = value || editing || editorOpen;
+  scanButton.disabled = locked || !selected || !photoReady;
+  scanButton.hidden = value || !!resultBlob;
+  $('cancel').hidden = !value && !editing;
+  $('cancel').textContent = editing ? 'Cancel edit' : 'Cancel scan';
+  $<HTMLFieldSetElement>('settings-fields').disabled = locked;
+  for (const id of ['choose', 'rescan', 'rotate', 'zoom', 'remove-fingers'])
+    $<HTMLButtonElement>(id).disabled = locked;
+  $<HTMLSelectElement>('color-mode').disabled = locked;
+  $<HTMLButtonElement>('undo-edit').disabled = locked || !editHistory.length;
+  $<HTMLButtonElement>('reset-edits').disabled =
+    locked || !settings || (settings.cleanColor && !settings.rotation && !maskCount(settings.mask));
+  $('undo-edit').hidden = !editHistory.length;
+  $('reset-edits').hidden =
+    !settings || (settings.cleanColor && !settings.rotation && !maskCount(settings.mask));
+  $('progress').hidden = !value && !editing;
+  $('work-controls').hidden = !selected || editorOpen;
+  $('result-actions').hidden = !resultBlob || locked;
+  $('edit-controls').hidden = !resultBlob || busy || editorOpen;
+  $('adjustments').hidden = !resultBlob || busy || editorOpen;
+  $('view-controls').hidden = !resultBlob || locked || !$('process-view').hidden;
+  for (const step of steps.values()) step.button.disabled = locked;
+  $('workspace').setAttribute('aria-busy', String(value || editing));
+}
+function clearSteps() {
+  for (const step of steps.values()) URL.revokeObjectURL(step.url);
+  steps.clear();
+  $('process-steps').replaceChildren();
+  $('process-history').hidden = true;
+  $<HTMLDetailsElement>('process-history').open = false;
+  $('process-view').hidden = true;
+  $<HTMLImageElement>('process-image').removeAttribute('src');
+  $('process-image').hidden = true;
+}
+function displayStep(id: string) {
+  const step = steps.get(id);
+  if (!step) return;
+  $('images').hidden = true;
+  $('process-view').hidden = false;
+  $('view-controls').hidden = true;
+  const img = $<HTMLImageElement>('process-image');
+  img.src = step.url;
+  img.alt = step.title;
+  img.hidden = false;
+  $('process-title').textContent = step.title;
+  $('process-detail').textContent = step.detail;
+  $('process-back').hidden = busy;
+  $('process-back').textContent = resultBlob ? 'Back to scan' : 'Back to photo';
+  for (const [key, entry] of steps) entry.button.setAttribute('aria-pressed', String(key === id));
+}
+function addStep(step: ProcessingStep) {
+  const previous = steps.get(step.id);
+  if (previous) URL.revokeObjectURL(previous.url);
+  const url = URL.createObjectURL(step.blob),
+    button = previous?.button ?? document.createElement('button');
+  button.type = 'button';
+  button.disabled = busy || editing || editorOpen;
+  const image = document.createElement('img');
+  image.src = url;
+  image.alt = '';
+  image.loading = 'lazy';
+  const label = document.createElement('span');
+  label.textContent = step.title;
+  button.replaceChildren(image, label);
+  button.onclick = () => {
+    displayStep(step.id);
+    scrollTo($('drop-area'));
+  };
+  if (!previous) {
+    const item = document.createElement('li');
+    item.append(button);
+    $('process-steps').append(item);
+  }
+  steps.set(step.id, { ...step, url, button });
+  $('process-history').hidden = false;
+  displayStep(step.id);
+}
+function clearResult() {
+  editWorker?.terminate();
+  editWorker = undefined;
+  ++editId;
+  pendingEdit = undefined;
+  editing = false;
+  editorOpen = false;
+  maskEditor.close();
+  $('finger-editor').hidden = true;
+  rawBlob = undefined;
+  suggestion = undefined;
+  settings = undefined;
+  editHistory.length = 0;
+  clearSteps();
+  if (resultURL) URL.revokeObjectURL(resultURL);
+  resultURL = '';
+  resultBlob = undefined;
+  metadata = undefined;
+  scanImage.hidden = true;
+  scanImage.removeAttribute('src');
+  $('result-actions').hidden = true;
+  $('edit-controls').hidden = true;
+  $('rescan-controls').hidden = true;
+  $('scan-details').hidden = true;
+  $('view-controls').hidden = true;
+  $('warnings').hidden = true;
+  $('adjustments').hidden = true;
+  $<HTMLButtonElement>('show-scan').disabled = true;
+  $<HTMLButtonElement>('show-compare').disabled = true;
+  $('images').classList.remove('zoomed');
+  $('zoom').setAttribute('aria-pressed', 'false');
+  $('zoom').textContent = '100% view';
+}
+function scrollTo(element: HTMLElement, block: ScrollLogicalPosition = 'start') {
+  element.scrollIntoView({
+    behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth',
+    block,
+  });
+}
+function rejectPhoto(detail: string) {
+  selected = undefined;
+  photoReady = false;
+  originalImage.hidden = true;
+  originalImage.removeAttribute('src');
+  URL.revokeObjectURL(originalURL);
+  originalURL = '';
+  $('empty').hidden = false;
+  $('images').hidden = true;
+  $('file-toolbar').hidden = true;
+  $('work-controls').hidden = true;
+  $('settings-container').hidden = true;
+  $('view-controls').hidden = true;
+  $('filename').textContent = 'Your workspace';
+  $('sample-label').hidden = true;
+  busyState(false);
+  showError(detail);
+  message('Choose another photo.', 'Open a JPEG, PNG, or WebP with the full page visible.');
+}
+function scanFailed(detail: string) {
+  worker?.terminate();
+  worker = undefined;
+  busyState(false);
+  view('original');
+  showError(detail);
+  message('The scan could not be completed.', 'Adjust the settings or try a different photo.');
+  scanButton.textContent = 'Try again';
+  if (focusAction) scanButton.focus({ preventScroll: true });
+}
+function view(mode: 'original' | 'scan' | 'compare') {
+  $('images').hidden = false;
+  $('process-view').hidden = true;
+  $('view-controls').hidden = !resultBlob || busy || editing || editorOpen;
+  for (const step of steps.values()) step.button.setAttribute('aria-pressed', 'false');
+  $('original-pane').hidden = mode === 'scan';
+  $('scan-pane').hidden = mode === 'original';
+  $('images').classList.toggle('compare', mode === 'compare');
+  for (const name of ['original', 'scan', 'compare'])
+    $(`show-${name}`).setAttribute('aria-pressed', String(name === mode));
+}
+function chooseFile(file: File, sample = false) {
+  if (busy || editing || editorOpen) return;
+  if (file.size > 40 * 1024 * 1024) {
+    showError('This photo is larger than 40 MB. Choose a smaller image.');
+    return;
+  }
+  if (file.type && !['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) {
+    showError('Choose a JPEG, PNG, or WebP photo. HEIC and PDF files are not supported yet.');
+    return;
+  }
+  selected = file;
+  photoReady = false;
+  $('error').hidden = true;
+  clearResult();
+  if (originalURL) URL.revokeObjectURL(originalURL);
+  originalImage.hidden = true;
+  originalURL = URL.createObjectURL(file);
+  originalImage.src = originalURL;
+  $('empty').hidden = true;
+  $('images').hidden = false;
+  $('file-toolbar').hidden = false;
+  $('work-controls').hidden = false;
+  $('settings-container').hidden = false;
+  $<HTMLDetailsElement>('scan-settings').open = false;
+  $('filename').textContent = file.name;
+  $('filename').title = file.name;
+  $('sample-label').hidden = !sample;
+  $('source-size').textContent = '';
+  view('original');
+  busyState(false);
+  message('Opening your photo…');
+  scanButton.textContent = 'Flatten photo';
+}
+originalImage.onload = () => {
+  const width = originalImage.naturalWidth,
+    height = originalImage.naturalHeight;
+  if (width * height > 20_000_000) {
+    rejectPhoto('This photo exceeds 20 megapixels. Resize it before scanning.');
+    return;
+  }
+  if (Math.min(width, height) < 64) {
+    rejectPhoto('This photo is too small. Choose an image at least 64 pixels on each side.');
+    return;
+  }
+  photoReady = true;
+  originalImage.hidden = false;
+  $('source-size').textContent = `${width} × ${height}`;
+  busyState(false);
+  message('Ready to flatten.');
+  if (matchMedia('(max-width: 700px)').matches) scrollTo($('work-controls'), 'end');
+};
+originalImage.onerror = () =>
+  rejectPhoto('This image could not be opened. Save it as JPEG or PNG and try again.');
+$('choose').onclick = $('drop-choose').onclick = () => fileInput.click();
+fileInput.onchange = () => {
+  if (fileInput.files?.[0]) chooseFile(fileInput.files[0]);
+  fileInput.value = '';
+};
+$<HTMLSelectElement>('quality').onchange = () => {
+  $('quality-help').textContent =
+    $<HTMLSelectElement>('quality').value === 'refined'
+      ? 'A closer fit to the page.'
+      : 'A faster preview.';
+};
+
+let dragDepth = 0;
+const stage = $('drop-area');
+stage.addEventListener('dragenter', (event) => {
+  event.preventDefault();
+  if (!busy && !editing && !editorOpen) {
+    dragDepth++;
+    stage.classList.add('dragover');
+  }
+});
+stage.addEventListener('dragover', (event) => event.preventDefault());
+stage.addEventListener('dragleave', () => {
+  if (--dragDepth <= 0) {
+    dragDepth = 0;
+    stage.classList.remove('dragover');
+  }
+});
+stage.addEventListener('drop', (event) => {
+  event.preventDefault();
+  dragDepth = 0;
+  stage.classList.remove('dragover');
+  if (busy || editing || editorOpen) return;
+  const files = event.dataTransfer?.files;
+  if (files?.length === 1) chooseFile(files[0]);
+  else if (files?.length) showError('Choose one photo at a time.');
+});
+document.addEventListener('dragover', (e) => e.preventDefault());
+document.addEventListener('drop', (e) => e.preventDefault());
+document.addEventListener('paste', (e) => {
+  const file = Array.from(e.clipboardData?.files ?? []).find((f) => f.type.startsWith('image/'));
+  if (file && !busy && !editing && !editorOpen) {
+    e.preventDefault();
+    chooseFile(file);
+  }
+});
+
+$('sample').onclick = async () => {
+  const button = $<HTMLButtonElement>('sample');
+  button.disabled = true;
+  try {
+    const response = await fetch(new URL('sample.png', document.baseURI));
+    if (!response.ok)
+      throw new Error('The sample could not be loaded. Choose your own photo or try again.');
+    const blob = await response.blob();
+    chooseFile(new File([blob], 'sample-document.png', { type: 'image/png' }), true);
+  } catch (error) {
+    showError(String(error instanceof Error ? error.message : error));
+  } finally {
+    button.disabled = false;
+  }
+};
+
+function installResult(blob: Blob) {
+  if (resultURL) URL.revokeObjectURL(resultURL);
+  resultBlob = blob;
+  resultURL = URL.createObjectURL(blob);
+  scanImage.src = resultURL;
+  scanImage.hidden = false;
+  const download = $<HTMLAnchorElement>('download');
+  download.href = resultURL;
+  download.download = `${(selected?.name ?? 'document').replace(/\.[^.]*$/, '')}-scan.png`;
+}
+
+scanButton.onclick = () => {
+  if (!selected || !photoReady || busy || editing || editorOpen) return;
+  if (!window.isSecureContext) {
+    showError('Open this app over HTTPS or localhost so the scanner can load securely.');
+    return;
+  }
+  if (!window.Worker || !window.OffscreenCanvas || !window.createImageBitmap) {
+    showError(
+      'This browser does not support the scanner. Try a current version of Chrome, Edge, Firefox, or Safari.',
+    );
+    return;
+  }
+  focusAction = scanButton.matches(':focus-visible') || $('rescan').matches(':focus-visible');
+  $('error').hidden = true;
+  clearResult();
+  view('original');
+  $<HTMLDetailsElement>('scan-settings').open = false;
+  busyState(true);
+  if (focusAction) $('cancel').focus({ preventScroll: true });
+  message('Starting your scan…');
+  $<HTMLProgressElement>('progress').removeAttribute('value');
+  if (!worker) {
+    try {
+      worker = new Worker(new URL('./scan.worker.ts', import.meta.url), { type: 'module' });
+    } catch {
+      scanFailed('The scanner could not start. Reload this page or try a current desktop browser.');
+      return;
+    }
+    worker.onmessage = (event: MessageEvent<WorkerReply>) => {
+      const data = event.data;
+      if (data.type === 'progress') {
+        message(data.stage, data.detail);
+        const progress = $<HTMLProgressElement>('progress');
+        if (data.fraction === undefined) progress.removeAttribute('value');
+        else {
+          progress.max = 1;
+          progress.value = data.fraction;
+        }
+      } else if (data.type === 'backend') {
+        $('engine').textContent =
+          data.backend === 'webgpu' ? 'WebGPU · on this device' : 'CPU · on this device';
+      } else if (data.type === 'step') {
+        addStep(data);
+      } else if (data.type === 'reset-steps') {
+        clearSteps();
+        view('original');
+      } else if (data.type === 'error') {
+        scanFailed(data.message);
+      } else if (data.type === 'result') {
+        metadata = data.metadata;
+        rawBlob = data.raw;
+        suggestion = data.suggestion;
+        settings = {
+          cleanColor: true,
+          mask: emptyMask(metadata.width, metadata.height),
+          rotation: 0,
+        };
+        $<HTMLSelectElement>('color-mode').value = 'clean';
+        installResult(data.blob);
+        busyState(false);
+        $<HTMLButtonElement>('show-scan').disabled = false;
+        $<HTMLButtonElement>('show-compare').disabled = false;
+        $('result-size').textContent = `${metadata.width} × ${metadata.height}`;
+        $('result-info').textContent = `${metadata.seconds.toFixed(1)} seconds`;
+        $('warnings').textContent = metadata.warnings.join(' ');
+        $('warnings').hidden = metadata.warnings.length === 0;
+        $('result-actions').hidden = false;
+        $('edit-controls').hidden = false;
+        $('rescan-controls').hidden = false;
+        $('scan-details').hidden = false;
+        $('view-controls').hidden = false;
+        scanButton.textContent = 'Scan again';
+        view('scan');
+        message(
+          'Your scan is ready.',
+          maskCount(suggestion)
+            ? 'Possible fingers found. Open Remove fingers to review.'
+            : 'Paper lighting and color corrected.',
+        );
+        if (focusAction) $('download').focus({ preventScroll: true });
+        if (matchMedia('(max-width: 700px)').matches) scrollTo($('work-controls'), 'end');
+      }
+    };
+    worker.onerror = () => {
+      scanFailed(
+        'The scanner stopped unexpectedly. Try again with a smaller image, or reload this page.',
+      );
+    };
+  }
+  const options: Options = {
+    quality: $<HTMLSelectElement>('quality').value as Options['quality'],
+    orient: $<HTMLInputElement>('orient').checked,
+    maxSide: Number($<HTMLSelectElement>('resolution').value),
+  };
+  const request: WorkerRequest = {
+    type: 'scan',
+    file: selected,
+    options,
+    base: new URL('.', document.baseURI).href,
+  };
+  try {
+    worker.postMessage(request);
+  } catch {
+    scanFailed(
+      'The photo could not be opened by the scanner. Choose it again or reload this page.',
+    );
+  }
+};
+$('rescan').onclick = () => scanButton.click();
+$('cancel').onclick = () => {
+  const restoreFocus = $('cancel').matches(':focus-visible');
+  if (editing) {
+    editWorker?.terminate();
+    editWorker = undefined;
+    ++editId;
+    pendingEdit = undefined;
+    editing = false;
+    busyState(false);
+    view('scan');
+    if (settings)
+      $<HTMLSelectElement>('color-mode').value = settings.cleanColor ? 'clean' : 'original';
+    message('Edit cancelled.', 'Your previous scan is unchanged.');
+    if (restoreFocus) $('download').focus({ preventScroll: true });
+    return;
+  }
+  worker?.terminate();
+  worker = undefined;
+  busyState(false);
+  view('original');
+  message('Scan cancelled.', 'Your photo is ready to try again.');
+  if (restoreFocus) scanButton.focus({ preventScroll: true });
+};
+for (const mode of ['original', 'scan', 'compare'] as const)
+  $(`show-${mode}`).onclick = () => view(mode);
+$('process-back').onclick = () => view(resultBlob ? 'scan' : 'original');
+$('zoom').onclick = () => {
+  const active = $('images').classList.toggle('zoomed');
+  $('zoom').setAttribute('aria-pressed', String(active));
+  $('zoom').textContent = active ? 'Fit to view' : '100% view';
+};
+function editFailed(detail: string) {
+  editWorker?.terminate();
+  editWorker = undefined;
+  pendingEdit = undefined;
+  editing = false;
+  busyState(false);
+  view('scan');
+  if (settings)
+    $<HTMLSelectElement>('color-mode').value = settings.cleanColor ? 'clean' : 'original';
+  showError(detail);
+  message('The edit could not be applied.', 'Your previous scan is still available.');
+  if (focusAction) $('download').focus({ preventScroll: true });
+}
+function applyEdit(next: EditSettings, history: 'push' | 'pop' | 'reset' = 'push') {
+  if (!rawBlob || !settings || editing || busy || editorOpen) return;
+  focusAction = !!document.activeElement?.matches(':focus-visible');
+  $('error').hidden = true;
+  editing = true;
+  pendingEdit = { settings: next, history };
+  view('scan');
+  busyState(false);
+  $<HTMLProgressElement>('progress').removeAttribute('value');
+  message('Applying your changes…', 'Recalculating from the unedited scan.');
+  if (focusAction) $('cancel').focus({ preventScroll: true });
+  try {
+    if (!editWorker) {
+      editWorker = new Worker(new URL('./edit.worker.ts', import.meta.url), { type: 'module' });
+      editWorker.onmessage = ({ data }: MessageEvent<EditReply>) => {
+        if (data.id !== editId || !pendingEdit || !settings) return;
+        if (data.type === 'error') {
+          editFailed(data.message);
+          return;
+        }
+        if (pendingEdit.history === 'pop') editHistory.pop();
+        else {
+          editHistory.push(cloneSettings(settings));
+          if (editHistory.length > 20) editHistory.shift();
+        }
+        settings = pendingEdit.settings;
+        pendingEdit = undefined;
+        installResult(data.blob);
+        editing = false;
+        $<HTMLSelectElement>('color-mode').value = settings.cleanColor ? 'clean' : 'original';
+        $('result-size').textContent = `${data.width} × ${data.height}`;
+        if (metadata) {
+          metadata.width = data.width;
+          metadata.height = data.height;
+        }
+        busyState(false);
+        view('scan');
+        message(
+          'Your changes are ready.',
+          maskCount(settings.mask)
+            ? 'Selected areas filled with paper color. Undo edit restores the previous version.'
+            : '',
+        );
+        if (focusAction) $('download').focus({ preventScroll: true });
+      };
+      editWorker.onerror = () => editFailed('The image editor stopped. Try the edit again.');
+    }
+    const request: EditRequest = {
+      id: ++editId,
+      raw: rawBlob,
+      settings: next,
+      suggestion: suggestion!,
+    };
+    editWorker.postMessage(request);
+  } catch (error) {
+    editFailed(error instanceof Error ? error.message : 'The edit could not start. Try again.');
+  }
+}
+$('rotate').onclick = () => {
+  if (settings) applyEdit({ ...cloneSettings(settings), rotation: (settings.rotation + 1) % 4 });
+};
+$<HTMLSelectElement>('color-mode').onchange = () => {
+  if (settings)
+    applyEdit({
+      ...cloneSettings(settings),
+      cleanColor: $<HTMLSelectElement>('color-mode').value === 'clean',
+    });
+};
+$('undo-edit').onclick = () => {
+  if (editHistory.length) applyEdit(cloneSettings(editHistory[editHistory.length - 1]), 'pop');
+};
+$('reset-edits').onclick = () => {
+  if (settings)
+    applyEdit(
+      {
+        cleanColor: true,
+        mask: { ...settings.mask, data: new Uint8Array(settings.mask.data.length) },
+        rotation: 0,
+      },
+      'reset',
+    );
+};
+function closeEditor() {
+  editorOpen = false;
+  maskEditor.close();
+  $('finger-editor').hidden = true;
+  $('settings-container').hidden = false;
+  $('process-history').hidden = !steps.size;
+  view('scan');
+  busyState(false);
+}
+$('remove-fingers').onclick = async () => {
+  if (!rawBlob || !settings || !suggestion || busy || editing || editorOpen) return;
+  const keyboard = $('remove-fingers').matches(':focus-visible');
+  editorOpen = true;
+  busyState(false);
+  $('error').hidden = true;
+  try {
+    await maskEditor.open(
+      rawBlob,
+      settings.reviewedMask ? settings.mask : suggestion,
+      suggestion,
+      settings.rotation,
+    );
+    if (!editorOpen) return;
+    $('images').hidden = true;
+    $('process-view').hidden = true;
+    $('finger-editor').hidden = false;
+    $('settings-container').hidden = true;
+    $('process-history').hidden = true;
+    if (keyboard) $('brush-add').focus({ preventScroll: true });
+    scrollTo($('finger-editor'));
+  } catch {
+    closeEditor();
+    showError('The removal editor could not open. Try again.');
+  }
+};
+$('mask-cancel').onclick = () => {
+  const keyboard = $('mask-cancel').matches(':focus-visible');
+  closeEditor();
+  if (keyboard) $('remove-fingers').focus({ preventScroll: true });
+};
+$('mask-apply').onclick = () => {
+  if (!settings || !editorOpen) return;
+  const keyboard = $('mask-apply').matches(':focus-visible');
+  const mask = maskEditor.selection();
+  closeEditor();
+  if (keyboard) $('remove-fingers').focus({ preventScroll: true });
+  applyEdit({ ...cloneSettings(settings), mask, reviewedMask: true });
+};
+window.addEventListener('pagehide', () => {
+  worker?.terminate();
+  worker = undefined;
+  editWorker?.terminate();
+  editWorker = undefined;
+  if (editorOpen) closeEditor();
+});
+window.addEventListener('pageshow', () => {
+  if (editing && !editWorker) editFailed('The edit was interrupted. Try applying it again.');
+  if (busy && !worker) {
+    busyState(false);
+    view('original');
+    message(
+      'Scan interrupted.',
+      'The page was left during processing. Start the scan again to continue.',
+    );
+  }
+});
+// Keeping only the selected photo and latest scan bounds memory across repeated scans.
+window.addEventListener('beforeunload', () => {
+  URL.revokeObjectURL(originalURL);
+  URL.revokeObjectURL(resultURL);
+  for (const step of steps.values()) URL.revokeObjectURL(step.url);
+});

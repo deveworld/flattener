@@ -190,6 +190,8 @@ def character_error_rate(reference: str, prediction: str) -> float:
 # (https://github.com/madmaze/pytesseract, Copyright the pytesseract authors,
 # Apache License 2.0) statement for statement, so OCR inputs match the published
 # protocols byte for byte.
+# Modified by the flattener authors: accepts Pillow images only, adds type
+# annotations and specific error messages, and simplifies format selection.
 def prepare_like_pytesseract(image: Image.Image) -> tuple[Image.Image, str]:
     """pytesseract 0.3.8 ``prepare``: keep the format, composite alpha over white."""
     if not isinstance(image, Image.Image):

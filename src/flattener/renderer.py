@@ -118,7 +118,7 @@ def render(
 
     Images must be RGB uint8 HWC; maps must be float32 HWC2 in (x, y)
     order. All processing takes place on CPU. Callers' arrays are never
-    modified. See ``docs/INTERFACE_SPEC.md`` for boundary and mask semantics.
+    modified.
     """
     started = perf_counter()
     candidate = RenderConfig() if config is None else config

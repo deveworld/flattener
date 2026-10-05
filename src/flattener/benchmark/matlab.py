@@ -6,7 +6,7 @@
 # Modified by the flattener authors: rewritten from PyTorch to NumPy float64,
 # grayscale conversion moved before resizing (as in the MATLAB scripts), filters
 # made separable and resize taps accumulated in MATLAB order, bKGD-aware PNG alpha
-# compositing and explicit dtype validation added. See THIRD_PARTY.md.
+# compositing and explicit dtype validation added. See LICENSE.
 """NumPy emulation of the MATLAB Image Processing Toolbox calls used by DocUNet scripts.
 
 Every function follows MATLAB semantics for ``uint8`` inputs: arithmetic is done in

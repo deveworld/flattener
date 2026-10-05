@@ -1,7 +1,7 @@
 """Where each model view lies in the source image, and quarter turns of result grids.
 
-Values are flattener values of an image (``docs/INTERFACE_SPEC.md``): +-1 are its outer
-pixel edges, and value q of the source is the pixel-edge point
+Values are flattener values of an image: +-1 are its outer pixel edges, and value q of
+the source is the pixel-edge point
 ``p = ((q_x + 1) W / 2, (q_y + 1) H / 2)``. A view is the image a model sees before it is
 resized to the model input. A ``Placement`` maps view values q' to source values q:
 

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "krreal-label-1",
   "title": "KR-Real v1 photo label",
-  "description": "One JSON file per photo. Coordinates are pixels of the EXIF-applied image: (0, 0) is the centre of the top-left pixel, x grows right, y grows down (docs/INTERFACE_SPEC.md). Normalized flattener values follow g = 2 * (p + 0.5) / size - 1. Geometry rules that JSON Schema cannot state (quad order and convexity, curve end points, counts per status) are checked by tools/krreal/krreal.py check.",
+  "description": "One JSON file per photo. Coordinates are pixels of the EXIF-applied image: (0, 0) is the centre of the top-left pixel, x grows right, y grows down. Normalized flattener values follow g = 2 * (p + 0.5) / size - 1. Geometry rules that JSON Schema cannot state (quad order and convexity, curve end points, counts per status) are checked by tools/krreal/krreal.py check.",
   "type": "object",
   "required": [
     "schema", "photo", "capture", "coordinates", "page_count", "pages",

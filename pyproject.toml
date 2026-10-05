@@ -9,7 +9,7 @@ description = "Document photo scanner: page detection, orientation, dewarping an
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 license = "Apache-2.0 AND MIT AND OFL-1.1"
-license-files = ["LICENSE", "LICENSES/UVDoc-MIT.txt", "src/flattener/assets/fonts/OFL.txt"]
+license-files = ["LICENSE", "src/flattener/assets/fonts/OFL.txt"]
 dependencies = [
     "numpy>=2.0,<3",
     "Pillow>=11,<13",
@@ -18,14 +18,15 @@ dependencies = [
 
 [dependency-groups]
 dev = ["pytest>=8,<10", "ruff>=0.11,<1", "build>=1.2,<2", "hatchling>=1.27,<2"]
+web-export = ["onnx>=1.17,<2", "onnxruntime>=1.22,<2"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/flattener"]
 
 [tool.hatch.build.targets.sdist]
 include = [
-    "/src", "/tests", "/tools", "/examples", "/docs", "/benchmarks",
-    "/README.md", "/LICENSE", "/THIRD_PARTY.md",
+    "/src", "/tests", "/tools", "/examples", "/benchmarks",
+    "/README.md", "/LICENSE",
     "/pyproject.toml", "/uv.lock", "/.python-version",
 ]
 

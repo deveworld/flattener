@@ -1,0 +1,77 @@
+export type Pixels = { width: number; height: number; data: Uint8ClampedArray };
+export type Mask = { width: number; height: number; data: Uint8Array };
+export type PaperField = { width: number; height: number; data: Float32Array };
+export type EditSettings = {
+  cleanColor: boolean;
+  mask: Mask;
+  rotation: number;
+  reviewedMask?: boolean;
+};
+export type ProcessingStep = { id: string; title: string; detail: string; blob: Blob };
+export type Grid = { rows: number; cols: number; data: Float64Array };
+export type Placement = {
+  matrix: [number, number, number, number];
+  offset: [number, number];
+  width: number;
+  height: number;
+};
+export type Options = { quality: 'fast' | 'refined'; orient: boolean; maxSide: number };
+export type Backend = 'webgpu' | 'wasm';
+export type ModelSpec = {
+  file: string;
+  bytes: number;
+  sha256: string;
+  inputs: Record<string, number[]>;
+  outputs: string[];
+};
+export type OrientConfig = {
+  global_size: number;
+  patch_size: number;
+  patches: number;
+  page_long_side: number;
+  energy_grid: number;
+  pad_value: number;
+};
+export type Manifest = {
+  schema: 'flattener-web-bundle-1';
+  precision: 'float32';
+  models: {
+    dewarp: ModelSpec & {
+      input_size: [number, number];
+      grid_size: [number, number];
+      grid_convention: string;
+      tta: string;
+    };
+    gate: ModelSpec & { input_size: [number, number] };
+    orient: ModelSpec & { config: OrientConfig; threshold: number };
+  };
+};
+export type ScanMetadata = {
+  backend: Backend;
+  seconds: number;
+  width: number;
+  height: number;
+  warnings: string[];
+  passes: number;
+  rotation: number;
+  source: { width: number; height: number };
+  model: string;
+};
+export type WorkerRequest = {
+  type: 'scan';
+  file: File;
+  options: Options;
+  base: string;
+  backend?: Backend;
+};
+export type WorkerReply =
+  | { type: 'progress'; stage: string; detail: string; fraction?: number }
+  | { type: 'reset-steps' }
+  | ({ type: 'step' } & ProcessingStep)
+  | { type: 'backend'; backend: Backend }
+  | { type: 'result'; blob: Blob; raw: Blob; suggestion: Mask; metadata: ScanMetadata }
+  | { type: 'error'; message: string };
+export type EditRequest = { id: number; raw: Blob; settings: EditSettings; suggestion: Mask };
+export type EditReply =
+  | { type: 'edited'; id: number; blob: Blob; width: number; height: number }
+  | { type: 'error'; id: number; message: string };

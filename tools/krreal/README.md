@@ -10,7 +10,6 @@ Tools to shoot, label and transcribe the first 60 photos of KR-Real v1, a Korean
 
 | File | Contents |
 |---|---|
-| `shooting-guide.md` | Shooting guide: strata and counts, how to shoot each stratum, what to avoid, file names, moving photos to the laptop |
 | `kit.json` | Strata, shot list per phone, flags, kinds of text regions and reference lines, file naming rule. All other files use these values |
 | `label.schema.json` | Label JSON Schema (`krreal-label-1`) |
 | `labeler.html` | Labeler that runs in a browser. It is a single file and uses no external resources |
@@ -27,8 +26,8 @@ Run commands from the repository root as `.venv/bin/python tools/krreal/krreal.p
 | Step | Command or tool | Result |
 |---|---|---|
 | 1. Shot list | `shotlist` | `shotlist.csv` (30 rows per phone) |
-| 2. Shooting | `shooting-guide.md` | 60 phone photos |
-| 3. Transfer | Guide section 7, then `ingest` | `photos/kr1-….jpg` (original bytes unchanged) |
+| 2. Shooting | Phone camera | 60 phone photos |
+| 3. Transfer | `ingest` | `photos/kr1-….jpg` (original bytes unchanged) |
 | 4. List | `manifest` | `manifest.json`, missing counts and warnings |
 | 5. Drafts | `draft [--provider …]` | `drafts/<name>.json` |
 | 6. Labels | `labeler.html` | `labels/<name>.json` |
@@ -49,7 +48,7 @@ Exit codes: 0 means done, 1 means there are problems (listed on standard error),
 
 Each photo has one JSON label file, which follows `label.schema.json`. `check` enforces the rules that the schema cannot express.
 
-**Coordinates.** Pixels of the photo with the EXIF orientation applied. (0, 0) is the center of the top-left pixel; x grows to the right and y grows downward (same as `docs/INTERFACE_SPEC.md`). Normalized flattener coordinates are `g = 2 * (p + 0.5) / size - 1`. When the page extends past the photo, corners may be placed outside the photo (up to 50% of the photo size).
+**Coordinates.** Pixels of the photo with the EXIF orientation applied. (0, 0) is the center of the top-left pixel; x grows to the right and y grows downward. Normalized flattener coordinates are `g = 2 * (p + 0.5) / size - 1`. When the page extends past the photo, corners may be placed outside the photo (up to 50% of the photo size).
 
 | Field | Rule |
 |---|---|

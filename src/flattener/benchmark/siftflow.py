@@ -8,17 +8,19 @@
 # original DocUNet and the UVDoc-patched SIFT-flow trees, the pyramid uses the
 # NumPy MATLAB emulation, built libraries can be reloaded in worker processes, the
 # scan pyramid is reused across views, and the build also works with MSVC on
-# Windows. See THIRD_PARTY.md.
+# Windows. See LICENSE.
 #
 # The coarse-to-fine driver (``SiftFlow._coarse_to_fine`` and ``_level_offset``), as
 # in OARDoc, reimplements the control flow and parameter schedule of
-# ``SIFTflowc2f.m`` from Ce Liu's SIFT-flow package ("All rights reserved"). No file
-# of that package is included; its C++ is compiled from the user's own copy.
+# ``SIFTflowc2f.m`` from Ce Liu's SIFT-flow package. No original MATLAB or C++ file
+# is included; its C++ is compiled from the user's own copy. The original package
+# has no package-wide redistribution license; ``mexDiscreteFlow.m`` includes an
+# "All rights reserved" notice. See LICENSE for the scope of this provenance issue.
 """SIFT flow (Ce Liu) compiled at run time from a user-supplied source tree.
 
-The SIFT-flow C++ sources are "All rights reserved", so each user supplies a copy: the
-directory that contains ``mexDenseSIFT`` and ``mexDiscreteFlow`` (the ``SIFTflow``
-folder of the DocUNet ``eval.zip`` or of UVDoc's ``eval_code``).
+The original distribution has no package-wide license. Each user supplies a copy:
+the directory that contains ``mexDenseSIFT`` and ``mexDiscreteFlow`` (the
+``SIFTflow`` folder of the DocUNet ``eval.zip`` or of UVDoc's ``eval_code``).
 """
 
 from __future__ import annotations

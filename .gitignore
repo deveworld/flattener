@@ -11,3 +11,16 @@ outputs/
 *.prof
 .coverage
 htmlcov/
+web/node_modules/
+web/dist/
+web/public/models/*
+!web/public/models/README.md
+web/test-results/
+.impeccable/questions/
+.impeccable/review/
+.impeccable/mocks/
+.impeccable/config.local.json
+.playwright-cli/
+output/playwright/
+/RESEARCH.md
+/_researcher/

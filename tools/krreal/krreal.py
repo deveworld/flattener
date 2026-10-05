@@ -14,7 +14,7 @@ uploads photos.
   sync-labeler copy kit.json into labeler.html (after editing kit.json)
 
 Exit status: 0 done, 1 problems found (listed on stderr), 2 usage error.
-See tools/krreal/README.md for the whole workflow and shooting-guide.md for shooting.
+See tools/krreal/README.md for the whole workflow.
 """
 
 from __future__ import annotations
