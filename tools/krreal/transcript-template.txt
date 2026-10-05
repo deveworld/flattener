@@ -7,15 +7,15 @@
 # transcribed_by:
 # checked_by:
 #
-# 전사 규칙 (KR-Real v1)
-# - 페이지의 글자를 모두 옮깁니다. 머리말, 본문, 각주, 쪽번호를 포함합니다.
-# - 사진 속 글줄 하나를 한 줄에 적고, 읽기 순서를 따릅니다.
-# - 띄어쓰기, 문장부호, 한자, 영문, 숫자는 인쇄된 그대로 적습니다. 줄 끝 하이픈도 그대로 둡니다.
-# - 표는 한 행을 한 줄에 적고, 칸 사이를 탭 하나로 나눕니다.
-# - 수식은 [[수식]], 그림 속 글자와 도장은 [[그림]]으로 적습니다.
-# - 읽을 수 없는 글자는 한 글자마다 [[?]]로 적습니다.
-# - 사진을 100%로 확대해 한 줄씩 대조합니다. OCR 초안이 있으면 모든 글자를 사진과 대조해 고칩니다.
-# - 1차 전사를 마치면 status를 transcribed로 바꾸고 transcribed_by에 이름을 적습니다.
-# - 다른 사람이 한 번 더 대조한 뒤 status를 checked로 바꾸고 checked_by에 이름을 적습니다.
-# - UTF-8(NFC)로 저장합니다. 아래 --- 줄은 지우지 않습니다.
+# Transcription rules (KR-Real v1)
+# - Copy all the text on the page, including running heads, body text, footnotes and page numbers.
+# - Write each line of text in the photo on its own line, in reading order.
+# - Copy spacing, punctuation, Hanja, Latin letters and digits exactly as printed. Keep hyphens at line ends too.
+# - Write one table row per line, with a single tab between cells.
+# - Write formulas as [[formula]], and text inside figures and stamps as [[figure]].
+# - Write [[?]] for each character you cannot read.
+# - Zoom the photo to 100% and compare it line by line. If there is an OCR draft, check every character against the photo and correct it.
+# - After the first pass, change status to transcribed and put your name in transcribed_by.
+# - After a second person has compared it again, change status to checked and put their name in checked_by.
+# - Save as UTF-8 (NFC). Do not delete the --- line below.
 ---

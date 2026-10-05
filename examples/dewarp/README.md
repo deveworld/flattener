@@ -90,7 +90,7 @@ its MS-SSIM rewards copying that generator's look. Real photos (KR-Real, DocUNet
 DIR300) decide.
 
 ```sh
-python -m flattener.dewarp.predict --weights W --device cuda --tta flip docunet \
+python -m flattener.dewarp.predict --weights W --device cuda docunet --tta flip \
     --input-dir CROPS --output-dir OUT --force-render --quantize truncate --rerun 2 --rect
 python -m flattener.benchmark docunet OUT --ref-resize uvdoc_view2_double --references-dir REFS --output R.json
 python -m flattener.benchmark dir300-predict --weights W --device cuda --tta flip --inputs-dir DIST \

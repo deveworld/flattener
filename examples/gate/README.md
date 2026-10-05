@@ -22,6 +22,9 @@ documents under the page, desk objects and walls are not page. v1.2 has channels
 | Scenes without a page | `negative_scene` | 5,000 / 250 |
 | SmartDoc 2015 challenge 1 frames, every sixth; documents 1-3 train, 4 val, 5 held out | `smartdoc_capture` | 2,529 / 300 |
 
+The released gate was trained while the own pages drew Korean and English text; since
+2026-10-05 the page generator draws English text only.
+
 Scenes (`tools/gate/scenes.py`) go through the dewarp composite placement: tilt, quarter
 turns, perspective and area.
 - A close-up zooms the page past the frame.

@@ -3,7 +3,7 @@
 ``contracts.Status`` is fixed, so scan conditions are ``reason_code`` strings on the
 existing statuses. ``REASONS`` registers the scanner's reason codes, each with the
 status it carries, its severity, how the scanner handles it and, where the user can
-act, guidance in Korean and English:
+act, guidance in English:
 
 * ``info``: recorded; the scan goes on unchanged.
 * ``warning``: the scan goes on and the result is ``rectified_with_warnings``.
@@ -116,18 +116,14 @@ class ReasonSpec:
     severity: Severity
     handling: str
     actions: tuple[Action, ...] = ()
-    message_ko: str | None = None
     message_en: str | None = None
 
 
 _RESHOOT_OR_REGION = (Action.RESHOOT, Action.SET_REGION)
-_GEOMETRY_KO = "다시 찍거나 영역을 지정해 주세요"
 _GEOMETRY_EN = "Take the photo again or set the page region"
-_CHOOSE_KO = "페이지를 골라 주세요"
 _CHOOSE_EN = "Choose the page"
-_CUT_OFF_KO = "{sides}이 잘렸어요. 조금 물러나 찍어 주세요"
 _CUT_OFF_EN = "The {sides} cut off. Step back a little and take the photo again"
-_SIDES_KO = {"top": "위쪽", "bottom": "아래쪽", "left": "왼쪽", "right": "오른쪽"}
+_SIDES = ("top", "bottom", "left", "right")
 
 REASONS: dict[str, ReasonSpec] = {
     spec.code: spec
@@ -139,7 +135,6 @@ REASONS: dict[str, ReasonSpec] = {
             "Return the original; the user sets the page region. Also a grid the gate mask "
             "reaches past that does not look like paper (detail: check 'paper').",
             _RESHOOT_OR_REGION,
-            "페이지 전체가 화면에 들어오게 찍어 주세요",
             "Take the photo with the whole page in the frame",
         ),
         ReasonSpec(
@@ -148,7 +143,6 @@ REASONS: dict[str, ReasonSpec] = {
             Severity.FAILURE,
             "Return the original (page below 1 % of the photo or long side below 600 px).",
             (Action.RESHOOT,),
-            "더 가까이에서 찍어 주세요",
             "Move closer and take the photo again",
         ),
         ReasonSpec(
@@ -165,7 +159,6 @@ REASONS: dict[str, ReasonSpec] = {
             "pass-0 outline and warn (success, warning) when it holds a piece; otherwise "
             "return the original with the candidate page boxes.",
             (Action.CHOOSE_REGION,),
-            _CHOOSE_KO,
             _CHOOSE_EN,
         ),
         ReasonSpec(
@@ -181,7 +174,6 @@ REASONS: dict[str, ReasonSpec] = {
             Severity.FAILURE,
             "As ambiguous_page_region, for two large components side by side.",
             (Action.CHOOSE_REGION,),
-            _CHOOSE_KO,
             _CHOOSE_EN,
         ),
         ReasonSpec(
@@ -192,7 +184,6 @@ REASONS: dict[str, ReasonSpec] = {
             "edge or paper under the page); the dewarp result is kept. Detail: coverage and "
             "the mask past each page side.",
             (Action.SET_REGION,),
-            "옆 쪽이나 밑에 깔린 종이가 같이 보여요. 원하는 쪽이 펴졌는지 확인해 주세요",
             "Something next to the page shows too. Check that the right page was flattened",
         ),
         ReasonSpec(
@@ -210,7 +201,6 @@ REASONS: dict[str, ReasonSpec] = {
             "'fragment') fails with model_error: the chain stops and the original comes back "
             "with the reshoot guidance.",
             (Action.RESHOOT,),
-            _CUT_OFF_KO,
             _CUT_OFF_EN,
         ),
         ReasonSpec(
@@ -219,7 +209,6 @@ REASONS: dict[str, ReasonSpec] = {
             Severity.WARNING,
             "Warn and go on (page solidity below 0.90).",
             (Action.RESHOOT,),
-            "손가락이나 물건이 페이지를 가려요",
             "A finger or an object covers the page",
         ),
         ReasonSpec(
@@ -228,7 +217,6 @@ REASONS: dict[str, ReasonSpec] = {
             Severity.WARNING,
             "Go on with the geometric prior (EXIF, portrait page) and offer quick rotation.",
             (Action.SET_ORIENTATION,),
-            "방향을 확인해 주세요",
             "Check the page orientation",
         ),
         ReasonSpec(
@@ -237,7 +225,6 @@ REASONS: dict[str, ReasonSpec] = {
             Severity.FAILURE,
             "Try the candidate chain, then the perspective fallback or the original.",
             _RESHOOT_OR_REGION,
-            _GEOMETRY_KO,
             _GEOMETRY_EN,
         ),
         ReasonSpec(
@@ -246,7 +233,6 @@ REASONS: dict[str, ReasonSpec] = {
             Severity.FAILURE,
             "Try the candidate chain, then the perspective fallback or the original.",
             _RESHOOT_OR_REGION,
-            _GEOMETRY_KO,
             _GEOMETRY_EN,
         ),
         ReasonSpec(
@@ -256,7 +242,6 @@ REASONS: dict[str, ReasonSpec] = {
             "The first candidate failed and a later one passed; detail names the candidate "
             "and the first failure.",
             (Action.SET_REGION,),
-            "결과를 확인하고, 필요하면 영역을 지정해 주세요",
             "Check the result and set the page region if needed",
         ),
         ReasonSpec(
@@ -400,28 +385,24 @@ def reason(
 
 @dataclass(frozen=True, slots=True)
 class Guidance:
-    """A message the user can act on, in Korean and English."""
+    """A message the user can act on. Records written before the Korean messages were
+    dropped also hold ``message_ko``; reading ignores it."""
 
     code: str
     actions: tuple[Action, ...]
-    message_ko: str
     message_en: str
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "code": self.code,
             "actions": [action.value for action in self.actions],
-            "message_ko": self.message_ko,
             "message_en": self.message_en,
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Guidance:
         return cls(
-            data["code"],
-            tuple(Action(action) for action in data["actions"]),
-            data["message_ko"],
-            data["message_en"],
+            data["code"], tuple(Action(action) for action in data["actions"]), data["message_en"]
         )
 
 
@@ -429,37 +410,32 @@ def _sides(detail: dict[str, Any]) -> list[str]:
     sides = detail.get("sides", detail.get("side"))
     if isinstance(sides, str):
         sides = [sides]
-    if not isinstance(sides, list) or not sides or any(side not in _SIDES_KO for side in sides):
+    if not isinstance(sides, list) or not sides or any(side not in _SIDES for side in sides):
         return []
-    return [side for side in _SIDES_KO if side in sides]
+    return [side for side in _SIDES if side in sides]
 
 
-def _cut_off_messages(detail: dict[str, Any]) -> tuple[str, str]:
+def _cut_off_message(detail: dict[str, Any]) -> str:
     sides = _sides(detail)
     if not sides:
         return (
-            "페이지 끝이 사진 밖으로 잘렸어요. 조금 떨어져서 페이지 전체가 보이게 다시 찍어 주세요",
             "The page runs out of the photo. Step back and take it again with the whole page "
-            "in view",
+            "in view"
         )
-    names_ko = [_SIDES_KO[side] for side in sides]
-    ko = f"{names_ko[0]}과 {names_ko[1]}" if len(names_ko) == 2 else ", ".join(names_ko)
     if len(sides) == 1:
-        en = f"{sides[0]} edge is"
+        named = f"{sides[0]} edge is"
     else:
-        en = ", ".join(sides[:-1]) + f" and {sides[-1]} edges are"
-    return _CUT_OFF_KO.format(sides=ko), _CUT_OFF_EN.format(sides=en)
+        named = ", ".join(sides[:-1]) + f" and {sides[-1]} edges are"
+    return _CUT_OFF_EN.format(sides=named)
 
 
 def guidance_for(item: Reason) -> Guidance | None:
     """The guidance of one reason, or ``None`` when the user has nothing to do."""
     spec = reason_spec(item.code, item.status)
-    if spec is None or spec.message_ko is None or spec.message_en is None:
+    if spec is None or spec.message_en is None:
         return None
-    ko, en = spec.message_ko, spec.message_en
-    if spec.code == "page_cut_off":
-        ko, en = _cut_off_messages(item.detail)
-    return Guidance(item.code, spec.actions, ko, en)
+    message = _cut_off_message(item.detail) if spec.code == "page_cut_off" else spec.message_en
+    return Guidance(item.code, spec.actions, message)
 
 
 def collect_guidance(reasons: Iterable[Reason]) -> list[Guidance]:
@@ -468,8 +444,8 @@ def collect_guidance(reasons: Iterable[Reason]) -> list[Guidance]:
     result = []
     for item in reasons:
         entry = guidance_for(item)
-        if entry is not None and entry.message_ko not in seen:
-            seen.add(entry.message_ko)
+        if entry is not None and entry.message_en not in seen:
+            seen.add(entry.message_en)
             result.append(entry)
     return result
 

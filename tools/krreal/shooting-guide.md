@@ -1,206 +1,206 @@
-# KR-Real v1 파일럿 촬영 가이드
+# KR-Real v1 pilot shooting guide
 
-스캐너를 평가할 실사진 60장을 휴대폰 두 대로 찍습니다. 사진은 비공개 평가 자료입니다. 학습, 체크포인트 선택, 공개 공유에는 쓰지 않습니다. 한 장에 1분 안팎, 모두 합쳐 1시간 30분쯤 걸립니다.
+You will take 60 real photos with two phones to evaluate the scanner. The photos are private evaluation material. They are not used for training, checkpoint selection or public sharing. Each photo takes about a minute, and the whole session takes about 1 hour 30 minutes.
 
-## 1. 준비
+## 1. Preparation
 
-**휴대폰 두 대.** 기종이 다른 두 대를 씁니다. 한 대를 `p1`, 다른 한 대를 `p2`로 정하고 적어 둡니다.
+**Two phones.** Use two phones of different models. Name one `p1` and the other `p2`, and write this down.
 
-**카메라 설정.** 두 휴대폰 모두 촬영 전에 맞춥니다.
+**Camera settings.** Set these on both phones before shooting.
 
-| 항목 | 설정 |
+| Item | Setting |
 |---|---|
-| 저장 형식 | JPEG. 아이폰: 설정 → 카메라 → 포맷 → 높은 호환성. 갤럭시: 카메라 설정 → 고급 사진 옵션 → 고효율 사진 끔 |
-| 위치 태그 | 끔. 아이폰: 설정 → 개인정보 보호 및 보안 → 위치 서비스 → 카메라 → 안 함. 갤럭시: 카메라 설정 → 위치 태그 끔 |
-| 촬영 모드 | 기본 사진 모드, 1배, 기본 해상도 |
-| 끌 것 | 문서 스캔 모드와 문서 스캔 제안(장면별 최적화), 필터, 인물 모드, 플래시 |
-| 그대로 둘 것 | HDR, 자동 초점, 자동 노출 |
+| Format | JPEG. iPhone: Settings → Camera → Formats → Most Compatible. Galaxy: Camera settings → Advanced picture options → High efficiency pictures off |
+| Location tags | Off. iPhone: Settings → Privacy & Security → Location Services → Camera → Never. Galaxy: Camera settings → Location tags off |
+| Shooting mode | Default photo mode, 1x, default resolution |
+| Turn off | Document scan mode and document scan suggestions (Scene optimizer), filters, portrait mode, flash |
+| Leave on | HDR, autofocus, auto exposure |
 
-**책과 문서.** 책 8권 이상, 낱장 문서 4종 이상을 준비합니다.
+**Books and documents.** Prepare at least 8 books and at least 4 single-sheet documents.
 
-- 출처마다 번호를 붙여 종이에 적어 둡니다: 책은 `b01`, `b02` …, 낱장 문서는 `d01`, `d02` …, 문서가 없는 사진은 `x00`.
-- 출처 하나가 60장 중 9장(15%)을 넘지 않게 합니다. 평가는 출처 단위로 dev와 test를 나누므로 출처가 많을수록 좋습니다.
-- 한국어 본문이 있는 책을 주로 씁니다. 두께(얇은 책, 300쪽 이상 두꺼운 책)와 판형을 섞습니다.
-- 주민등록번호, 주소, 계좌, 서명이 있는 문서와 다른 사람의 얼굴은 찍지 않습니다.
+- Give each source a number and write the numbers on paper: books `b01`, `b02` …, single-sheet documents `d01`, `d02` …, and `x00` for photos with no document.
+- No source may account for more than 9 of the 60 photos (15%). The evaluation splits dev and test by source, so more sources is better.
+- Mostly use books with Korean body text. Mix thicknesses (thin books, thick books of 300 pages or more) and page sizes.
+- Do not photograph documents with resident registration numbers, addresses, bank accounts or signatures, or other people's faces.
 
-**촬영 목록.** 노트북에서 만듭니다.
+**Shot list.** Make it on the laptop.
 
 ```bash
 .venv/bin/python tools/krreal/krreal.py shotlist          # outputs/krreal/v1/shotlist.csv
-.venv/bin/python tools/krreal/krreal.py shotlist --print  # 화면으로 보기
+.venv/bin/python tools/krreal/krreal.py shotlist --print  # show on screen
 ```
 
-휴대폰마다 30줄이고 번호는 1–30입니다. 인쇄하거나 휴대폰에 띄워 두고 순서대로 찍습니다. 찍을 때마다 그 줄에 출처 번호를 적습니다.
+Each phone has 30 rows, numbered 1–30. Print the list or keep it open on a phone, and shoot in order. After each shot, write the source number on that row.
 
-## 2. 층과 장수
+## 2. Strata and counts
 
-| 층 | 코드 | 파일럿 (p1 + p2) | v1 최종 목표 |
+| Stratum | Code | Pilot (p1 + p2) | v1 final target |
 |---|---|---|---|
-| 곡면 한국어 책 | `curved` | 12 (6 + 6) | 60 |
-| 8pt 이하 작은 글씨 | `small` | 6 (3 + 3) | 30 |
-| 표·수식 | `table` | 8 (4 + 4) | 40 |
-| 큰 회전(90/180/270°, ±30°, EXIF 오류) | `rotate` | 8 (4 + 4) | 40 |
-| 복잡한 배경 | `clutter` | 6 (3 + 3) | 30 |
-| 작은 페이지(사진 면적의 20% 미만) | `tiny` | 5 (3 + 2) | 25 |
-| 이미 평평한 페이지 | `flat` | 6 (3 + 3) | 30 |
-| 페이지 없음, 가림, 잘림, 옆 페이지 | `hard` | 5 (2 + 3) | 25 |
-| 두 쪽 펼침(라벨만) | `spread` | 4 (2 + 2) | 20 |
-| 합계 | | 60 (30 + 30) | 300 |
+| Curved Korean book | `curved` | 12 (6 + 6) | 60 |
+| Small print (8 pt or less) | `small` | 6 (3 + 3) | 30 |
+| Tables and formulas | `table` | 8 (4 + 4) | 40 |
+| Large rotation (90/180/270°, ±30°, wrong EXIF) | `rotate` | 8 (4 + 4) | 40 |
+| Cluttered background | `clutter` | 6 (3 + 3) | 30 |
+| Small page (under 20% of the photo area) | `tiny` | 5 (3 + 2) | 25 |
+| Already flat page | `flat` | 6 (3 + 3) | 30 |
+| No page, occluded, cut off, neighboring page | `hard` | 5 (2 + 3) | 25 |
+| Two-page spread (labels only) | `spread` | 4 (2 + 2) | 20 |
+| Total | | 60 (30 + 30) | 300 |
 
-파일럿은 최종 목표의 1/5이고 모든 층을 포함합니다. 층별 촬영 목록은 `tools/krreal/kit.json`에 있고, `shotlist`가 그 목록을 그대로 씁니다.
+The pilot is 1/5 of the final target and covers every stratum. The shot list for each stratum is in `tools/krreal/kit.json`, and `shotlist` uses that list as is.
 
-## 3. 공통 규칙
+## 3. Common rules
 
-- 평소 스캔 앱을 쓸 때처럼 손에 들고 찍습니다. 삼각대는 쓰지 않습니다.
-- 휴대폰은 세로로 들고, 페이지는 똑바로 둡니다. 방향을 바꾸는 것은 `rotate` 층뿐입니다.
-- 페이지 전체가 사진에 들어오게 찍습니다. 잘림 사진(`hard`의 `cut_off`)만 예외입니다.
-- 찍은 뒤 초점을 확인합니다. 흐리면 다시 찍고 흐린 사진은 지웁니다.
-- 같은 페이지는 휴대폰마다 한 번만 찍습니다.
-- 사진을 편집하지 않습니다. 자르기, 회전, 필터, 보정 모두 원본 바이트와 EXIF를 바꿉니다.
-- 목록 순서를 지킵니다. 다시 찍었으면 마지막 사진을 쓰고 앞의 사진은 지웁니다.
+- Hold the phone in your hand, as you would with a scanning app. Do not use a tripod.
+- Hold the phone in portrait orientation and place the page upright. Only the `rotate` stratum changes the orientation.
+- Get the whole page in the photo. The only exception is cut-off photos (`cut_off` in `hard`).
+- Check the focus after each shot. If the photo is blurry, shoot again and delete the blurry one.
+- Photograph each page only once per phone.
+- Do not edit the photos. Cropping, rotating, filters and adjustments all change the original bytes and the EXIF data.
+- Follow the order of the list. If you reshoot, keep the last photo and delete the earlier ones.
 
-## 4. 층별 촬영 방법
+## 4. How to shoot each stratum
 
-### 곡면 한국어 책 (`curved`, 휴대폰마다 6장)
+### Curved Korean book (`curved`, 6 per phone)
 
-책을 펴서 책상에 두고 한 페이지를 겨냥합니다. 페이지 네 모서리와 둘레의 책상이 조금 보이게 찍습니다. 손으로 누르지 않아 가운데 골 쪽이 휜 채로 둡니다.
+Open the book on a desk and aim at one page. Keep all four page corners and a little of the desk around them in the frame. Do not press the page flat with your hand; leave it curved toward the gutter.
 
-1. `thick_left`: 두꺼운 책의 왼쪽 페이지
-2. `thick_right`: 두꺼운 책의 오른쪽 페이지
-3. `thin`: 얇은 책이나 잡지의 한 페이지
-4. `lifted`: 페이지 끝이 들뜬 상태
-5. `oblique`: 30–45° 비스듬한 각도
-6. `dim`: 조명 하나뿐인 어두운 실내
+1. `thick_left`: left page of a thick book
+2. `thick_right`: right page of a thick book
+3. `thin`: one page of a thin book or a magazine
+4. `lifted`: page edge lifted up
+5. `oblique`: at an oblique angle of 30–45°
+6. `dim`: dark room with a single light
 
-### 8pt 이하 작은 글씨 (`small`, 휴대폰마다 3장)
+### Small print of 8 pt or less (`small`, 3 per phone)
 
-각주, 사전, 약관처럼 글씨가 작은 페이지입니다. 페이지 전체가 들어오는 가장 가까운 거리에서 두 손으로 흔들리지 않게 찍습니다.
+Pages with small print, such as footnotes, dictionaries and terms and conditions. Shoot from the closest distance that still fits the whole page, and hold the phone steady with both hands.
 
-1. `footnote`: 각주, 참고문헌, 색인
-2. `dictionary`: 사전이나 용어집
-3. `fineprint`: 약관, 설명서, 신문
+1. `footnote`: footnotes, references, index
+2. `dictionary`: dictionary or glossary
+3. `fineprint`: terms and conditions, manuals, newspapers
 
-### 표·수식 (`table`, 휴대폰마다 4장)
+### Tables and formulas (`table`, 4 per phone)
 
-표선이 긴 페이지와 수식이 많은 페이지입니다. 휜 책 페이지의 표를 한 장 꼭 넣습니다.
+Pages with long table rules and pages with many formulas. Make sure to include one table on a curved book page.
 
-1. `table_flat`: 표가 있는 낱장 문서
-2. `table_book`: 표가 있는 책 페이지(휘어짐)
-3. `formula`: 수식이 많은 교과서나 문제집
-4. `grid`: 표와 수식이 섞인 페이지, 또는 칸이 많은 양식
+1. `table_flat`: single-sheet document with a table
+2. `table_book`: book page with a table (curved)
+3. `formula`: textbook or workbook with many formulas
+4. `grid`: page that mixes tables and formulas, or a form with many boxes
 
-### 큰 회전 (`rotate`, 휴대폰마다 4장)
+### Large rotation (`rotate`, 4 per phone)
 
-휴대폰은 평소처럼 세로로 들고, 책을 돌려 놓고 찍습니다.
+Hold the phone upright as usual, and rotate the book instead.
 
-| 변형 | 방법 | 사진에서 페이지 위쪽 |
+| Variant | How | Top of the page in the photo |
 |---|---|---|
-| `r90` (p1) | 책을 시계 방향으로 90° 돌려 놓음 | 오른쪽 |
-| `r180` (p1, p2) | 책을 180° 돌려 놓음 | 아래 |
-| `r270` (p2) | 책을 반시계 방향으로 90° 돌려 놓음 | 왼쪽 |
-| `skew_pos` (p1) | 책을 시계 방향으로 약 30° 돌려 놓음 | 위, 오른쪽으로 기움 |
-| `skew_neg` (p2) | 책을 반시계 방향으로 약 30° 돌려 놓음 | 위, 왼쪽으로 기움 |
-| `exif` (p1, p2) | 휴대폰을 책상과 평행하게 눕혀 바로 위에서 찍고, 찍기 직전에 휴대폰을 90° 돌림 | 휴대폰마다 다름 |
+| `r90` (p1) | Book rotated 90° clockwise | Right |
+| `r180` (p1, p2) | Book rotated 180° | Bottom |
+| `r270` (p2) | Book rotated 90° counterclockwise | Left |
+| `skew_pos` (p1) | Book rotated about 30° clockwise | Top, tilted to the right |
+| `skew_neg` (p2) | Book rotated about 30° counterclockwise | Top, tilted to the left |
+| `exif` (p1, p2) | Hold the phone flat, parallel to the desk, and shoot straight down; turn the phone 90° just before taking the shot | Differs by phone |
 
-`exif` 사진은 휴대폰이 방향을 잘못 기록하기 쉬운 자세입니다. 갤러리에서 방향을 고치지 않고 그대로 둡니다. 라벨에서 `EXIF 방향 오류` 플래그를 켤지는 라벨 작성자가 사진을 보고 정합니다.
+In the `exif` pose the phone easily records the wrong orientation. Do not fix the orientation in the gallery; leave it as it is. Whoever labels the photo looks at it and decides whether to set the `wrong EXIF orientation` flag.
 
-### 복잡한 배경 (`clutter`, 휴대폰마다 3장)
+### Cluttered background (`clutter`, 3 per phone)
 
-- p1: `pattern`(무늬 천, 이불), `wood`(나뭇결 책상), `mess`(종이, 필기구, 컵이 많은 책상)
-- p2: `pattern`, `dark`(어두운 색 책상), `hands`(손으로 책을 잡은 채, 손가락이 페이지 가장자리에 걸침)
+- p1: `pattern` (patterned fabric, bedding), `wood` (wood-grain desk), `mess` (desk with a lot of paper, pens and cups)
+- p2: `pattern`, `dark` (dark desk), `hands` (holding the book by hand, with fingers over the page edge)
 
-### 작은 페이지 (`tiny`, p1 3장, p2 2장)
+### Small page (`tiny`, 3 on p1, 2 on p2)
 
-페이지가 사진 면적의 20% 미만이 되게 찍습니다. 페이지의 가로와 세로가 각각 사진의 절반보다 작으면 됩니다. 글자는 읽히지 않아도 됩니다.
+Shoot so that the page covers less than 20% of the photo area. The page's width and height should each be less than half of the photo's. The text does not need to be readable.
 
-- `far`: A4나 책 페이지를 멀리서
-- `card`: 명함, 영수증, 메모지
-- `corner`(p1만): 작은 페이지가 사진 구석에 치우침
+- `far`: an A4 sheet or a book page from far away
+- `card`: business card, receipt, note paper
+- `corner` (p1 only): small page pushed into a corner of the photo
 
-### 이미 평평한 페이지 (`flat`, 휴대폰마다 3장)
+### Already flat page (`flat`, 3 per phone)
 
-낱장을 책상에 평평하게 둡니다. 스캐너가 평평한 페이지를 휘게 만들지 않는지 보는 사진입니다.
+Lay a single sheet flat on the desk. These photos check that the scanner does not bend a flat page.
 
-- `topdown`: 바로 위에서 정면으로
-- `oblique`: 비스듬히(원근만 있음)
-- `form`: 표나 칸이 있는 양식 문서
+- `topdown`: straight from above, facing the page
+- `oblique`: at an angle (perspective only)
+- `form`: form document with tables or boxes
 
-### 페이지 없음, 가림, 잘림, 옆 페이지 (`hard`, p1 2장, p2 3장)
+### No page, occluded, cut off, neighboring page (`hard`, 2 on p1, 3 on p2)
 
-스캐너가 알맞게 거부하거나 경고하는지 보는 사진입니다.
+These photos check that the scanner rejects or warns when it should.
 
-- `none`(p2): 문서가 없는 사진(빈 책상, 방 안). 출처 번호는 `x00`입니다.
-- `occluded`(p1, p2): 손가락, 펜, 컵이 페이지 일부와 글자를 가림
-- `cut_off`(p1): 페이지 한 변이 사진 밖으로 나감(페이지의 10–30%)
-- `neighbor`(p2): 펼친 책의 한 페이지를 겨냥하되 옆 페이지가 1/3 이상 보임
+- `none` (p2): photo with no document (empty desk, room). The source number is `x00`.
+- `occluded` (p1, p2): a finger, pen or cup covers part of the page and the text
+- `cut_off` (p1): one side of the page runs out of the photo (10–30% of the page)
+- `neighbor` (p2): aim at one page of an open book, with 1/3 or more of the neighboring page visible
 
-### 두 쪽 펼침 (`spread`, 휴대폰마다 2장)
+### Two-page spread (`spread`, 2 per phone)
 
-펼친 책의 두 쪽이 모두 들어오게 찍습니다. 이번 마일스톤은 라벨만 만들고 평가는 다음 마일스톤에 합니다.
+Get both pages of an open book into the photo. This milestone only makes labels for them; evaluation comes in the next milestone.
 
-- `spread_top`: 바로 위에서
-- `spread_oblique`: 비스듬히
+- `spread_top`: from straight above
+- `spread_oblique`: at an angle
 
-## 5. 피할 것
+## 5. What to avoid
 
-| 피할 것 | 까닭 |
+| Avoid | Why |
 |---|---|
-| 카카오톡 같은 메신저로 사진 보내기 | 사진을 다시 압축하고 EXIF를 지웁니다 |
-| 클라우드의 저장 공간 절약(압축) 업로드 | 원본 바이트가 바뀝니다 |
-| HEIC 형식 | 키트와 스캐너가 JPEG만 읽습니다 |
-| 스크린샷, 편집, 필터, 문서 스캔 모드 | 원본이 바뀌거나 이미 보정된 사진이 됩니다 |
-| 위치 태그, 개인정보, 다른 사람 얼굴 | 비공개 자료라도 담지 않습니다 |
-| git에 사진 넣기, 공개 공유 링크 | 책 사진은 저작권이 있어 비공개로 둡니다 |
+| Sending photos through a messenger such as KakaoTalk | It recompresses the photos and strips EXIF |
+| Cloud uploads with storage saving (compression) | The original bytes change |
+| HEIC format | The kit and the scanner read only JPEG |
+| Screenshots, editing, filters, document scan mode | The original changes, or the photo is already corrected |
+| Location tags, personal information, other people's faces | Keep them out even though the material is private |
+| Putting photos in git, public share links | Book photos are under copyright, so they stay private |
 
-## 6. 파일 이름
+## 6. File names
 
-키트 안의 사진 이름은 `kr1-<폰>-<층>-<출처>-<번호>.jpg`입니다.
+Inside the kit, photos are named `kr1-<phone>-<stratum>-<source>-<number>.jpg`.
 
 ```text
 kr1-p1-curved-b03-007.jpg
-    │  │      │   └── 촬영 목록 번호 (휴대폰마다 001부터)
-    │  │      └────── 출처: b01… 책, d01… 낱장 문서, x00 문서 없음
-    │  └───────────── 층 코드 (2절의 표)
-    └──────────────── 휴대폰 p1, p2
+    │  │      │   └── shot list number (from 001 on each phone)
+    │  │      └────── source: b01… book, d01… single-sheet document, x00 no document
+    │  └───────────── stratum code (table in section 2)
+    └──────────────── phone p1, p2
 ```
 
-이름은 손으로 바꾸지 않아도 됩니다. 7절의 `ingest`가 촬영 목록을 보고 이 이름으로 복사합니다.
+You do not need to rename files by hand. `ingest` in section 7 reads the shot list and copies the photos under these names.
 
-## 7. 노트북으로 옮기기
+## 7. Moving photos to the laptop
 
-사진은 저장소 안 `outputs/krreal/v1/`에 둡니다. `outputs/`는 git이 무시하는 폴더라 사진이 커밋되지 않습니다. 키트의 명령은 git이 추적하는 폴더를 거부합니다.
+Keep the photos in `outputs/krreal/v1/` inside the repository. Git ignores `outputs/`, so the photos are never committed. The kit's commands refuse folders that git tracks.
 
 ```text
 outputs/krreal/v1/
-  incoming/p1/  incoming/p2/   휴대폰에서 옮긴 원본
-  shotlist.csv                 촬영 목록
-  photos/                      키트 이름으로 복사한 사진
+  incoming/p1/  incoming/p2/   originals transferred from the phones
+  shotlist.csv                 shot list
+  photos/                      photos copied under kit names
 ```
 
-1. 휴대폰 원본을 옮깁니다.
-   - 안드로이드: USB 케이블로 연결하고 휴대폰 알림에서 "파일 전송"을 고릅니다. 파일 관리자에서 `DCIM/Camera`의 사진을 `incoming/p1/`(또는 `p2/`)로 복사합니다.
-   - 아이폰: LocalSend(오픈소스, 아이폰·안드로이드·리눅스 지원)로 원본을 보냅니다. 받은 사진을 `incoming/p2/`(또는 `p1/`)로 옮깁니다.
-2. 확인합니다: `git check-ignore -v outputs/krreal/v1/incoming/p1/IMG_0001.jpg`가 `.gitignore:outputs/`를 보여야 합니다.
-3. `shotlist.csv`의 `file` 열에 휴대폰 파일 이름(`IMG_1234.jpg`)을, `source` 열에 출처 번호를 적습니다.
-4. 복사합니다. 원본 바이트를 그대로 복사하고 SHA-256으로 확인합니다. 이미 있는 사진을 덮어쓰지 않습니다.
+1. Transfer the originals from the phones.
+   - Android: connect a USB cable and choose "File transfer" in the phone's notification. In a file manager, copy the photos from `DCIM/Camera` to `incoming/p1/` (or `p2/`).
+   - iPhone: send the originals with LocalSend (open source, runs on iPhone, Android and Linux). Move the received photos to `incoming/p2/` (or `p1/`).
+2. Check: `git check-ignore -v outputs/krreal/v1/incoming/p1/IMG_0001.jpg` must print `.gitignore:outputs/`.
+3. In `shotlist.csv`, enter the phone's file name (`IMG_1234.jpg`) in the `file` column and the source number in the `source` column.
+4. Copy the photos. The original bytes are copied unchanged and verified with SHA-256. Photos that already exist are not overwritten.
 
    ```bash
    .venv/bin/python tools/krreal/krreal.py ingest --dry-run
    .venv/bin/python tools/krreal/krreal.py ingest
    ```
 
-5. manifest를 만들고 부족한 장수와 경고를 봅니다.
+5. Build the manifest and look at the missing counts and warnings.
 
    ```bash
    .venv/bin/python tools/krreal/krreal.py manifest
    ```
 
-   "no EXIF"가 나오면 옮기는 중에 사진이 다시 저장된 것입니다. 원본을 다시 옮깁니다. "GPS"가 나오면 위치 태그를 끄고 다시 찍습니다.
-6. `incoming/`의 원본은 지우지 않습니다. 백업은 비공개 외장 디스크에만 둡니다.
+   If "no EXIF" appears, the photo was re-saved during the transfer. Transfer the original again. If "GPS" appears, turn off location tags and reshoot.
+6. Do not delete the originals in `incoming/`. Keep backups only on a private external disk.
 
-## 8. 촬영 전 확인
+## 8. Checklist before shooting
 
-- [ ] 두 휴대폰 모두 JPEG, 위치 태그 끔, 플래시 끔, 문서 스캔 모드 끔
-- [ ] 출처 번호를 붙인 책 8권 이상, 낱장 문서 4종 이상
-- [ ] 촬영 목록(휴대폰마다 30줄)
-- [ ] 밝은 곳과 어두운 곳, 무늬 천, 나뭇결 책상, 어두운 책상
+- [ ] Both phones: JPEG, location tags off, flash off, document scan mode off
+- [ ] At least 8 books and at least 4 single-sheet documents, each with a source number
+- [ ] Shot list (30 rows per phone)
+- [ ] A bright spot and a dark spot, patterned fabric, a wood-grain desk, a dark desk

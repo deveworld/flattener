@@ -47,9 +47,9 @@ from ..contracts import FlattenerError, Status
 
 SNAP_TOLERANCE = 0.015  # relative difference to a standard ratio
 STANDARD_ASPECTS: dict[str, float] = {  # width / height of the portrait page
-    "iso": 1 / math.sqrt(2),  # 0.707: ISO A and B series, 국판, 크라운판
-    "singukpan": 152 / 225,  # 0.676: 신국판 152 x 225 mm
-    "4x6": 128 / 188,  # 0.681: 4x6판 128 x 188 mm
+    "iso": 1 / math.sqrt(2),  # 0.707: ISO A and B series, gukpan and crown book sizes
+    "singukpan": 152 / 225,  # 0.676: singukpan book size, 152 x 225 mm
+    "4x6": 128 / 188,  # 0.681: 4x6 book size, 128 x 188 mm
     "letter": 8.5 / 11,  # 0.773: US Letter
 }
 PAPER_NAMES: dict[str, str] = {

@@ -10,8 +10,8 @@ fixes the pixels for a fixed Pillow/FreeType build.
 * ``crop_syntheticdoc``: the warped page cut from the render with a margin and turned so
   its up vector (mean of the grid's column vectors, bottom row to top row) points up.
 * ``document_page``: an own page, either ``flattener.synthetic.documents`` (imported,
-  unchanged) or a composed page of procedural Hangul/Latin text, formulas, tables and
-  figures in the bundled Noto Sans KR; with ``form_prob``, ``sparse_prob`` and
+  unchanged) or a composed page of procedural Latin text, formulas, tables and figures
+  in the bundled Noto Sans KR; with ``form_prob``, ``sparse_prob`` and
   ``print_prob`` also a ruled form (``form_page``), a nearly empty page (``sparse_page``)
   or a page printed from a browser (``print_page``).
 * ``spread_page``: an open book, two composed pages side by side with a shaded gutter.
@@ -37,7 +37,8 @@ from flattener.scan.orient import SourceSampler, ViewGeometry, clockwise, quanti
 from flattener.synthetic import documents
 
 FULL_BOX = [-1.0, -1.0, 1.0, 1.0]
-# Width / height of common portrait papers (A/B series, 신국판, 4x6판, Letter) and two others.
+# Width / height of common portrait papers (A/B series, the singukpan and 4x6 book sizes,
+# Letter) and two others.
 ASPECTS = (0.707, 0.707, 0.676, 0.681, 0.773, 0.65, 0.75)
 LATIN = "etaoinshrdlcumwfgypbvkjxqz"
 # English letter frequencies (percent) in the order of LATIN.
@@ -159,17 +160,6 @@ def font(size: int, weight: int = 400) -> ImageFont.FreeTypeFont:
     return face
 
 
-def hangul_word(rng: np.random.Generator) -> str:
-    """1-4 random precomposed syllables (initial, vowel, optional final)."""
-    syllables = []
-    for _ in range(int(rng.integers(1, 5))):
-        final = 0 if rng.random() < 0.55 else int(rng.integers(1, 28))
-        syllables.append(
-            chr(0xAC00 + (int(rng.integers(19)) * 21 + int(rng.integers(21))) * 28 + final)
-        )
-    return "".join(syllables)
-
-
 def latin_word(rng: np.random.Generator) -> str:
     length = int(min(12, 1 + rng.geometric(0.28)))
     word = "".join(rng.choice(list(LATIN), size=length, p=LATIN_WEIGHTS))
@@ -182,15 +172,9 @@ def number_word(rng: np.random.Generator) -> str:
     return formats[int(rng.integers(len(formats)))]
 
 
-def words(rng: np.random.Generator, language: str):
+def words(rng: np.random.Generator):
     while True:
-        roll = rng.random()
-        if roll < 0.06:
-            word = number_word(rng)
-        elif language == "ko" or (language == "mixed" and roll < 0.6):
-            word = hangul_word(rng)
-        else:
-            word = latin_word(rng)
+        word = number_word(rng) if rng.random() < 0.06 else latin_word(rng)
         if rng.random() < 0.09:
             word += "." if rng.random() < 0.6 else ","
         yield word
@@ -236,10 +220,9 @@ def composed_page(rng: np.random.Generator, size: tuple[int, int]) -> NDArray[np
     body = font(body_size, weight)
     small = font(max(8, round(body_size * 0.8)))
     leading = body_size * rng.uniform(1.3, 1.75)
-    language = rng.choice(["ko", "en", "mixed"], p=[0.45, 0.35, 0.2])
     y = float(top)
     if rng.random() < 0.7:  # running head and rule
-        head = _fit_line(small, words(rng, language), (width - 2 * left) * rng.uniform(0.2, 0.6))
+        head = _fit_line(small, words(rng), (width - 2 * left) * rng.uniform(0.2, 0.6))
         x = left if rng.random() < 0.5 else width - left - small.getlength(head)
         draw.text((x, y), head, font=small, fill=ink)
         y += small.size * 1.6
@@ -248,7 +231,7 @@ def composed_page(rng: np.random.Generator, size: tuple[int, int]) -> NDArray[np
             y += small.size * 0.8
     if rng.random() < 0.4:  # title
         title_font = font(round(body_size * rng.uniform(1.4, 2.2)), 650)
-        title = _fit_line(title_font, words(rng, language), (width - 2 * left) * 0.8)
+        title = _fit_line(title_font, words(rng), (width - 2 * left) * 0.8)
         draw.text((left, y), title, font=title_font, fill=ink)
         y += title_font.size * 1.8
     columns = 2 if width > 640 and rng.random() < 0.35 else 1
@@ -260,7 +243,7 @@ def composed_page(rng: np.random.Generator, size: tuple[int, int]) -> NDArray[np
         while y + leading < bottom:
             roll = rng.random()
             if roll < 0.72:  # paragraph
-                source = words(rng, language)
+                source = words(rng)
                 indent = body_size * 1.5 if rng.random() < 0.5 else 0.0
                 for line_index in range(int(rng.integers(2, 9))):
                     if y + leading >= bottom:
@@ -293,7 +276,7 @@ def composed_page(rng: np.random.Generator, size: tuple[int, int]) -> NDArray[np
                     body_size,
                 )
                 y += block_h + leading * 0.4
-                caption = _fit_line(small, words(rng, language), column_width * 0.9)
+                caption = _fit_line(small, words(rng), column_width * 0.9)
                 draw.text((x0, y), caption, font=small, fill=ink)
                 y += leading * 1.4
     if rng.random() < 0.85:  # page number
@@ -321,7 +304,7 @@ def _foot(rng, draw, size: tuple[int, int], face, ink: int, left: int, bottom: i
     count = f"{int(rng.integers(1, 20))} / {int(rng.integers(20, 40))}"
     draw.text(((width - face.getlength(count)) / 2, bottom - face.size), count, font=face, fill=ink)
     if rng.random() < 0.8:
-        name = _fit_line(face, words(rng, "ko"), width * 0.25)
+        name = _fit_line(face, words(rng), width * 0.25)
         draw.text(
             (width - left - face.getlength(name), bottom - face.size), name, font=face, fill=ink
         )
@@ -329,7 +312,7 @@ def _foot(rng, draw, size: tuple[int, int], face, ink: int, left: int, bottom: i
 
 def form_page(rng: np.random.Generator, size: tuple[int, int]) -> NDArray[np.uint8]:
     """A ruled form such as a school or office record: a date and a title at the top, a
-    table down the page with short labels in a narrow left column and dense Hangul text in
+    table down the page with short labels in a narrow left column and dense text in
     the wide cells, and a page count and an office name at the foot."""
     height, width = size
     image, draw, ink = _paper(rng, size)
@@ -348,12 +331,10 @@ def form_page(rng: np.random.Generator, size: tuple[int, int]) -> NDArray[np.uin
     date = f"{year}.{month:02d}.{day:02d}"
     draw.text((right - small.getlength(date), top), date, font=small, fill=ink)
     if rng.random() < 0.6:
-        draw.text(
-            (left, top), _fit_line(small, words(rng, "ko"), width * 0.4), font=small, fill=ink
-        )
+        draw.text((left, top), _fit_line(small, words(rng), width * 0.4), font=small, fill=ink)
     y = top + small.size * 2.2
     title_font = font(round(body.size * rng.uniform(1.3, 1.8)), 600)
-    title = _fit_line(title_font, words(rng, "ko"), width * 0.45)
+    title = _fit_line(title_font, words(rng), width * 0.45)
     draw.text(((width - title_font.getlength(title)) / 2, y), title, font=title_font, fill=ink)
     y += title_font.size * 2.0
     table_bottom = bottom - small.size * 3
@@ -364,11 +345,11 @@ def form_page(rng: np.random.Generator, size: tuple[int, int]) -> NDArray[np.uin
     row_top = y
     while row_top < table_bottom - 2 * leading:
         row_bottom = min(table_bottom, row_top + int(rng.integers(2, 14)) * leading + leading)
-        label = _fit_line(body, words(rng, "ko"), label_width - 6)
+        label = _fit_line(body, words(rng), label_width - 6)
         draw.text((left + 4, row_top + leading * 0.4), label, font=body, fill=ink)
         line_y = row_top + leading * 0.4
         while line_y + leading < row_bottom:
-            text = _fit_line(body, words(rng, "ko"), right - left - label_width - 10)
+            text = _fit_line(body, words(rng), right - left - label_width - 10)
             draw.text((left + label_width + 5, line_y), text, font=body, fill=ink)
             line_y += leading
         if row_bottom < table_bottom:
@@ -388,7 +369,7 @@ def sparse_page(rng: np.random.Generator, size: tuple[int, int]) -> NDArray[np.u
     bottom = height - round(height * rng.uniform(0.05, 0.09))
     small = font(max(8, round(height * rng.uniform(0.009, 0.014))))
     if rng.random() < 0.8:
-        head = _fit_line(small, words(rng, "ko"), width * rng.uniform(0.15, 0.4))
+        head = _fit_line(small, words(rng), width * rng.uniform(0.15, 0.4))
         x = left if rng.random() < 0.5 else width - left - small.getlength(head)
         draw.text((x, top), head, font=small, fill=ink)
         if rng.random() < 0.3:
@@ -396,10 +377,10 @@ def sparse_page(rng: np.random.Generator, size: tuple[int, int]) -> NDArray[np.u
             draw.line((left, y, width - left, y), fill=ink, width=max(1, small.size // 10))
     big = font(round(height * rng.uniform(0.018, 0.04)), 500)
     phrase = " ".join(
-        hangul_word(rng)[: int(rng.integers(2, 5))] for _ in range(int(rng.integers(1, 3)))
+        latin_word(rng)[: int(rng.integers(2, 5))] for _ in range(int(rng.integers(1, 3)))
     )
     if rng.random() < 0.6:
-        phrase = " ".join(phrase.replace(" ", ""))  # spaced syllables, as in a closing note
+        phrase = " ".join(phrase.replace(" ", ""))  # spaced letters, as in a closing note
     y = height * rng.uniform(0.2, 0.7)
     draw.text(((width - big.getlength(phrase)) / 2, y), phrase, font=big, fill=ink)
     if rng.random() < 0.85:
@@ -410,7 +391,7 @@ def sparse_page(rng: np.random.Generator, size: tuple[int, int]) -> NDArray[np.u
 def print_page(rng: np.random.Generator, size: tuple[int, int]) -> NDArray[np.uint8]:
     """A page printed from a browser: a head line with the print date, time or title and
     the page count ("6 / 18") at the top, a foot line with an address and a date at the
-    bottom, and a body of dense Hangul paragraphs (often inside a ruled box), a short
+    bottom, and a body of dense paragraphs (often inside a ruled box), a short
     closing phrase on blank paper, or a ruled form."""
     height, width = size
     image, draw, ink = _paper(rng, size)
@@ -427,11 +408,11 @@ def print_page(rng: np.random.Generator, size: tuple[int, int]) -> NDArray[np.ui
     date = f"{year}.{month:02d}.{day:02d}"
     count = f"{int(rng.integers(1, 30))} / {int(rng.integers(30, 60))}"
     stamp = f"{date} {int(rng.integers(0, 24)):02d}:{int(rng.integers(0, 60)):02d}"
-    head_left = stamp if rng.random() < 0.5 else _fit_line(small, words(rng, "ko"), width * 0.35)
-    head_right = count if rng.random() < 0.7 else _fit_line(small, words(rng, "ko"), width * 0.3)
+    head_left = stamp if rng.random() < 0.5 else _fit_line(small, words(rng), width * 0.35)
+    head_right = count if rng.random() < 0.7 else _fit_line(small, words(rng), width * 0.3)
     draw.text((left, top), head_left, font=small, fill=ink)
     draw.text((right - small.getlength(head_right), top), head_right, font=small, fill=ink)
-    address = "https://" + _fit_line(small, words(rng, "en"), width * 0.4).replace(" ", "/")
+    address = "https://" + _fit_line(small, words(rng), width * 0.4).replace(" ", "/")
     foot_left, foot_right = (address, date) if rng.random() < 0.6 else (date, count)
     draw.text((left, bottom - small.size), foot_left, font=small, fill=ink)
     draw.text((right - small.getlength(foot_right), bottom - small.size), foot_right, font=small,
@@ -441,7 +422,7 @@ def print_page(rng: np.random.Generator, size: tuple[int, int]) -> NDArray[np.ui
     roll = rng.random()
     if roll < 0.2:  # a short closing phrase on blank paper
         big = font(round(height * rng.uniform(0.02, 0.04)), 500)
-        phrase = " ".join("".join(hangul_word(rng)[:2] for _ in range(2)))
+        phrase = " ".join("".join(latin_word(rng)[:2] for _ in range(2)))
         y = body_top + (body_bottom - body_top) * rng.uniform(0.2, 0.7)
         draw.text(((width - big.getlength(phrase)) / 2, y), phrase, font=big, fill=ink)
         return np.array(image)
@@ -459,7 +440,7 @@ def print_page(rng: np.random.Generator, size: tuple[int, int]) -> NDArray[np.ui
         x0, x1 = left + body.size, right - body.size
     y = body_top + body.size * 0.8
     while y + leading < body_bottom - body.size * 0.5:
-        source = words(rng, "ko")
+        source = words(rng)
         indent = body.size * 1.2 if rng.random() < 0.3 else 0.0
         for line_index in range(int(rng.integers(3, 12))):
             if y + leading >= body_bottom - body.size * 0.5:

@@ -156,7 +156,13 @@ def test_results_round_trip_through_json_with_their_outcome():
     assert again.image is None and again.valid_mask is None
     assert data["qa"]["orientation_margin"] is None
     assert data["metadata"]["validation"]["checked_cells"] == 1320
-    assert data["guidance"][0]["message_ko"] == "위쪽이 잘렸어요. 조금 물러나 찍어 주세요"
+    assert data["guidance"][0]["message_en"] == (
+        "The top edge is cut off. Step back a little and take the photo again"
+    )
+    # Records written while guidance also carried message_ko still load.
+    older = json.loads(text)
+    older["guidance"][0]["message_ko"] = "localized text"
+    assert rec.ScanResult.from_dict(older).to_dict() == data
     assert data["reasons"][0] == {
         "code": "source_downscaled",
         "severity": "warning",

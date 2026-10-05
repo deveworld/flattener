@@ -23,8 +23,12 @@ trunk across the five views and pools them by a text-saliency softmax (0.44M par
 | Own Korean/English/mixed pages: `synthetic/documents.py` pages and composed pages of procedural text, formulas, tables and figures in Noto Sans KR | `documents` | 40,000 / 2,000 |
 | Blank, figure-only and ruled paper (uniform target) | `text_free` | 3,000 / 300 |
 
+The released models were trained while the own pages drew Korean, English and mixed
+text. Since 2026-10-05 the generators draw English text only, so a rebuild gives the
+same kinds of pages with English text.
+
 v3 (`data-orient-release-v3.json`, 40,000 / 1,000 SyntheticDoc pages of each kind from the compact copy) adds:
-- Own pages that are 20% ruled forms, 10% nearly empty pages and 20% browser printouts (`print_page`: a print date or title with the page count at the top, an address and date at the foot, and a body of boxed Hangul, a form or a closing phrase).
+- Own pages that are 20% ruled forms, 10% nearly empty pages and 20% browser printouts (`print_page`: a print date or title with the page count at the top, an address and date at the foot, and a body of boxed text, a form or a closing phrase).
 - 12,000 / 600 two-page spreads (`spread`: two composed pages with a shaded gutter).
 
 On KR-Real it fixes the two printouts v1 turned upside down. Spreads keep the orientation v1 gave them.

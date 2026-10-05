@@ -393,4 +393,5 @@ def test_own_pages_can_be_forms_prints_nearly_empty_or_spreads():
     height, width = spread.shape
     assert layout == "spread" and width > height and max(height, width) <= 768
     gutter = spread[:, width // 2 - 2 : width // 2 + 2].mean()
-    assert gutter < spread[:, width // 4].mean()  # the fold is shaded
+    columns = spread[:, width // 8 : 3 * width // 8].mean(axis=0)
+    assert gutter < np.median(columns)  # the fold is shaded

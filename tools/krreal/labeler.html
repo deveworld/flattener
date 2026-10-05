@@ -1,10 +1,10 @@
 <!doctype html>
-<html lang="ko">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="icon" href="data:,">
-<title>KR-Real 라벨러</title>
+<title>KR-Real labeler</title>
 <style>
 :root {
   --bg: #15171b; --panel: #1e2127; --raise: #282c34; --line: #343944; --text: #e7e9ec;
@@ -102,98 +102,98 @@ kbd { background: var(--raise); border: 1px solid var(--line); border-radius: 3p
 </head>
 <body>
 <header>
-  <h1>KR-Real 라벨러</h1>
-  <label class="file" title="krreal 데이터 폴더(예: outputs/krreal/v1)를 고릅니다. photos, drafts, labels, manifest.json을 함께 읽습니다.">
-    <input id="pickFolder" type="file" webkitdirectory directory multiple><span>폴더 열기</span></label>
-  <label class="file" title="사진(.jpg)과 라벨·초안·manifest(.json) 파일을 고릅니다.">
-    <input id="pickFiles" type="file" multiple accept=".jpg,.jpeg,.json"><span>파일 열기</span></label>
-  <button id="connect" title="labels 폴더에 바로 저장합니다(Chrome, Edge). 연결하지 않으면 내려받기로 저장합니다.">라벨 폴더 연결</button>
-  <span id="saveTarget" class="muted">저장: 내려받기</span>
+  <h1>KR-Real labeler</h1>
+  <label class="file" title="Choose the krreal data folder (for example outputs/krreal/v1). Reads photos, drafts, labels and manifest.json together.">
+    <input id="pickFolder" type="file" webkitdirectory directory multiple><span>Open folder</span></label>
+  <label class="file" title="Choose photos (.jpg) and label, draft or manifest files (.json).">
+    <input id="pickFiles" type="file" multiple accept=".jpg,.jpeg,.json"><span>Open files</span></label>
+  <button id="connect" title="Save straight into the labels folder (Chrome, Edge). Without it, saving downloads the file.">Connect labels folder</button>
+  <span id="saveTarget" class="muted">Save: download</span>
   <span class="grow"></span>
-  <label>이름 <input id="labeler" type="text" size="10" placeholder="라벨 작성자"></label>
-  <button id="helpBtn" title="단축키와 라벨 규칙 (?)">도움말</button>
+  <label>Name <input id="labeler" type="text" size="10" placeholder="labeler"></label>
+  <button id="helpBtn" title="Shortcuts and labeling rules (?)">Help</button>
 </header>
 <main>
   <aside id="list">
-    <div id="listhead"><span class="count" id="count">사진 없음</span>
-      <label class="muted"><input id="onlyTodo" type="checkbox"> 남은 것만</label></div>
+    <div id="listhead"><span class="count" id="count">No photos</span>
+      <label class="muted"><input id="onlyTodo" type="checkbox"> Unfinished only</label></div>
     <div id="items"></div>
   </aside>
   <section id="stage">
     <canvas id="view"></canvas>
     <canvas id="loupe"></canvas>
     <div id="tools">
-      <button data-tool="move" title="선택·이동 (V)">이동 V</button>
-      <button data-tool="quad" title="모서리 4점: TL, TR, BR, BL 순서 (Q)">모서리 Q</button>
-      <button data-tool="curve" title="휜 가장자리 점 찍기, Enter로 끝 (E)">휜 가장자리 E</button>
-      <button data-tool="text" title="글자 영역 다각형, Enter로 닫기 (T)">글자 영역 T</button>
-      <button data-tool="line" title="기준선, Enter로 끝 (L)">기준선 L</button>
-      <button id="fitBtn" title="화면에 맞춤 (F)">맞춤 F</button>
-      <button id="oneBtn" title="100% 확대 (1)">100% 1</button>
+      <button data-tool="move" title="Select and move (V)">Move V</button>
+      <button data-tool="quad" title="4 corners in the order TL, TR, BR, BL (Q)">Corners Q</button>
+      <button data-tool="curve" title="Points along a curved edge, Enter to finish (E)">Curved edge E</button>
+      <button data-tool="text" title="Text region polygon, Enter to close (T)">Text region T</button>
+      <button data-tool="line" title="Reference line, Enter to finish (L)">Line L</button>
+      <button id="fitBtn" title="Fit to screen (F)">Fit F</button>
+      <button id="oneBtn" title="Zoom to 100% (1)">100% 1</button>
     </div>
     <div id="banner"></div>
     <div id="hint"></div>
-    <div id="statusbar">사진을 열어 주세요.</div>
-    <div id="empty"><div><p><b>폴더 열기</b>로 outputs/krreal/v1 폴더를 고르세요.</p>
-      <p class="muted">사진은 이 브라우저 안에서만 읽습니다. 어디에도 올리지 않습니다.</p></div></div>
+    <div id="statusbar">Open a photo.</div>
+    <div id="empty"><div><p>Use <b>Open folder</b> to choose the outputs/krreal/v1 folder.</p>
+      <p class="muted">Photos are read only inside this browser and are never uploaded.</p></div></div>
   </section>
   <aside id="panel">
-    <section class="box"><h2>사진</h2><div class="kv" id="photoInfo"></div></section>
-    <section class="box"><h2>쪽</h2>
+    <section class="box"><h2>Photo</h2><div class="kv" id="photoInfo"></div></section>
+    <section class="box"><h2>Pages</h2>
       <div class="row" id="pageTabs"></div>
       <div class="row">
-        <button id="pageUp" title="이 쪽을 읽기 순서에서 앞으로">순서 앞으로</button>
-        <button id="pageDel" title="이 쪽의 라벨을 모두 지움">쪽 삭제</button>
+        <button id="pageUp" title="Move this page earlier in reading order">Move earlier</button>
+        <button id="pageDel" title="Delete all labels of this page">Delete page</button>
       </div>
       <div id="orient" class="muted"></div>
       <div class="row">
-        <button id="rotOrder" title="모서리 이름을 한 칸씩 돌립니다 (O)">모서리 순서 돌리기 O</button>
-        <button id="mirror" title="TL↔TR, BL↔BR (M)">좌우 바꾸기 M</button>
+        <button id="rotOrder" title="Shift the corner names by one (O)">Rotate corners O</button>
+        <button id="mirror" title="TL↔TR, BL↔BR (M)">Swap left/right M</button>
       </div>
     </section>
-    <section class="box"><h2>휜 가장자리 (각 7점 이상, 모서리 포함)</h2><div id="curves"></div></section>
-    <section class="box"><h2>글자 영역 <span class="muted">(머리말, 쪽번호 포함)</span></h2>
-      <div class="row">새 영역 종류 <select id="textKind"></select></div><div id="texts"></div></section>
-    <section class="box"><h2>기준선 <span class="muted">(3–5개)</span></h2>
-      <div class="row">새 선 종류 <select id="lineKind"></select></div><div id="lines"></div></section>
-    <section class="box"><h2>플래그</h2><div class="flags" id="flags"></div>
-      <h2 style="margin-top:8px">사진 밖으로 잘린 쪽 <span class="muted">(사진 기준)</span></h2>
+    <section class="box"><h2>Curved edges (7+ points each, corners included)</h2><div id="curves"></div></section>
+    <section class="box"><h2>Text regions <span class="muted">(include running heads and page numbers)</span></h2>
+      <div class="row">New region kind <select id="textKind"></select></div><div id="texts"></div></section>
+    <section class="box"><h2>Reference lines <span class="muted">(3–5)</span></h2>
+      <div class="row">New line kind <select id="lineKind"></select></div><div id="lines"></div></section>
+    <section class="box"><h2>Flags</h2><div class="flags" id="flags"></div>
+      <h2 style="margin-top:8px">Cut-off sides <span class="muted">(sides of the photo)</span></h2>
       <div class="flags" id="sides"></div></section>
-    <section class="box"><h2>메모</h2><textarea id="notes" maxlength="2000"></textarea></section>
-    <section class="box"><h2>검사</h2><ul class="issues" id="issues"></ul></section>
+    <section class="box"><h2>Notes</h2><textarea id="notes" maxlength="2000"></textarea></section>
+    <section class="box"><h2>Checks</h2><ul class="issues" id="issues"></ul></section>
     <section class="box"><div class="row">
-      <button id="saveBtn" class="primary" title="Ctrl+S">저장</button>
-      <button id="checkBtn" title="다른 사람이 검수를 마쳤을 때">검수 완료로 저장</button>
-      <button id="revertBtn" title="자동 저장본을 버리고 파일 버전으로">파일 버전으로</button></div>
+      <button id="saveBtn" class="primary" title="Ctrl+S">Save</button>
+      <button id="checkBtn" title="When another person has finished the check">Save as checked</button>
+      <button id="revertBtn" title="Discard the autosave and go back to the file version">Revert to file</button></div>
       <div class="muted" id="reviewInfo"></div></section>
   </aside>
 </main>
 <dialog id="help">
-  <h2>KR-Real 라벨러 도움말</h2>
+  <h2>KR-Real labeler help</h2>
   <table>
-    <tr><td>V / Q / E / T / L</td><td>이동, 모서리 4점, 휜 가장자리, 글자 영역, 기준선</td></tr>
-    <tr><td>Enter · 두 번 클릭</td><td>그리던 모양을 끝냄</td></tr>
-    <tr><td>Esc · Backspace</td><td>그리기 취소 · 마지막 점 지우기(그리는 중), 선택한 모양 지우기</td></tr>
-    <tr><td>K</td><td>새로 그릴(또는 선택한) 글자 영역·기준선의 종류 바꾸기</td></tr>
-    <tr><td>O · M</td><td>모서리 이름 한 칸 돌리기 · 좌우 바꾸기</td></tr>
-    <tr><td>드래그</td><td>점 옮기기. 빈 곳 드래그, 오른쪽 버튼, 스페이스+드래그는 화면 이동</td></tr>
-    <tr><td>Shift+클릭 · Alt+클릭</td><td>선 위에 점 넣기 · 점 빼기 (이동 도구)</td></tr>
-    <tr><td>휠 · F · 1</td><td>확대/축소 · 화면 맞춤 · 100%</td></tr>
-    <tr><td>[ · ]</td><td>이전 · 다음 사진</td></tr>
-    <tr><td>Ctrl+Z · Ctrl+Shift+Z</td><td>되돌리기 · 다시 하기</td></tr>
-    <tr><td>Ctrl+S</td><td>저장</td></tr>
+    <tr><td>V / Q / E / T / L</td><td>Move, 4 corners, curved edge, text region, reference line</td></tr>
+    <tr><td>Enter · double-click</td><td>Finish the shape being drawn</td></tr>
+    <tr><td>Esc · Backspace</td><td>Cancel drawing · remove the last point (while drawing) or delete the selected shape</td></tr>
+    <tr><td>K</td><td>Change the kind of the next (or selected) text region or reference line</td></tr>
+    <tr><td>O · M</td><td>Shift the corner names by one · swap left and right</td></tr>
+    <tr><td>Drag</td><td>Move a point. Dragging empty space, the right button or Space+drag pans the view</td></tr>
+    <tr><td>Shift+click · Alt+click</td><td>Add a point on a line · remove a point (Move tool)</td></tr>
+    <tr><td>Wheel · F · 1</td><td>Zoom · fit to screen · 100%</td></tr>
+    <tr><td>[ · ]</td><td>Previous · next photo</td></tr>
+    <tr><td>Ctrl+Z · Ctrl+Shift+Z</td><td>Undo · redo</td></tr>
+    <tr><td>Ctrl+S</td><td>Save</td></tr>
   </table>
-  <h2 style="margin-top:12px">라벨 규칙</h2>
+  <h2 style="margin-top:12px">Labeling rules</h2>
   <ul>
-    <li>모서리 4점은 <b>페이지 기준</b> 읽기 방향으로 TL(왼쪽 위), TR, BR, BL 순서입니다. 사진에서 페이지가 돌아가 있어도 페이지의 위쪽이 기준입니다. 노란 굵은 선이 페이지 위쪽입니다.</li>
-    <li>좌표는 EXIF를 적용한 사진의 픽셀입니다. 모서리가 사진 밖에 있으면 사진 밖 빈 곳에 찍습니다.</li>
-    <li>휜 가장자리에는 모서리 사이에 점을 5개 이상 찍고 Enter를 누릅니다(모서리 포함 7점 이상). 곧은 가장자리는 두지 않습니다.</li>
-    <li>글자 영역은 머리말과 쪽번호까지 글자를 모두 감쌉니다. 표와 수식은 따로 종류를 골라 더할 수 있습니다.</li>
-    <li>기준선은 평평한 페이지에서 곧은 선 3–5개입니다: 글줄 기준선, 표선, 세로선. 휜 선은 점을 촘촘히 찍습니다.</li>
-    <li>두 쪽 펼침은 쪽마다 모서리를 찍습니다(+ 새 쪽). 읽기 순서는 왼쪽 쪽이 1입니다.</li>
-    <li>사진 한 장에 1.5–2분이 목표입니다. 걸린 시간은 자동으로 기록됩니다.</li>
+    <li>The 4 corners go TL (top left), TR, BR, BL in the reading direction <b>of the page</b>. When the page is rotated in the photo, the top of the page still sets the order. The thick yellow line marks the page top.</li>
+    <li>Coordinates are pixels of the photo with EXIF orientation applied. A corner outside the photo goes in the empty area outside the photo.</li>
+    <li>For a curved edge, place 5 or more points between the corners and press Enter (7 or more points with the corners). Leave straight edges out.</li>
+    <li>A text region encloses all the text, running heads and page numbers included. Tables and formulas can be added as regions of their own kind.</li>
+    <li>Reference lines are 3–5 lines that are straight on the flat page: text baselines, table rules, vertical lines. Place points closely along a curved line.</li>
+    <li>For a two-page spread, place the corners of each page (+ New page). The left page is 1 in reading order.</li>
+    <li>Aim for 1.5–2 minutes per photo. The time spent is recorded automatically.</li>
   </ul>
-  <form method="dialog"><button>닫기</button></form>
+  <form method="dialog"><button>Close</button></form>
 </dialog>
 
 <script type="application/json" id="kit">
@@ -203,9 +203,9 @@ kbd { background: var(--raise); border: 1px solid var(--line); border-radius: 3p
   "name_pattern": "^kr1-(p[1-9])-([a-z]+)-([bdx][0-9]{2})-([0-9]{3})\\.jpg$",
   "name_example": "kr1-p1-curved-b03-007.jpg",
   "sources": {
-    "b": "책",
-    "d": "낱장 문서(인쇄물, 영수증, 양식 등)",
-    "x": "문서 없음 (x00만 씀)"
+    "b": "book",
+    "d": "single-sheet document (printout, receipt, form, etc.)",
+    "x": "no document (x00 only)"
   },
   "phones": ["p1", "p2"],
   "dev_fraction": 0.4,
@@ -214,16 +214,16 @@ kbd { background: var(--raise); border: 1px solid var(--line); border-radius: 3p
   "strata": [
     {
       "code": "curved",
-      "name": "곡면 한국어 책",
+      "name": "curved Korean book",
       "target_v1": 60,
       "transcribe": 8,
       "variants": {
-        "thick_left": "두꺼운 책(300쪽 이상)의 왼쪽 페이지. 가운데 골 쪽이 크게 휜 상태",
-        "thick_right": "두꺼운 책의 오른쪽 페이지",
-        "thin": "얇은 책이나 잡지의 한 페이지",
-        "lifted": "페이지 끝이 들뜬 상태. 손으로 누르지 않음",
-        "oblique": "30–45° 비스듬한 각도에서 촬영",
-        "dim": "조명 하나뿐인 어두운 실내. 그림자가 조금 생기는 곳"
+        "thick_left": "left page of a thick book (300+ pages), strongly curved toward the gutter",
+        "thick_right": "right page of a thick book",
+        "thin": "a page of a thin book or magazine",
+        "lifted": "page edge lifted; not held down by hand",
+        "oblique": "shot at an oblique angle of 30–45°",
+        "dim": "dim room with a single light, where some shadow falls"
       },
       "shots": {
         "p1": ["thick_left", "thick_right", "thin", "lifted", "oblique", "dim"],
@@ -232,13 +232,13 @@ kbd { background: var(--raise); border: 1px solid var(--line); border-radius: 3p
     },
     {
       "code": "small",
-      "name": "8pt 이하 작은 글씨",
+      "name": "small print (8 pt or less)",
       "target_v1": 30,
       "transcribe": 4,
       "variants": {
-        "footnote": "각주, 참고문헌, 색인처럼 글씨가 작은 책 페이지",
-        "dictionary": "사전이나 용어집 페이지",
-        "fineprint": "약관, 설명서, 신문처럼 작은 글씨가 빽빽한 인쇄물"
+        "footnote": "book page with small print, such as footnotes, references or an index",
+        "dictionary": "dictionary or glossary page",
+        "fineprint": "print dense with small text, such as terms and conditions, a manual or a newspaper"
       },
       "shots": {
         "p1": ["footnote", "dictionary", "fineprint"],
@@ -247,14 +247,14 @@ kbd { background: var(--raise); border: 1px solid var(--line); border-radius: 3p
     },
     {
       "code": "table",
-      "name": "표·수식",
+      "name": "tables and formulas",
       "target_v1": 40,
       "transcribe": 4,
       "variants": {
-        "table_flat": "표가 있는 낱장 문서(평평함)",
-        "table_book": "표가 있는 책 페이지(휘어짐)",
-        "formula": "수식이 많은 교과서나 문제집 페이지",
-        "grid": "표와 수식이 섞인 페이지, 또는 칸이 많은 양식"
+        "table_flat": "single-sheet document with a table (flat)",
+        "table_book": "book page with a table (curved)",
+        "formula": "textbook or workbook page with many formulas",
+        "grid": "page mixing tables and formulas, or a form with many boxes"
       },
       "shots": {
         "p1": ["table_flat", "table_book", "formula", "grid"],
@@ -263,16 +263,16 @@ kbd { background: var(--raise); border: 1px solid var(--line); border-radius: 3p
     },
     {
       "code": "rotate",
-      "name": "큰 회전(90/180/270, ±30°, EXIF 오류)",
+      "name": "large rotation (90/180/270, ±30°, wrong EXIF)",
       "target_v1": 40,
       "transcribe": 3,
       "variants": {
-        "r90": "사진에서 페이지 위쪽이 오른쪽을 향함",
-        "r180": "사진에서 페이지가 거꾸로 보임(위쪽이 사진 아래)",
-        "r270": "사진에서 페이지 위쪽이 왼쪽을 향함",
-        "skew_pos": "페이지를 시계 방향으로 약 30° 돌려 놓고 촬영",
-        "skew_neg": "페이지를 반시계 방향으로 약 30° 돌려 놓고 촬영",
-        "exif": "휴대폰을 책상과 평행하게 눕혀 바로 위에서 촬영(EXIF 방향이 틀리기 쉬움)"
+        "r90": "page top points right in the photo",
+        "r180": "page is upside down in the photo (its top at the photo bottom)",
+        "r270": "page top points left in the photo",
+        "skew_pos": "page turned about 30° clockwise, then shot",
+        "skew_neg": "page turned about 30° counter-clockwise, then shot",
+        "exif": "phone held flat, parallel to the desk, shooting straight down (EXIF orientation is often wrong)"
       },
       "shots": {
         "p1": ["r90", "r180", "skew_pos", "exif"],
@@ -281,15 +281,15 @@ kbd { background: var(--raise); border: 1px solid var(--line); border-radius: 3p
     },
     {
       "code": "clutter",
-      "name": "복잡한 배경",
+      "name": "cluttered background",
       "target_v1": 30,
       "transcribe": 2,
       "variants": {
-        "pattern": "무늬가 있는 천, 이불, 식탁보 위",
-        "wood": "나뭇결이 뚜렷한 책상 위",
-        "dark": "어두운 색 책상 위",
-        "mess": "다른 종이, 필기구, 컵 같은 물건이 많은 책상 위",
-        "hands": "손으로 책을 잡은 채 촬영. 손가락이 페이지 가장자리에 걸침"
+        "pattern": "on patterned fabric, a blanket or a tablecloth",
+        "wood": "on a desk with strong wood grain",
+        "dark": "on a dark desk",
+        "mess": "on a desk with many objects, such as other papers, pens and cups",
+        "hands": "book held in the hand while shooting; fingers over the page edge"
       },
       "shots": {
         "p1": ["pattern", "wood", "mess"],
@@ -298,13 +298,13 @@ kbd { background: var(--raise); border: 1px solid var(--line); border-radius: 3p
     },
     {
       "code": "tiny",
-      "name": "작은 페이지(사진 면적의 20% 미만)",
+      "name": "small page (under 20% of the photo area)",
       "target_v1": 25,
       "transcribe": 0,
       "variants": {
-        "far": "A4나 책 페이지를 멀리서 촬영. 페이지가 사진 면적의 20% 미만",
-        "card": "명함, 영수증, 메모지처럼 작은 문서",
-        "corner": "작은 페이지가 사진 구석에 치우침"
+        "far": "A4 sheet or book page shot from far away; the page covers under 20% of the photo",
+        "card": "small document, such as a business card, receipt or note",
+        "corner": "small page off in a corner of the photo"
       },
       "shots": {
         "p1": ["far", "card", "corner"],
@@ -313,13 +313,13 @@ kbd { background: var(--raise); border: 1px solid var(--line); border-radius: 3p
     },
     {
       "code": "flat",
-      "name": "이미 평평한 페이지",
+      "name": "already flat page",
       "target_v1": 30,
       "transcribe": 3,
       "variants": {
-        "topdown": "평평한 낱장(A4 인쇄물 등)을 바로 위에서",
-        "oblique": "평평한 낱장을 비스듬히. 원근만 있음",
-        "form": "표나 칸이 있는 평평한 양식 문서"
+        "topdown": "flat single sheet (A4 printout, etc.) from straight above",
+        "oblique": "flat single sheet at an angle; perspective only",
+        "form": "flat form with tables or boxes"
       },
       "shots": {
         "p1": ["topdown", "oblique", "form"],
@@ -328,14 +328,14 @@ kbd { background: var(--raise); border: 1px solid var(--line); border-radius: 3p
     },
     {
       "code": "hard",
-      "name": "페이지 없음, 가림, 잘림, 옆 페이지",
+      "name": "no page, occluded, cut off, neighboring page",
       "target_v1": 25,
       "transcribe": 0,
       "variants": {
-        "none": "페이지가 없는 사진(빈 책상, 방 안)",
-        "occluded": "손가락이나 물건이 페이지 일부를 가림",
-        "cut_off": "페이지 한쪽이 사진 밖으로 잘림",
-        "neighbor": "펼친 책에서 한 페이지만 겨냥했지만 옆 페이지가 크게 보임"
+        "none": "photo without a page (empty desk, room)",
+        "occluded": "fingers or objects cover part of the page",
+        "cut_off": "one side of the page is cut off by the photo frame",
+        "neighbor": "aimed at one page of an open book, but the neighboring page shows a lot"
       },
       "shots": {
         "p1": ["occluded", "cut_off"],
@@ -344,12 +344,12 @@ kbd { background: var(--raise); border: 1px solid var(--line); border-radius: 3p
     },
     {
       "code": "spread",
-      "name": "두 쪽 펼침(라벨만)",
+      "name": "two-page spread (labels only)",
       "target_v1": 20,
       "transcribe": 0,
       "variants": {
-        "spread_top": "펼친 책의 두 쪽 전체를 위에서",
-        "spread_oblique": "펼친 책의 두 쪽 전체를 비스듬히"
+        "spread_top": "both pages of an open book, from above",
+        "spread_oblique": "both pages of an open book, at an angle"
       },
       "shots": {
         "p1": ["spread_top", "spread_oblique"],
@@ -358,29 +358,29 @@ kbd { background: var(--raise); border: 1px solid var(--line); border-radius: 3p
     }
   ],
   "flags": {
-    "occluded": "가림(손가락, 물건)",
-    "cut_off": "잘림(사진 밖)",
-    "neighbor_page": "옆 페이지 보임",
-    "vertical_text": "세로쓰기",
-    "no_page": "페이지 없음",
-    "two_page": "두 쪽 펼침",
-    "exif_wrong": "EXIF 방향 오류",
-    "glare": "빛 반사",
-    "shadow": "강한 그림자",
-    "blur": "흐림, 흔들림"
+    "occluded": "occluded (fingers, objects)",
+    "cut_off": "cut off (outside the photo)",
+    "neighbor_page": "neighboring page visible",
+    "vertical_text": "vertical text",
+    "no_page": "no page",
+    "two_page": "two-page spread",
+    "exif_wrong": "wrong EXIF orientation",
+    "glare": "glare",
+    "shadow": "strong shadow",
+    "blur": "blur or camera shake"
   },
   "sides": ["top", "right", "bottom", "left"],
   "text_kinds": {
-    "text": "글자 영역",
-    "table": "표",
-    "formula": "수식"
+    "text": "text region",
+    "table": "table",
+    "formula": "formula"
   },
   "reference_kinds": {
-    "baseline": "글줄 기준선",
-    "table_rule": "표선",
-    "vertical_line": "세로선"
+    "baseline": "text baseline",
+    "table_rule": "table rule",
+    "vertical_line": "vertical line"
   },
-  "transcript_markers": ["[[수식]]", "[[그림]]", "[[?]]"]
+  "transcript_markers": ["[[formula]]", "[[figure]]", "[[?]]"]
 }
 </script>
 
@@ -449,7 +449,7 @@ function sha256Fallback(data) {
 function parseJpegInfo(buffer) {
   const v = new DataView(buffer);
   const info = { orientation: 1, rawSize: null, make: null, model: null, software: null, datetime: null };
-  if (v.byteLength < 4 || v.getUint16(0) !== 0xffd8) throw new Error("JPEG 파일이 아닙니다");
+  if (v.byteLength < 4 || v.getUint16(0) !== 0xffd8) throw new Error("Not a JPEG file");
   let offset = 2;
   let exifRead = false;
   while (offset + 4 <= v.byteLength) {
@@ -570,25 +570,25 @@ function quarterOf(angle) {
 function quadProblems(quad) {
   const problems = [];
   const edges = [0, 1, 2, 3].map((i) => distance(quad[i], quad[(i + 1) % 4]));
-  if (Math.min(...edges) < MIN_EDGE_PX) problems.push(`변 하나가 ${MIN_EDGE_PX}px보다 짧습니다`);
+  if (Math.min(...edges) < MIN_EDGE_PX) problems.push(`an edge is shorter than ${MIN_EDGE_PX} px`);
   const area = signedArea(quad);
-  if (area <= 0) problems.push("모서리가 반시계 방향입니다. TL, TR, BR, BL 순서로 찍거나 좌우 바꾸기(M)를 누르세요");
+  if (area <= 0) problems.push("corners go counter-clockwise; place them as TL, TR, BR, BL or press Swap left/right (M)");
   const turns = [0, 1, 2, 3].map((i) => cross(quad[i], quad[(i + 1) % 4], quad[(i + 2) % 4]));
-  if (area > 0 && !turns.every((t) => t > 0)) problems.push("사각형이 볼록하지 않습니다");
+  if (area > 0 && !turns.every((t) => t > 0)) problems.push("the quad is not convex");
   return problems;
 }
 
 function curveProblems(curve, start, end) {
   const problems = [];
-  if (distance(curve[0], start) > CORNER_TOLERANCE_PX) problems.push("첫 점이 시작 모서리가 아닙니다");
-  if (distance(curve[curve.length - 1], end) > CORNER_TOLERANCE_PX) problems.push("끝 점이 끝 모서리가 아닙니다");
+  if (distance(curve[0], start) > CORNER_TOLERANCE_PX) problems.push("the first point is not the start corner");
+  if (distance(curve[curve.length - 1], end) > CORNER_TOLERANCE_PX) problems.push("the last point is not the end corner");
   const chord = [end[0] - start[0], end[1] - start[1]];
   const length = Math.hypot(chord[0], chord[1]);
-  if (length < MIN_EDGE_PX) return problems.concat(["모서리가 너무 가깝습니다"]);
+  if (length < MIN_EDGE_PX) return problems.concat(["the corners are too close"]);
   const steps = curve.map((p) => ((p[0] - start[0]) * chord[0] + (p[1] - start[1]) * chord[1]) / length);
-  if (steps.some((s, i) => i > 0 && s <= steps[i - 1])) problems.push("점이 모서리에서 모서리로 차례대로 나아가지 않습니다");
+  if (steps.some((s, i) => i > 0 && s <= steps[i - 1])) problems.push("points do not advance in order from corner to corner");
   const offsets = curve.map((p) => Math.abs(cross(start, end, p)) / length);
-  if (Math.max(...offsets) > 0.5 * length) problems.push("점 하나가 가장자리에서 너무 멉니다");
+  if (Math.max(...offsets) > 0.5 * length) problems.push("a point is too far from the edge");
   return problems;
 }
 
@@ -700,70 +700,70 @@ function validateLabel(label, kit) {
   const photo = label.photo || {};
   const capture = label.capture || {};
   const match = new RegExp(kit.name_pattern).exec(photo.file || "");
-  if (!match) errors.push(`파일 이름이 규칙(${kit.name_example})과 다릅니다`);
+  if (!match) errors.push(`File name does not follow the rule (${kit.name_example})`);
   else {
-    if (!kit.strata.some((s) => s.code === match[2])) errors.push(`층 코드 ${match[2]}가 kit.json에 없습니다`);
+    if (!kit.strata.some((s) => s.code === match[2])) errors.push(`Stratum code ${match[2]} is not in kit.json`);
     if (capture.phone_id !== match[1] || capture.stratum !== match[2] ||
         capture.source_id !== match[3] || capture.seq !== Number(match[4])) {
-      errors.push("촬영 정보(capture)가 파일 이름과 다릅니다");
+      errors.push("Capture fields differ from the file name");
     }
   }
   const pages = label.pages || [];
-  if (label.page_count !== pages.length) errors.push(`page_count가 쪽 수(${pages.length})와 다릅니다`);
+  if (label.page_count !== pages.length) errors.push(`page_count differs from the number of pages (${pages.length})`);
   const flags = new Set(label.flags || []);
   if (complete) {
-    if (flags.has("no_page") !== (label.page_count === 0)) errors.push("no_page 플래그와 쪽 수가 맞지 않습니다");
-    if (flags.has("two_page") !== (label.page_count === 2)) errors.push("two_page 플래그와 쪽 수가 맞지 않습니다");
-    if (flags.has("cut_off") !== ((label.cut_off_sides || []).length > 0)) errors.push("잘림 플래그와 잘린 쪽이 맞지 않습니다");
-    if (capture.stratum === "spread" && label.page_count !== 2) warnings.push("두 쪽 펼침 사진은 보통 2쪽입니다");
-    if (capture.stratum !== "hard" && label.page_count === 0) warnings.push("쪽이 없습니다. 페이지 없음 사진이 맞나요?");
+    if (flags.has("no_page") !== (label.page_count === 0)) errors.push("The no_page flag does not match the page count");
+    if (flags.has("two_page") !== (label.page_count === 2)) errors.push("The two_page flag does not match the page count");
+    if (flags.has("cut_off") !== ((label.cut_off_sides || []).length > 0)) errors.push("The cut-off flag does not match the cut-off sides");
+    if (capture.stratum === "spread" && label.page_count !== 2) warnings.push("A two-page spread photo usually has 2 pages");
+    if (capture.stratum !== "hard" && label.page_count === 0) warnings.push("No pages. Is this a photo without a page?");
   }
   const [width, height] = photo.size || [0, 0];
   pages.forEach((page, index) => {
-    const where = `${index + 1}쪽`;
+    const where = `Page ${index + 1}`;
     const quad = page.quad;
-    if (!quad || quad.length !== 4) { errors.push(`${where}: 모서리 4점이 필요합니다`); return; }
+    if (!quad || quad.length !== 4) { errors.push(`${where}: needs 4 corners`); return; }
     let points = quad.slice();
     Object.values(page.curved_edges || {}).forEach((curve) => { points = points.concat(curve); });
     (page.text_polygons || []).forEach((polygon) => { points = points.concat(polygon.points); });
     (page.reference_lines || []).forEach((line) => { points = points.concat(line.points); });
     const outside = points.some(([x, y]) => x < -OUTSIDE_MARGIN * width || x > (1 + OUTSIDE_MARGIN) * width ||
       y < -OUTSIDE_MARGIN * height || y > (1 + OUTSIDE_MARGIN) * height);
-    if (outside) errors.push(`${where}: 사진에서 너무 먼 점이 있습니다`);
-    quadProblems(quad).forEach((p) => errors.push(`${where} 모서리: ${p}`));
+    if (outside) errors.push(`${where}: a point lies too far outside the photo`);
+    quadProblems(quad).forEach((p) => errors.push(`${where} corners: ${p}`));
     for (const [side, curve] of Object.entries(page.curved_edges || {})) {
       const [i, j] = EDGE_CORNERS[side];
-      if (curve.length < 7) errors.push(`${where} ${SIDE_NAMES[side]} 가장자리: 점이 ${curve.length}개입니다(7개 이상)`);
-      curveProblems(curve, quad[i], quad[j]).forEach((p) => errors.push(`${where} ${SIDE_NAMES[side]} 가장자리: ${p}`));
+      if (curve.length < 7) errors.push(`${where} ${SIDE_NAMES[side]} edge: ${curve.length} points (7 or more needed)`);
+      curveProblems(curve, quad[i], quad[j]).forEach((p) => errors.push(`${where} ${SIDE_NAMES[side]} edge: ${p}`));
     }
     (page.text_polygons || []).forEach((polygon, k) => {
-      if (polygon.points.length < 3 || Math.abs(signedArea(polygon.points)) < 1) errors.push(`${where} 글자 영역 ${k + 1}: 넓이가 없습니다`);
+      if (polygon.points.length < 3 || Math.abs(signedArea(polygon.points)) < 1) errors.push(`${where} text region ${k + 1}: has no area`);
     });
     (page.reference_lines || []).forEach((line, k) => {
       let length = 0;
       for (let i = 1; i < line.points.length; i++) length += distance(line.points[i - 1], line.points[i]);
-      if (line.points.length < 2 || length < 2 * MIN_EDGE_PX) errors.push(`${where} 기준선 ${k + 1}: 너무 짧습니다`);
+      if (line.points.length < 2 || length < 2 * MIN_EDGE_PX) errors.push(`${where} reference line ${k + 1}: too short`);
     });
-    if ((page.reference_lines || []).length > 5) errors.push(`${where}: 기준선은 5개까지입니다`);
+    if ((page.reference_lines || []).length > 5) errors.push(`${where}: at most 5 reference lines`);
     if (complete && capture.stratum !== "spread") {
-      if (!(page.text_polygons || []).length) errors.push(`${where}: 글자 영역이 필요합니다`);
+      if (!(page.text_polygons || []).length) errors.push(`${where}: needs a text region`);
       const count = (page.reference_lines || []).length;
-      if (count < 3 || count > 5) errors.push(`${where}: 기준선이 ${count}개입니다(3–5개)`);
+      if (count < 3 || count > 5) errors.push(`${where}: ${count} reference lines (3–5 needed)`);
     }
   });
   if (complete) {
-    if (!(review.labeler || "").trim()) errors.push("라벨 작성자 이름이 필요합니다");
-    if (!review.labeled_at) errors.push("라벨 시각이 필요합니다");
+    if (!(review.labeler || "").trim()) errors.push("Needs the labeler's name");
+    if (!review.labeled_at) errors.push("Needs the labeling time");
   }
   if (review.status === "checked") {
     const checker = (review.checker || "").trim();
-    if (!checker || !review.checked_at) errors.push("검수자 이름과 시각이 필요합니다");
-    else if (checker === (review.labeler || "").trim()) errors.push("검수자는 라벨 작성자와 다른 사람이어야 합니다");
+    if (!checker || !review.checked_at) errors.push("Needs the checker's name and time");
+    else if (checker === (review.labeler || "").trim()) errors.push("The checker must be someone other than the labeler");
   }
   return { errors, warnings };
 }
 
-const SIDE_NAMES = { top: "위", right: "오른쪽", bottom: "아래", left: "왼쪽" };
+const SIDE_NAMES = { top: "top", right: "right", bottom: "bottom", left: "left" };
 </script>
 
 <script id="ui">
@@ -777,8 +777,8 @@ const COLORS = {
   baseline: "#ff6b3d", table_rule: "#ffe14d", vertical_line: "#7aa2ff",
 };
 const CORNER_TAGS = ["TL", "TR", "BR", "BL"];
-const CORNER_NAMES = ["TL (페이지 왼쪽 위)", "TR (페이지 오른쪽 위)", "BR (페이지 오른쪽 아래)", "BL (페이지 왼쪽 아래)"];
-const TOOL_NAMES = { move: "이동", quad: "모서리 4점", curve: "휜 가장자리", text: "글자 영역", line: "기준선" };
+const CORNER_NAMES = ["TL (page top left)", "TR (page top right)", "BR (page bottom right)", "BL (page bottom left)"];
+const TOOL_NAMES = { move: "move", quad: "4 corners", curve: "curved edge", text: "text region", line: "reference line" };
 const $ = (id) => document.getElementById(id);
 
 const S = {
@@ -861,12 +861,12 @@ async function addFiles(fileList) {
 
 async function connectFolder() {
   if (!window.showDirectoryPicker) {
-    alert("이 브라우저는 폴더에 바로 저장할 수 없습니다. 저장하면 내려받기 폴더에 JSON이 생깁니다. 그 파일을 labels 폴더로 옮겨 주세요.");
+    alert("This browser cannot save straight into a folder. Saving puts the JSON in your downloads folder; move it into the labels folder.");
     return;
   }
   try {
     const dir = await window.showDirectoryPicker({ id: "krreal-labels", mode: "readwrite" });
-    if (dir.name !== "labels" && !confirm(`고른 폴더 이름이 '${dir.name}'입니다. labels 폴더가 맞나요?`)) return;
+    if (dir.name !== "labels" && !confirm(`The chosen folder is named '${dir.name}'. Is this the labels folder?`)) return;
     S.dir = dir;
     const files = [];
     for await (const handle of dir.values()) {
@@ -878,10 +878,10 @@ async function connectFolder() {
         if (data && data.schema === "krreal-label-1" && data.photo) entryFor(data.photo.file).label = data;
       } catch (e) { /* not a label */ }
     }
-    $("saveTarget").textContent = `저장: ${dir.name}/ 폴더`;
+    $("saveTarget").textContent = `Save: ${dir.name}/ folder`;
     renderList();
   } catch (e) {
-    if (e.name !== "AbortError") alert(`폴더를 열 수 없습니다: ${e.message}`);
+    if (e.name !== "AbortError") alert(`Cannot open the folder: ${e.message}`);
   }
 }
 
@@ -890,7 +890,7 @@ function loadImage(file) {
     const url = URL.createObjectURL(file);
     const img = new Image();
     img.onload = () => resolve(img);
-    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("사진을 열 수 없습니다")); };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("Cannot open the photo")); };
     img.src = url;
   });
 }
@@ -917,7 +917,7 @@ function orientedDrawable(img, orientation) {
 async function openPhoto(index) {
   const entry = S.photos[index];
   if (!entry) return;
-  if (!entry.fileObj) { hint("이 라벨의 사진 파일이 열려 있지 않습니다"); return; }
+  if (!entry.fileObj) { hint("The photo file of this label is not open"); return; }
   tick();
   S.notes = [];
   const buffer = await entry.fileObj.arrayBuffer();
@@ -944,7 +944,7 @@ async function openPhoto(index) {
   };
   const expected = swap ? [raw[1], raw[0]] : raw;
   if (expected[0] !== S.size[0] || expected[1] !== S.size[1]) {
-    S.notes.push({ err: true, text: `EXIF 방향 처리 결과(${S.size.join("×")})가 예상(${expected.join("×")})과 다릅니다. 다른 브라우저로 열어 주세요.` });
+    S.notes.push({ err: true, text: `The size after applying EXIF orientation (${S.size.join("×")}) differs from the expected size (${expected.join("×")}). Open the page in another browser.` });
   }
   const base = entry.label || entry.draft;
   let label = base ? JSON.parse(JSON.stringify(base)) : newLabel(computed, KIT);
@@ -956,17 +956,17 @@ async function openPhoto(index) {
       if (parsed.label && parsed.label.photo && parsed.label.photo.sha256 === sha) {
         label = parsed.label;
         S.fromAutosave = true;
-        S.notes.push({ text: `파일로 저장하지 않은 작업(${parsed.at})을 불러왔습니다.` });
+        S.notes.push({ text: `Restored work not yet saved to a file (${parsed.at}).` });
       }
     } catch (e) { storageDel(autoKey(entry.file)); }
   }
   if (label.photo.sha256 && label.photo.sha256 !== sha) {
-    S.notes.push({ err: true, text: "라벨에 적힌 sha256이 이 사진과 다릅니다. 다른 사진의 라벨일 수 있습니다." });
+    S.notes.push({ err: true, text: "The sha256 in the label does not match this photo. The label may belong to another photo." });
   }
   const recorded = S.manifest.get(entry.file);
-  if (recorded && recorded.sha256 !== sha) S.notes.push({ err: true, text: "manifest의 sha256이 이 사진과 다릅니다." });
+  if (recorded && recorded.sha256 !== sha) S.notes.push({ err: true, text: "The sha256 in the manifest does not match this photo." });
   if (label.photo.size && (label.photo.size[0] !== S.size[0] || label.photo.size[1] !== S.size[1])) {
-    S.notes.push({ err: true, text: `기록된 크기(${label.photo.size.join("×")})가 화면의 사진(${S.size.join("×")})과 다릅니다.` });
+    S.notes.push({ err: true, text: `The recorded size (${label.photo.size.join("×")}) differs from the photo on screen (${S.size.join("×")}).` });
   }
   label.photo = {
     file: entry.file, sha256: sha, bytes: computed.bytes, raw_size: raw, size: S.size.slice(),
@@ -1159,7 +1159,7 @@ function drawPage(ctx, T, page, current, handleScale) {
   } else {
     ctx.fillStyle = "#fff";
     ctx.font = "bold 14px system-ui";
-    ctx.fillText(`${page.reading_order}쪽`, cx - 12, cy);
+    ctx.fillText(`Page ${page.reading_order}`, cx - 22, cy);
   }
   ctx.globalAlpha = 1;
 }
@@ -1246,11 +1246,11 @@ function updateHint() {
   let text = "";
   const current = page();
   if (!S.label) text = "";
-  else if (S.tool === "quad") text = `다음 점: ${CORNER_NAMES[S.pending.length]} — 페이지 기준 읽기 방향`;
-  else if (S.tool !== "move" && !current) text = "먼저 모서리 4점을 찍으세요 (Q)";
-  else if (S.tool === "curve") text = `휜 가장자리를 따라 점을 찍고 Enter (모서리 사이 5점 이상) · ${S.pending.length}점`;
-  else if (S.tool === "text") text = `${KIT.text_kinds[$("textKind").value]}: 꼭짓점을 찍고 Enter (종류 바꾸기 K) · ${S.pending.length}점`;
-  else if (S.tool === "line") text = `${KIT.reference_kinds[$("lineKind").value]}: 점을 찍고 Enter (종류 바꾸기 K) · ${S.pending.length}점`;
+  else if (S.tool === "quad") text = `Next point: ${CORNER_NAMES[S.pending.length]} — in the reading direction of the page`;
+  else if (S.tool !== "move" && !current) text = "Place the 4 corners first (Q)";
+  else if (S.tool === "curve") text = `Place points along the curved edge, then Enter (5 or more between the corners) · ${S.pending.length} points`;
+  else if (S.tool === "text") text = `${KIT.text_kinds[$("textKind").value]}: place the vertices, then Enter (K changes the kind) · ${S.pending.length} points`;
+  else if (S.tool === "line") text = `${KIT.reference_kinds[$("lineKind").value]}: place the points, then Enter (K changes the kind) · ${S.pending.length} points`;
   $("hint").textContent = text;
 }
 
@@ -1292,18 +1292,18 @@ function finishPending() {
   if (!current || !pts.length) return;
   if (S.tool === "curve") {
     const built = buildCurve(pts, current.quad);
-    if (built.points.length < 7) { hint(`모서리 사이 점이 ${built.points.length - 2}개입니다. 5개 이상 찍어 주세요.`); return; }
+    if (built.points.length < 7) { hint(`${built.points.length - 2} points between the corners. Place 5 or more.`); return; }
     snapshot();
     current.curved_edges[built.side] = built.points;
     S.sel = { type: "curve", key: built.side };
   } else if (S.tool === "text") {
-    if (pts.length < 3) { hint("글자 영역은 꼭짓점이 3개 이상입니다"); return; }
+    if (pts.length < 3) { hint("A text region needs 3 or more vertices"); return; }
     snapshot();
     current.text_polygons.push({ kind: $("textKind").value, points: pts });
     S.sel = { type: "text", key: current.text_polygons.length - 1 };
   } else if (S.tool === "line") {
-    if (pts.length < 2) { hint("기준선은 점이 2개 이상입니다"); return; }
-    if (current.reference_lines.length >= 5) { hint("기준선은 5개까지입니다"); return; }
+    if (pts.length < 2) { hint("A reference line needs 2 or more points"); return; }
+    if (current.reference_lines.length >= 5) { hint("At most 5 reference lines"); return; }
     snapshot();
     current.reference_lines.push({ kind: $("lineKind").value, points: pts });
     S.sel = { type: "line", key: current.reference_lines.length - 1 };
@@ -1322,7 +1322,7 @@ function deleteSelection() {
   else if (type === "text") current.text_polygons.splice(key, 1);
   else if (type === "line") current.reference_lines.splice(key, 1);
   else if (type === "quad") {
-    if (!confirm("이 쪽의 모서리와 모든 라벨을 지울까요?")) { S.undo.pop(); return; }
+    if (!confirm("Delete the corners and all labels of this page?")) { S.undo.pop(); return; }
     S.label.pages.splice(S.pageIdx, 1);
     S.pageIdx = Math.max(0, S.pageIdx - 1);
   }
@@ -1426,7 +1426,7 @@ function editVertex(hit, insertAt, point) {
   if (point) pts.splice(insertAt, 0, round2p(point));
   else {
     const minimum = { curve: 3, text: 4, line: 3 }[hit.type];
-    if (pts.length < minimum) { S.undo.pop(); hint("점을 더 뺄 수 없습니다"); return; }
+    if (pts.length < minimum) { S.undo.pop(); hint("Cannot remove more points"); return; }
     pts.splice(hit.index, 1);
   }
   S.sel = { type: hit.type, key: hit.key };
@@ -1506,7 +1506,7 @@ function updateStatus() {
   if (!S.label) return;
   const where = S.cursor ? `x ${S.cursor[0].toFixed(1)} y ${S.cursor[1].toFixed(1)} · ` : "";
   $("statusbar").textContent = `${S.label.photo.file} · ${Math.round(S.view.s * 100)}% · ${where}` +
-    `도구: ${TOOL_NAMES[S.tool]} · ${S.size.join("×")}px`;
+    `tool: ${TOOL_NAMES[S.tool]} · ${S.size.join("×")}px`;
 }
 
 function endPointer() {
@@ -1587,19 +1587,19 @@ async function save(checked) {
   if (!S.label) return;
   tick();
   const name = $("labeler").value.trim();
-  if (!name) { alert("위쪽 '이름' 칸에 이름을 적어 주세요."); $("labeler").focus(); return; }
+  if (!name) { alert("Enter your name in the 'Name' box at the top."); $("labeler").focus(); return; }
   const label = JSON.parse(JSON.stringify(S.label));
   normalizeLabel(label, KIT);
   const review = label.review;
   const now = localIso();
   if (checked) {
-    if (review.status === "draft" || !review.labeler) { alert("먼저 라벨을 저장해야 검수할 수 있습니다."); return; }
-    if (review.labeler.trim() === name) { alert("검수는 라벨을 만든 사람과 다른 사람이 합니다."); return; }
+    if (review.status === "draft" || !review.labeler) { alert("Save the label first; a check comes after that."); return; }
+    if (review.labeler.trim() === name) { alert("The check must be done by someone other than the labeler."); return; }
     review.status = "checked";
     review.checker = name;
     review.checked_at = now;
   } else {
-    if (!S.dirty && review.status !== "draft") { hint("바뀐 것이 없습니다"); return; }
+    if (!S.dirty && review.status !== "draft") { hint("Nothing changed"); return; }
     review.status = "labeled";
     review.labeler = name;
     review.labeled_at = now;
@@ -1610,8 +1610,8 @@ async function save(checked) {
   review.tool = TOOL_VERSION;
   const result = validateLabel(label, KIT);
   if (result.errors.length) {
-    if (checked) { alert(`검사 오류 ${result.errors.length}개가 있어 검수 완료로 저장할 수 없습니다.`); return; }
-    if (!confirm(`검사 오류 ${result.errors.length}개가 있습니다. 초안(draft)으로 저장할까요?\n\n${result.errors.slice(0, 5).join("\n")}`)) return;
+    if (checked) { alert(`${result.errors.length} check errors; cannot save as checked.`); return; }
+    if (!confirm(`${result.errors.length} check errors. Save as a draft?\n\n${result.errors.slice(0, 5).join("\n")}`)) return;
     review.status = "draft";
     review.labeled_at = null;
   }
@@ -1627,7 +1627,7 @@ async function save(checked) {
       download(fileName, text);
     }
   } catch (e) {
-    alert(`저장하지 못했습니다: ${e.message}`);
+    alert(`Could not save: ${e.message}`);
     return;
   }
   S.label = label;
@@ -1638,12 +1638,12 @@ async function save(checked) {
   entry.dirty = false;
   storageDel(autoKey(label.photo.file));
   renderAll();
-  hint(S.dir ? `${fileName} 저장` : `${fileName} 내려받음 — labels 폴더로 옮겨 주세요`);
+  hint(S.dir ? `Saved ${fileName}` : `Downloaded ${fileName} — move it into the labels folder`);
 }
 
 function revert() {
   const entry = S.photos[S.index];
-  if (!entry || !confirm("자동 저장본을 버리고 파일 버전으로 돌아갈까요?")) return;
+  if (!entry || !confirm("Discard the autosave and go back to the file version?")) return;
   storageDel(autoKey(entry.file));
   entry.dirty = false;
   openPhoto(S.index);
@@ -1681,7 +1681,7 @@ function renderList() {
     row.className = "item" + (index === S.index ? " cur" : "") + (entry.dirty ? " dirty" : "") + (entry.fileObj ? "" : " nophoto");
     const dot = document.createElement("span");
     dot.className = `dot ${status}`;
-    dot.title = { none: "라벨 없음", draft: "초안", labeled: "라벨 완료", checked: "검수 완료" }[status] || status;
+    dot.title = { none: "No label", draft: "Draft", labeled: "Labeled", checked: "Checked" }[status] || status;
     const text = document.createElement("div");
     const name = document.createElement("div");
     name.className = "name";
@@ -1690,14 +1690,14 @@ function renderList() {
     sub.className = "sub";
     const match = new RegExp(KIT.name_pattern).exec(entry.file);
     const stratum = match && KIT.strata.find((s) => s.code === match[2]);
-    sub.textContent = (stratum ? stratum.name : "이름 규칙 밖") + (entry.fileObj ? "" : " · 사진 없음");
+    sub.textContent = (stratum ? stratum.name : "name outside the rule") + (entry.fileObj ? "" : " · no photo");
     text.append(name, sub);
     row.append(dot, text);
     row.addEventListener("click", () => openPhoto(index));
     items.appendChild(row);
   });
   const photos = S.photos.filter((e) => e.fileObj).length;
-  $("count").textContent = photos ? `사진 ${photos}장 · 완료 ${done}` : "사진 없음";
+  $("count").textContent = photos ? `${photos} photos · ${done} done` : "No photos";
 }
 
 function kv(parent, pairs) {
@@ -1751,25 +1751,25 @@ function renderPanel() {
   const stratum = KIT.strata.find((s) => s.code === capture.stratum);
   const recorded = S.manifest.get(label.photo.file);
   kv($("photoInfo"), [
-    ["파일", label.photo.file],
-    ["층", stratum ? `${stratum.name} (${stratum.code})` : "-"],
-    ["변형", recorded && recorded.variant ? `${recorded.variant}: ${(stratum && stratum.variants[recorded.variant]) || ""}` : "-"],
-    ["출처", `${capture.source_id} · ${capture.phone_id} · ${capture.seq}번`],
-    ["기기", [capture.device.make, capture.device.model].filter(Boolean).join(" ") || "-"],
-    ["크기", `${label.photo.size.join("×")} (EXIF ${label.photo.exif_orientation}${S.autoOrient ? ", 브라우저 적용" : ", 직접 적용"})`],
+    ["File", label.photo.file],
+    ["Stratum", stratum ? `${stratum.name} (${stratum.code})` : "-"],
+    ["Variant", recorded && recorded.variant ? `${recorded.variant}: ${(stratum && stratum.variants[recorded.variant]) || ""}` : "-"],
+    ["Source", `${capture.source_id} · ${capture.phone_id} · shot ${capture.seq}`],
+    ["Device", [capture.device.make, capture.device.model].filter(Boolean).join(" ") || "-"],
+    ["Size", `${label.photo.size.join("×")} (EXIF ${label.photo.exif_orientation}${S.autoOrient ? ", applied by the browser" : ", applied here"})`],
     ["sha256", `${label.photo.sha256.slice(0, 16)}…`],
-    ["초안", label.draft ? `${label.draft.provider} (${label.draft.fields.join(", ") || "기하 없음"})` : "없음"],
+    ["Draft", label.draft ? `${label.draft.provider} (${label.draft.fields.join(", ") || "no geometry"})` : "none"],
   ]);
 
   const tabs = $("pageTabs");
   tabs.textContent = "";
   label.pages.forEach((p, i) => {
-    const b = button(`${i + 1}쪽`, () => { S.pageIdx = i; S.sel = null; S.pending = []; renderAll(); });
+    const b = button(`Page ${i + 1}`, () => { S.pageIdx = i; S.sel = null; S.pending = []; renderAll(); });
     if (i === S.pageIdx) b.classList.add("on");
     tabs.appendChild(b);
   });
-  const add = button("+ 새 쪽", () => { S.pageIdx = label.pages.length; S.sel = null; setTool("quad"); renderAll(); },
-    "두 쪽 펼침에서 다음 쪽의 모서리를 찍습니다");
+  const add = button("+ New page", () => { S.pageIdx = label.pages.length; S.sel = null; setTool("quad"); renderAll(); },
+    "Place the corners of the next page of a two-page spread");
   if (S.pageIdx === label.pages.length) add.classList.add("on");
   tabs.appendChild(add);
   $("pageUp").disabled = !current || S.pageIdx === 0;
@@ -1777,8 +1777,8 @@ function renderPanel() {
   $("rotOrder").disabled = !current;
   $("mirror").disabled = !current;
   $("orient").textContent = current
-    ? `페이지 위쪽 방향: ${["위 (바로 섬)", "오른쪽 (시계 방향 90°)", "아래 (180°)", "왼쪽 (반시계 방향 90°)"][current.page_quarter]} · 각도 ${current.page_rotation_deg}°`
-    : (S.pageIdx === label.pages.length && label.pages.length ? "새 쪽: 모서리 4점을 찍으세요 (Q)" : "모서리 4점을 찍으세요 (Q)");
+    ? `Page top points: ${["up (upright)", "right (90° clockwise)", "down (180°)", "left (90° counter-clockwise)"][current.page_quarter]} · angle ${current.page_rotation_deg}°`
+    : (S.pageIdx === label.pages.length && label.pages.length ? "New page: place the 4 corners (Q)" : "Place the 4 corners (Q)");
 
   const curves = $("curves");
   curves.textContent = "";
@@ -1788,10 +1788,10 @@ function renderPanel() {
       const row = document.createElement("div");
       row.className = "shape" + (S.sel && S.sel.type === "curve" && S.sel.key === side ? " sel" : "");
       const name = document.createElement("span");
-      name.textContent = `${SIDE_NAMES[side]}${side === "top" ? " (노란 선)" : ""}: ${curve ? `${curve.length}점` : "곧음"}`;
-      const pick = button("선택", () => { S.sel = { type: "curve", key: side }; renderAll(); });
+      name.textContent = `${SIDE_NAMES[side]}${side === "top" ? " (yellow line)" : ""}: ${curve ? `${curve.length} points` : "straight"}`;
+      const pick = button("Select", () => { S.sel = { type: "curve", key: side }; renderAll(); });
       pick.disabled = !curve;
-      const del = button("삭제", () => { S.sel = { type: "curve", key: side }; deleteSelection(); });
+      const del = button("Delete", () => { S.sel = { type: "curve", key: side }; deleteSelection(); });
       del.disabled = !curve;
       row.append(name, pick, del);
       curves.appendChild(row);
@@ -1805,7 +1805,7 @@ function renderPanel() {
   for (const [flag, text] of Object.entries(KIT.flags)) {
     const derived = DERIVED_FLAGS.includes(flag);
     const row = document.createElement("label");
-    if (derived) { row.className = "derived"; row.title = "쪽 수와 잘린 쪽에서 자동으로 정해집니다"; }
+    if (derived) { row.className = "derived"; row.title = "Set automatically from the page count and the cut-off sides"; }
     const box = document.createElement("input");
     box.type = "checkbox";
     box.checked = label.flags.includes(flag);
@@ -1815,7 +1815,7 @@ function renderPanel() {
       label.flags = box.checked ? label.flags.concat([flag]) : label.flags.filter((f) => f !== flag);
       changed();
     });
-    row.append(box, document.createTextNode(text + (derived ? " (자동)" : "")));
+    row.append(box, document.createTextNode(text + (derived ? " (auto)" : "")));
     flags.appendChild(row);
   }
   const sides = $("sides");
@@ -1830,7 +1830,7 @@ function renderPanel() {
       label.cut_off_sides = box.checked ? label.cut_off_sides.concat([side]) : label.cut_off_sides.filter((s) => s !== side);
       changed();
     });
-    row.append(box, document.createTextNode(`사진 ${SIDE_NAMES[side]}`));
+    row.append(box, document.createTextNode(`photo ${SIDE_NAMES[side]}`));
     sides.appendChild(row);
   }
   if (document.activeElement !== $("notes")) $("notes").value = label.notes;
@@ -1847,11 +1847,11 @@ function renderPanel() {
   const item = (cls, text) => { const li = document.createElement("li"); li.className = cls; li.textContent = text; issues.appendChild(li); };
   result.errors.forEach((e) => item("err", e));
   result.warnings.forEach((w) => item("warn", w));
-  if (!result.errors.length && !result.warnings.length) item("ok", "저장할 수 있습니다");
+  if (!result.errors.length && !result.warnings.length) item("ok", "Ready to save");
   const review = label.review;
-  const statusText = { draft: "초안", labeled: "라벨 완료", checked: "검수 완료" }[review.status];
-  $("reviewInfo").textContent = `상태: ${statusText}${S.dirty ? " · 저장 안 됨" : ""} · 작성 ${review.labeler || "-"}` +
-    `${review.checker ? ` · 검수 ${review.checker}` : ""} · ${Math.round(S.timer.spent)}초`;
+  const statusText = { draft: "draft", labeled: "labeled", checked: "checked" }[review.status];
+  $("reviewInfo").textContent = `Status: ${statusText}${S.dirty ? " · not saved" : ""} · labeler ${review.labeler || "-"}` +
+    `${review.checker ? ` · checker ${review.checker}` : ""} · ${Math.round(S.timer.spent)} s`;
   $("revertBtn").disabled = !S.fromAutosave && !S.dirty;
 }
 
@@ -1861,15 +1861,15 @@ function shapeList(parent, shapes, type, kinds) {
     const row = document.createElement("div");
     row.className = "shape" + (S.sel && S.sel.type === type && S.sel.key === k ? " sel" : "");
     const kind = select(kinds, shape.kind, (value) => { snapshot(); shape.kind = value; changed(); });
-    const pick = button(`${shape.points.length}점`, () => { S.sel = { type, key: k }; renderAll(); }, "선택");
-    const del = button("삭제", () => { S.sel = { type, key: k }; deleteSelection(); });
+    const pick = button(`${shape.points.length} points`, () => { S.sel = { type, key: k }; renderAll(); }, "Select");
+    const del = button("Delete", () => { S.sel = { type, key: k }; deleteSelection(); });
     row.append(kind, pick, del);
     parent.appendChild(row);
   });
   if (!shapes.length) {
     const empty = document.createElement("div");
     empty.className = "muted";
-    empty.textContent = "없음";
+    empty.textContent = "None";
     parent.appendChild(empty);
   }
 }

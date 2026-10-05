@@ -200,7 +200,8 @@ def test_every_candidate_failing_returns_the_original_with_the_reason():
     assert result.reasons[-1].detail["candidate"] == "default"
     assert result.image.tobytes() == image.tobytes() and result.plan is None
     guidance = [item.to_dict() for item in result.guidance]
-    assert guidance[-1]["message_ko"] == "다시 찍거나 영역을 지정해 주세요"
+    assert guidance[-1]["message_en"] == "Take the photo again or set the page region"
+    assert "message_ko" not in guidance[-1]
     assert [name for name, _, _ in _chain(result)] == [
         "default",
         "no_deskew",
@@ -277,7 +278,7 @@ def test_gate_rejections_return_the_original_with_guidance():
     assert result.reasons[0].severity == "warning" and len(result.candidates["regions"]) == 2
     assert result.plan.region["localization"] == "outline"
     assert _error_px(result.plan.grid, left) < 1.0
-    assert result.guidance[0].message_ko == "페이지를 골라 주세요"
+    assert result.guidance[0].message_en == "Choose the page"
     # Pieces the outline does not hold end the scan with the candidate boxes.
     scanner, _ = _scanner()
     scanner.gate.pages = [Page((280, 60), (60, 90)), Page((280, 180), (60, 90))]
@@ -319,8 +320,8 @@ def test_a_zoomed_piece_of_the_page_returns_the_original(monkeypatch):
     assert result.outcome == Outcome.ORIGINAL_RETURNED and result.status == Status.MODEL_ERROR
     assert result.reason_code == "page_cut_off"
     assert _chain(result) == [("default", None, ["page_cut_off"])]  # the other candidates wait
-    assert result.guidance[-1].message_ko == (
-        "페이지 끝이 사진 밖으로 잘렸어요. 조금 떨어져서 페이지 전체가 보이게 다시 찍어 주세요"
+    assert result.guidance[-1].message_en == (
+        "The page runs out of the photo. Step back and take it again with the whole page in view"
     )
     # A cut-off page has no corners to flatten, so the perspective fallback is skipped too.
     perspective = scanner.scan(image, ScanOptions(fallback="perspective"))
