@@ -104,6 +104,7 @@ from ..dewarp.model import sha256_file
 from ..dewarp.predict import (
     DESKEW_MIN_AGREEMENT,
     RERUN_MARGIN,
+    TTA_MODES,
     Dewarper,
     Inset,
     estimate_page_angle,
@@ -114,6 +115,7 @@ from ..dewarp.predict import (
     resolve_inset,
     sample_rgb,
     source_inside,
+    with_tta,
 )
 from ..evidence import evidence
 from ..regions.context import GateConfig, LoadedContextSegmenter, load_context_segmenter
@@ -152,7 +154,7 @@ from .views import VIEW_SOURCES, crop_placement, run_view
 
 BUNDLE_SCHEMA = "flattener-scan-bundle-1"
 BUNDLE_KEYS = {
-    "dewarp": {"path", "sha256"},
+    "dewarp": {"path", "sha256", "tta"},
     "gate": {"path", "sha256"},
     "orient": {"path", "sha256", "threshold"},
 }
@@ -873,7 +875,7 @@ def _dewarp_record(dewarper: Dewarper) -> dict[str, Any]:
             verdict = shippable(info).to_dict()
         except FlattenerError:
             verdict = {"shippable": False, "category": "unknown", "reasons": ["invalid_record"]}
-    return {
+    record = {
         "role": "dewarp",
         "sha256": info.get("sha256"),
         "kind": info.get("kind"),
@@ -885,6 +887,9 @@ def _dewarp_record(dewarper: Dewarper) -> dict[str, Any]:
         "category": verdict.get("category"),
         "gate_reasons": list(verdict.get("reasons") or []),
     }
+    if dewarper.tta != "none":  # records made without it keep their shape
+        record["tta"] = dewarper.tta
+    return record
 
 
 def _orient_record(orienter: Orienter) -> dict[str, Any]:
@@ -952,10 +957,11 @@ class Scanner:
     ) -> Scanner:
         """Load a bundle: a ``flattener-scan-bundle-1`` JSON file (or dict) naming
         ``dewarp`` and optionally ``gate`` and ``orient`` weights, each a path (relative
-        to the bundle file) or ``{"path", "sha256"}``. The ``orient`` entry may also hold
-        the ``threshold`` measured on real photos; ``orient_threshold`` replaces it. Any
-        other key is an error. Weights that fail the ship gate need ``research=True``
-        (results are then stamped research)."""
+        to the bundle file) or ``{"path", "sha256"}``. The ``dewarp`` entry may also hold
+        ``tta`` (``dewarp.predict.TTA_MODES``, default ``"none"``) for every model call; the
+        ``orient`` entry may hold the ``threshold`` measured on real photos, which
+        ``orient_threshold`` replaces. Any other key is an error. Weights that fail the
+        ship gate need ``research=True`` (results are then stamped research)."""
         if backend not in BACKENDS:
             raise FlattenerError(
                 Status.INPUT_ERROR,
@@ -1016,6 +1022,11 @@ class Scanner:
             raise FlattenerError(Status.INPUT_ERROR, "invalid_bundle", "bundle needs dewarp")
         if orient_threshold is None:
             orient_threshold = entries.get("orient", {}).get("threshold")
+        tta = entries["dewarp"].get("tta", "none")
+        if tta not in TTA_MODES:
+            raise FlattenerError(
+                Status.INPUT_ERROR, "invalid_bundle", f"dewarp tta must be one of {TTA_MODES}"
+            )
         return cls.from_files(
             paths["dewarp"],
             gate=paths.get("gate"),
@@ -1025,6 +1036,7 @@ class Scanner:
             research=research,
             cache_size=cache_size,
             info={"bundle": None if isinstance(bundle, dict) else str(bundle)},
+            tta=tta,
         )
 
     @classmethod
@@ -1039,12 +1051,14 @@ class Scanner:
         research: bool = False,
         cache_size: int = CACHE_SIZE,
         info: dict[str, Any] | None = None,
+        tta: str = "none",
     ) -> Scanner:
-        """Load dewarp weights through the ship gate, and the optional page gate and
-        OrientNet (with ``orient_threshold``, a threshold measured on real photos, in place
-        of the checkpoint's); non-shippable models need ``research=True``."""
+        """Load dewarp weights through the ship gate (with test-time augmentation ``tta``),
+        and the optional page gate and OrientNet (with ``orient_threshold``, a threshold
+        measured on real photos, in place of the checkpoint's); non-shippable models need
+        ``research=True``."""
         started = time.perf_counter()
-        dewarper = load_weights(weights, research=research, device=device)
+        dewarper = with_tta(load_weights(weights, research=research, device=device), tta)
         segmenter = None
         if gate is not None:
             segmenter = load_context_segmenter(gate, device=device)
@@ -1115,7 +1129,9 @@ class Scanner:
             "version": PIPELINE_VERSION,
             "options": settings,
             "protocol": protocol,
-            "models": [{"role": m["role"], "sha256": m["sha256"]} for m in self.models],
+            "models": [
+                {key: m[key] for key in ("role", "sha256", "tta") if key in m} for m in self.models
+            ],
         }
 
     def batch_kwargs(

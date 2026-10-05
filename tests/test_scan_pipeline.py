@@ -590,6 +590,15 @@ def test_models_load_through_the_ship_gate(tmp_path, monkeypatch):
     with pytest.raises(FlattenerError) as error:
         Scanner.load(bundle, research=True)
     assert error.value.reason_code == "checksum_mismatch"
+    # The dewarp entry can turn on test-time augmentation for every model call.
+    bundle.write_text(
+        json.dumps({"schema": BUNDLE_SCHEMA, "dewarp": {"path": "model.pt", "tta": "flip"}})
+    )
+    flipped = Scanner.load(bundle, research=True)
+    assert flipped.dewarper.tta == "flip" and flipped.models[0]["tta"] == "flip"
+    assert "tta" not in scanner.models[0] and scanner.dewarper.tta == "none"
+    assert flipped.pipeline_record()["models"][0]["tta"] == "flip"
+    assert flipped.scan(image, ScanOptions(orient="none")).models[0]["tta"] == "flip"
     # The orient entry carries a real-photo threshold; the caller's value wins.
     (tmp_path / "orient.pt").write_bytes(b"weights")
     thresholds = []
@@ -609,6 +618,7 @@ def test_models_load_through_the_ship_gate(tmp_path, monkeypatch):
         {"schema": "other"},
         {"schema": BUNDLE_SCHEMA, "dewarp": "model.pt", "orientation": "orient.pt"},
         {"schema": BUNDLE_SCHEMA, "dewarp": {"path": "model.pt", "threshold": 0.5}},
+        {"schema": BUNDLE_SCHEMA, "dewarp": {"path": "model.pt", "tta": "rotate"}},
         {"schema": BUNDLE_SCHEMA, "dewarp": "model.pt", "orient": {**orient, "threshold": "high"}},
     ):
         bundle.write_text(json.dumps(wrong))
