@@ -37,6 +37,7 @@ from flattener.dewarp.predict import (
     load_dewarper,
     main,
     predict_grid,
+    prediction_evidence,
     quantize_rgb,
     rectify,
     rectify_batch,
@@ -44,6 +45,7 @@ from flattener.dewarp.predict import (
     rerun_grid,
     resolve_inset,
     sample_rgb,
+    with_tta,
 )
 from flattener.renderer import render
 
@@ -644,3 +646,22 @@ def test_batch_workers_write_the_images_of_one_worker_in_input_order(tmp_path):
             pipeline={"name": "flattener.scan", "passes": 1},
             workers=2,
         )
+
+
+def test_flip_tta_averages_in_the_mirror_and_is_mirror_symmetric():
+    torch.manual_seed(0)
+    dewarper = Dewarper(UVDocNet(TINY).eval(), TINY, torch.device("cpu"))
+    flipped = with_tta(dewarper, "flip")
+    rng = np.random.default_rng(0)
+    image = rng.integers(0, 256, size=(80, 60, 3), dtype=np.uint8)
+    mirror = np.ascontiguousarray(image[:, ::-1])
+    plain, plain_mirror = predict_grid(dewarper, image), predict_grid(dewarper, mirror)
+    turned_back = plain_mirror[:, ::-1] * np.array([-1.0, 1.0], np.float32)
+    np.testing.assert_allclose(predict_grid(flipped, image), (plain + turned_back) / 2, atol=1e-6)
+    # The averaged grid of the mirror image is the mirrored averaged grid.
+    both = predict_grid(flipped, mirror)[:, ::-1] * np.array([-1.0, 1.0], np.float32)
+    np.testing.assert_allclose(both, predict_grid(flipped, image), atol=1e-6)
+    assert "tta" not in prediction_evidence(dewarper, "round")
+    assert prediction_evidence(flipped, "round")["tta"] == "flip"
+    with pytest.raises(FlattenerError):
+        with_tta(dewarper, "rotate")

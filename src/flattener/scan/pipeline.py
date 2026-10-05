@@ -242,7 +242,8 @@ class ScanOptions:
     ``sharpen``, so a stored plan renders the same image. ``sharpen``: the amount of
     ``scan.sharpen`` on the flattened image (0 turns it off). ``pages`` (for
     ``Scanner.split``): ``"auto"`` splits an open-book spread at its fold (``look.fold``,
-    else the bend of its outline), ``2`` always splits (at the middle when no fold is found), ``1`` keeps one image.
+    else the bend of its outline), ``2`` always splits (at the middle when no fold is
+    found), ``1`` keeps one image.
     ``page_order``: ``"ltr"`` numbers the left page first, ``"rtl"`` the right one.
     """
 

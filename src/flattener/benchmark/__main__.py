@@ -75,6 +75,12 @@ def _add_rerun(parser: argparse.ArgumentParser, *, perspective: bool = False) ->
     )
     if perspective:
         parser.add_argument(
+            "--tta",
+            choices=("none", "flip"),
+            default="none",
+            help="test-time augmentation of every model call (flattener.dewarp.predict --tta)",
+        )
+        parser.add_argument(
             "--rect",
             action="store_true",
             help="with --rerun: turned tight-crop passes (flattener.dewarp.predict --rect)",
@@ -589,11 +595,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "uvdoc-predict":
         import torch
 
-        from ..dewarp.predict import load_dewarper
+        from ..dewarp.predict import load_dewarper, with_tta
 
         torch.set_num_threads(args.threads)
         record = uvdoc.predict_uvdoc(
-            load_dewarper(args.weights, device=args.device),
+            with_tta(load_dewarper(args.weights, device=args.device), args.tta),
             args.output_dir,
             root=args.root,
             verify_inputs=not args.no_verify_inputs,
@@ -678,11 +684,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "dir300-predict":
         import torch
 
-        from ..dewarp.predict import load_dewarper
+        from ..dewarp.predict import load_dewarper, with_tta
 
         torch.set_num_threads(args.threads)
         record = dir300.predict_dir300(
-            load_dewarper(args.weights, device=args.device),
+            with_tta(load_dewarper(args.weights, device=args.device), args.tta),
             args.output_dir,
             inputs_dir=args.inputs_dir,
             verify_inputs=not args.no_verify_inputs,

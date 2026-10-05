@@ -144,6 +144,9 @@ RERUN_MARGIN = 0.04  # per side, fraction of the page extent: the middle of trai
 DESKEW_MAX_DEG = 45.0  # a page estimated to turn further is cropped without turning
 DESKEW_MIN_AGREEMENT = 0.5  # least mean resultant length of the edge directions
 MIN_CROP_PIXELS = 2  # a crop box narrower or lower than this skips the pass
+# Test-time augmentation of every model call: "flip" averages in the grid of the mirror
+# image, turned back.
+TTA_MODES = ("none", "flip")
 
 
 @dataclass(slots=True)
@@ -152,6 +155,16 @@ class Dewarper:
     config: DewarpModelConfig
     device: torch.device
     info: dict[str, Any] = field(default_factory=dict)
+    tta: str = "none"  # TTA_MODES; see predict_input
+
+
+def with_tta(dewarper: Dewarper, tta: str) -> Dewarper:
+    """``dewarper`` with test-time augmentation ``tta`` (``TTA_MODES``)."""
+    if tta not in TTA_MODES:
+        raise FlattenerError(
+            Status.INPUT_ERROR, "invalid_config", f"tta must be one of {TTA_MODES}, got {tta!r}"
+        )
+    return replace(dewarper, tta=tta)
 
 
 def load_dewarper(path: str | Path, *, device: str = "cpu", verify: bool = True) -> Dewarper:
@@ -262,10 +275,20 @@ _MODEL_LOCK = threading.Lock()
 
 
 def predict_input(dewarper: Dewarper, tensor: torch.Tensor) -> NDArray[np.float32]:
-    """Raw 2-D model output for a model input, as (Gh, Gw, 2)."""
+    """Raw 2-D model output for a model input, as (Gh, Gw, 2). With ``tta="flip"`` the
+    input and its mirror image run as one batch; the mirror's grid, turned back (columns
+    reversed, x negated: both grid conventions are symmetric about the image centre), is
+    averaged with the input's."""
+    flip = dewarper.tta == "flip"
+    batch = torch.cat([tensor, tensor.flip(-1)]) if flip else tensor
     with _MODEL_LOCK, torch.inference_mode(), ieee_float32():
-        grid2d, _ = dewarper.model(tensor)
-    return grid2d[0].permute(1, 2, 0).float().cpu().numpy()
+        grid2d, _ = dewarper.model(batch)
+    grid = grid2d.float()
+    if flip:
+        mirror = grid[1].flip(-1)
+        mirror[0] = -mirror[0]
+        return ((grid[0] + mirror) / 2).permute(1, 2, 0).cpu().numpy()
+    return grid[0].permute(1, 2, 0).cpu().numpy()
 
 
 def predict_grid(dewarper: Dewarper, image: NDArray[np.uint8]) -> NDArray[np.float32]:
@@ -1192,13 +1215,16 @@ def _evidence_block(
     rerun_info: dict[str, Any],
     pipeline: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    return {
+    block = {
         **evidence("predictions", dewarper.info),
         "quantize": quantize,
         "inset": inset_info,
         "rerun": rerun_info,
         "pipeline": pipeline_record(pipeline),
     }
+    if dewarper.tta != "none":  # records made without it keep their shape
+        block["tta"] = dewarper.tta
+    return block
 
 
 def _protocol_settings(
@@ -1530,10 +1556,13 @@ def main(argv: list[str] | None = None) -> int:
     refine_help = "an interior pass on the flat output that keeps the outline (refine_pass)"
     single.add_argument("--refine", action="store_true", help=refine_help)
     batch.add_argument("--refine", action="store_true", help=refine_help)
+    tta_help = "test-time augmentation of every model call: flip averages in the mirror image"
+    single.add_argument("--tta", choices=TTA_MODES, default="none", help=tta_help)
+    batch.add_argument("--tta", choices=TTA_MODES, default="none", help=tta_help)
     args = parser.parse_args(argv)
     if args.deskew and args.rerun == 0:
         parser.error("--deskew needs --rerun 1 or more")
-    dewarper = load_dewarper(args.weights, device=args.device)
+    dewarper = with_tta(load_dewarper(args.weights, device=args.device), args.tta)
     if args.command == "image":
         size = None if args.output_size is None else tuple(args.output_size)
         result = rectify(
