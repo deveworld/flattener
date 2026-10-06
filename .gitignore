@@ -25,3 +25,5 @@ output/playwright/
 /RESEARCH.md
 /_researcher/
 /EXPERIMENTS.md
+web/cloudflare/
+web/.wrangler/

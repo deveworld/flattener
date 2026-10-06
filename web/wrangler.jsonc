@@ -1,0 +1,10 @@
+// Cloudflare deployment of the web app as an assets-only Worker.
+// Run `npm run deploy:cloudflare`; it builds `cloudflare/` with scripts/cloudflare.mjs first.
+{
+  "name": "flattener",
+  "compatibility_date": "2026-10-06",
+  "assets": {
+    "directory": "./cloudflare"
+  },
+  "routes": [{ "pattern": "flattener.worldsw.dev", "custom_domain": true }]
+}

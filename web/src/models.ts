@@ -31,12 +31,51 @@ export async function readManifest(base: string): Promise<Manifest> {
       !model ||
       !/^[\w.-]+\.onnx$/.test(model.file) ||
       !Number.isInteger(model.bytes) ||
-      model.bytes < 1
+      model.bytes < 1 ||
+      (model.parts !== undefined &&
+        (!Array.isArray(model.parts) ||
+          !model.parts.length ||
+          !model.parts.every((part) => typeof part === 'string' && /^[\w.-]+$/.test(part))))
     ) {
       throw new Error('The model bundle is incomplete. Ask the site owner to export it again.');
     }
   }
   return manifest;
+}
+
+async function readBody(
+  response: Response,
+  model: ModelSpec,
+  chunks: Uint8Array[],
+  loaded: number,
+  report: Report,
+): Promise<number> {
+  if (response.body) {
+    const reader = response.body.getReader();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      loaded += value.length;
+      if (loaded > model.bytes) {
+        await reader.cancel();
+        throw new Error('A model download has an unexpected size. Please reload and try again.');
+      }
+      report({
+        type: 'progress',
+        stage: 'Downloading scanner',
+        detail: `${model.file} · ${(loaded / 1e6).toFixed(1)} / ${(model.bytes / 1e6).toFixed(1)} MB`,
+        fraction: loaded / model.bytes,
+      });
+    }
+  } else {
+    const value = new Uint8Array(await response.arrayBuffer());
+    chunks.push(value);
+    loaded += value.length;
+    if (loaded > model.bytes)
+      throw new Error('A model download has an unexpected size. Please reload and try again.');
+  }
+  return loaded;
 }
 
 async function modelBytes(
@@ -59,35 +98,17 @@ async function modelBytes(
     if (data.byteLength === model.bytes) return data;
     await cache?.delete(url);
   }
-  const response = await fetch(url);
-  if (!response.ok)
-    throw new Error(
-      'A scanner model could not be downloaded. Check your connection and try again.',
-    );
   const chunks: Uint8Array[] = [];
   let loaded = 0;
-  if (response.body) {
-    const reader = response.body.getReader();
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      chunks.push(value);
-      loaded += value.length;
-      if (loaded > model.bytes) {
-        await reader.cancel();
-        throw new Error('A model download has an unexpected size. Please reload and try again.');
-      }
-      report({
-        type: 'progress',
-        stage: 'Downloading scanner',
-        detail: `${model.file} · ${(loaded / 1e6).toFixed(1)} / ${(model.bytes / 1e6).toFixed(1)} MB`,
-        fraction: loaded / model.bytes,
-      });
-    }
-  } else {
-    const value = new Uint8Array(await response.arrayBuffer());
-    chunks.push(value);
-    loaded = value.length;
+  for (const file of model.parts ?? [model.file]) {
+    const part = new URL(`models/${file}`, base);
+    part.searchParams.set('v', version);
+    const response = await fetch(part);
+    if (!response.ok)
+      throw new Error(
+        'A scanner model could not be downloaded. Check your connection and try again.',
+      );
+    loaded = await readBody(response, model, chunks, loaded, report);
   }
   const data = new Uint8Array(loaded);
   let offset = 0;

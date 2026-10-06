@@ -29,6 +29,8 @@ export type CameraReply =
 export type ModelSpec = {
   file: string;
   bytes: number;
+  /** Files whose concatenation is ``file``, for hosts with a per-file size limit. */
+  parts?: string[];
   inputs: Record<string, number[]>;
   outputs: string[];
 };
