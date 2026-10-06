@@ -337,6 +337,10 @@ export const koPatterns: [RegExp, string][] = [
   [/^(\d+) pages? added$/, '$1쪽 추가됨'],
   [/^(\d+) in progress$/, '$1쪽 처리 중'],
   [/^(\d+) not scanned$/, '$1쪽 실패'],
+  [
+    /^Video frame · (.+) · preview (.+) · photo view ([\d.]+)× the preview, not used · ([\d.]+) s$/,
+    '영상 프레임 · $1 · 미리보기 $2 · 사진 화각이 미리보기의 $3배라 쓰지 않음 · $4초',
+  ],
   [/^Camera photo · (.+) · preview (.+) · ([\d.]+) s$/, '카메라 사진 · $1 · 미리보기 $2 · $3초'],
   [/^Video frame · (.+) · preview (.+) · ([\d.]+) s$/, '영상 프레임 · $1 · 미리보기 $2 · $3초'],
   [/^Remove page (\d+)$/, '$1쪽 빼기'],

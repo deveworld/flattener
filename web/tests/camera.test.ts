@@ -237,3 +237,61 @@ test('the live outline joins a page that a dark band split, but not a separate o
   const alone = pageOutline(probability, w, h)!;
   assert.ok(Math.min(...alone.points.map(([, y]) => y)) >= 23 / h - 0.01);
 });
+
+/** A smooth random scene ``width`` x ``height`` (fixed seed), and a camera view of it. */
+function scene(width: number, height: number) {
+  let seed = 7;
+  const random = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  const blobs = Array.from({ length: 60 }, () => [
+    random(),
+    random() * 0.75,
+    0.02 + random() * 0.06,
+    random(),
+  ]);
+  const data = new Float32Array(width * height);
+  for (let y = 0; y < height; y++)
+    for (let x = 0; x < width; x++) {
+      let v = 0;
+      for (const [bx, by, r, a] of blobs) {
+        const d = ((x / width - bx) ** 2 + (y / width - by) ** 2) / (r * r);
+        v += a * Math.exp(-d);
+      }
+      data[y * width + x] = v;
+    }
+  return { width, height, data };
+}
+function view(
+  photo: { width: number; height: number; data: Float32Array },
+  width: number,
+  height: number,
+  scale: number,
+  dx: number,
+  dy: number,
+) {
+  const data = new Float32Array(width * height),
+    s = (scale * photo.width) / width;
+  for (let v = 0; v < height; v++)
+    for (let u = 0; u < width; u++) {
+      const x = Math.round(photo.width / 2 + dx * photo.width + (u + 0.5 - width / 2) * s - 0.5),
+        y = Math.round(photo.height / 2 + dy * photo.width + (v + 0.5 - height / 2) * s - 0.5);
+      data[v * width + u] =
+        photo.data[
+          Math.min(photo.height - 1, Math.max(0, y)) * photo.width +
+            Math.min(photo.width - 1, Math.max(0, x))
+        ];
+    }
+  return { width, height, data };
+}
+
+test('a photo from a wider lens than the preview is recognized', async () => {
+  const { previewInPhoto } = await import('../src/camera-outline');
+  const photo = scene(256, 192);
+  const same = previewInPhoto(view(photo, 64, 48, 1, 0, 0), photo);
+  assert.ok(Math.abs(same.scale - 1) < 0.03 && same.score > 0.9, JSON.stringify(same));
+  // An ultra-wide photo: the preview spans 60% of it, a little off center.
+  const wide = previewInPhoto(view(photo, 64, 48, 0.6, 0.04, -0.02), photo);
+  assert.ok(Math.abs(wide.scale - 0.6) < 0.03 && wide.score > 0.9, JSON.stringify(wide));
+  // A 16:9 preview cut from a 4:3 photo of the same width is the same view.
+  const cut = previewInPhoto(view(photo, 64, 36, 1, 0, 0), photo);
+  assert.ok(Math.abs(cut.scale - 1) < 0.03, JSON.stringify(cut));
+});

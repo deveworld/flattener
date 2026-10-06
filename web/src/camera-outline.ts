@@ -312,3 +312,81 @@ export class AutoCapture {
     this.steadySince = this.lostSince = null;
   }
 }
+
+/** A small grayscale copy of an image. */
+export type Gray = { width: number; height: number; data: Float32Array };
+
+/**
+ * Where the live preview lies in a camera photo. ``scale`` is the share of the photo's width
+ * that the preview spans (1: the same view; 0.6: the photo shows a wider view, as from
+ * another lens); ``score`` is the normalized cross-correlation of the best match (-1..1).
+ * A coarse search over scale and offset is refined once around the best match.
+ */
+export function previewInPhoto(preview: Gray, photo: Gray): { scale: number; score: number } {
+  const pw = preview.width,
+    ph = preview.height;
+  let mean = 0;
+  for (const v of preview.data) mean += v;
+  mean /= preview.data.length;
+  const match = (scale: number, dx: number, dy: number) => {
+    // Preview pixel (u, v) falls on photo pixel (cx + (u + 0.5 - pw / 2) s, cy + ...).
+    const s = (scale * photo.width) / pw,
+      cx = photo.width / 2 + dx * photo.width,
+      cy = photo.height / 2 + dy * photo.width;
+    let n = 0,
+      sq = 0,
+      sqq = 0,
+      spq = 0,
+      spp = 0,
+      sp = 0;
+    for (let v = 0; v < ph; v++) {
+      const y = cy + (v + 0.5 - ph / 2) * s - 0.5;
+      if (y < 0 || y > photo.height - 1) continue;
+      const y0 = Math.floor(y),
+        y1 = Math.min(y0 + 1, photo.height - 1),
+        fy = y - y0;
+      for (let u = 0; u < pw; u++) {
+        const x = cx + (u + 0.5 - pw / 2) * s - 0.5;
+        if (x < 0 || x > photo.width - 1) continue;
+        const x0 = Math.floor(x),
+          x1 = Math.min(x0 + 1, photo.width - 1),
+          fx = x - x0;
+        const row0 =
+            photo.data[y0 * photo.width + x0] * (1 - fx) + photo.data[y0 * photo.width + x1] * fx,
+          row1 =
+            photo.data[y1 * photo.width + x0] * (1 - fx) + photo.data[y1 * photo.width + x1] * fx;
+        const q = row0 * (1 - fy) + row1 * fy,
+          p = preview.data[v * pw + u] - mean;
+        n++;
+        sp += p;
+        spp += p * p;
+        sq += q;
+        sqq += q * q;
+        spq += p * q;
+      }
+    }
+    // Most of the preview must fall inside the photo.
+    if (n < pw * ph * 0.7) return -1;
+    const covariance = spq - (sp * sq) / n,
+      pv = spp - (sp * sp) / n,
+      qv = sqq - (sq * sq) / n;
+    return pv > 0 && qv > 0 ? covariance / Math.sqrt(pv * qv) : -1;
+  };
+  let best = { scale: 1, dx: 0, dy: 0, score: -1 };
+  const search = (scales: number[], offsets: number[], around = best) => {
+    const start = around;
+    for (const scale of scales)
+      for (const ox of offsets)
+        for (const oy of offsets) {
+          const score = match(start.scale + scale, start.dx + ox, start.dy + oy);
+          if (score > best.score)
+            best = { scale: start.scale + scale, dx: start.dx + ox, dy: start.dy + oy, score };
+        }
+  };
+  const range = (from: number, to: number, step: number) =>
+    Array.from({ length: Math.round((to - from) / step) + 1 }, (_, i) => from + i * step);
+  // Scales 0.35..1.15 and offsets up to 12% of the photo width (lenses sit apart).
+  search(range(-0.65, 0.15, 0.05), range(-0.12, 0.12, 0.02), { scale: 1, dx: 0, dy: 0, score: -1 });
+  search(range(-0.04, 0.04, 0.01), range(-0.015, 0.015, 0.005));
+  return { scale: best.scale, score: best.score };
+}

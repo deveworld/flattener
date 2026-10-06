@@ -38,6 +38,9 @@ export type CaptureInfo = {
   /** The live preview's video size, to compare its framing with the photo's. */
   preview: { width: number; height: number };
   seconds: number;
+  /** A photo showed another view than the preview and was not used: the preview's share of
+   * that photo's width (0.6: the photo was 1.67 times wider). */
+  view?: number;
 };
 export type CameraRequest =
   { type: 'load'; base: string } | { type: 'frame'; image: Pixels; width: number; height: number };

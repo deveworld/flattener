@@ -65,7 +65,9 @@ Browsers without cross-origin isolation or WASM thread support use one thread.
 
 - Open **Camera** for a live page outline. Taking a photo starts flattening automatically.
   The shutter takes a still photo at the camera's full resolution where the browser supports it (`ImageCapture.takePhoto`), and a frame of the preview video otherwise.
-  Photos above 20 megapixels are reduced when taken. The scan details show the method, the photo and preview sizes, and the capture time.
+  Some phones take the still photo with another lens than the preview (an ultra-wide one at 0.6x while the preview is at 1x).
+  Each photo's view is matched against the preview; a photo with a different view is not used, the next try asks for the browser's default photo size, and if that also differs, that camera uses preview frames while the page is open.
+  Photos above 20 megapixels are reduced when taken. The scan details show the method, the photo and preview sizes, a rejected photo's view, and the capture time.
   One hint at a time guides the framing, judged from the page outline only: no page, page cut off at the edge, too close, too small, tilted.
   The scanner loads and warms up while you frame the page, then stays ready for the next photo.
   You can take a photo while it prepares; processing starts as soon as it is ready.

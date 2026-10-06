@@ -381,6 +381,9 @@ function chooseFile(file: File, capture?: CaptureInfo) {
       `${capture.method === 'photo' ? 'Camera photo' : 'Video frame'} · ` +
       `${capture.width} × ${capture.height} · ` +
       `preview ${capture.preview.width} × ${capture.preview.height} · ` +
+      (capture.view
+        ? `photo view ${(1 / capture.view).toFixed(2)}× the preview, not used · `
+        : '') +
       `${capture.seconds.toFixed(1)} s`;
   view('original');
   busyState(false);
