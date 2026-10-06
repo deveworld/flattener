@@ -61,19 +61,8 @@ export const ko: Record<string, string> = {
   'See processing steps': '처리 과정 보기',
   'Actual intermediate results from this scan, before your edits.':
     '이번 스캔의 실제 중간 결과입니다. 편집하기 전 상태입니다.',
-  'Scan settings': '스캔 설정',
-  'Longest edge': '긴 변 최대 크기',
-  'Up to 2560 px': '최대 2560px',
-  'Up to 1600 px': '최대 1600px',
-  'Up to 1024 px': '최대 1024px',
-  'Auto-rotate text': '글자 방향 자동 회전',
   'Scan again': '다시 스캔',
   'Try again': '다시 시도',
-  'Processing time': '처리 시간',
-  'Processing device': '처리 장치',
-  'This device': '이 기기',
-  'WebGPU · on this device': 'WebGPU · 이 기기에서 처리',
-  'CPU · on this device': 'CPU · 이 기기에서 처리',
   'Your workspace': '작업 공간',
 
   // Scanner status
@@ -86,9 +75,10 @@ export const ko: Record<string, string> = {
   'Refining your scan…': '정밀 스캔 중…',
   'Your scan is ready.': '스캔이 끝났습니다.',
   'Your refined scan is ready.': '정밀 스캔이 끝났습니다.',
-  'Possible fingers found. Open Remove fingers to review.':
-    '손가락으로 보이는 부분이 있습니다. 손가락 지우기에서 확인하세요.',
-  'Paper lighting and color corrected.': '종이의 조명과 색을 보정했습니다.',
+  'Possible fingers found. Review them under Edit.':
+    '손가락으로 보이는 부분이 있습니다. 편집에서 확인하세요.',
+  Edit: '편집',
+  Done: '완료',
   'Scan cancelled.': '스캔을 취소했습니다.',
   'Refinement cancelled.': '정밀 스캔을 취소했습니다.',
   'Edit cancelled.': '편집을 취소했습니다.',
@@ -299,8 +289,6 @@ export const ko: Record<string, string> = {
   'Move back a little': '조금 뒤로 물러나세요',
   'Move closer to the page': '페이지에 더 가까이 가세요',
   'Hold the camera straight over the page': '카메라를 페이지와 나란하게 들어 주세요',
-  'Sharpen text in Original color': '원래 색에서 글자 선명하게',
-  Capture: '촬영',
 
   // Crop
   Crop: '자르기',
@@ -321,14 +309,7 @@ export const ko: Record<string, string> = {
 
 /** Text with numbers in it: a pattern over the whole English text and its replacement. */
 export const koPatterns: [RegExp, string][] = [
-  [/^([\d.]+) seconds$/, '$1초'],
   [/^(\d+) pages?$/, '$1쪽'],
-  [
-    /^Video frame · (.+) · preview (.+) · photo view ([\d.]+)× the preview, not used · ([\d.]+) s$/,
-    '영상 프레임 · $1 · 미리보기 $2 · 사진 화각이 미리보기의 $3배라 쓰지 않음 · $4초',
-  ],
-  [/^Camera photo · (.+) · preview (.+) · ([\d.]+) s$/, '카메라 사진 · $1 · 미리보기 $2 · $3초'],
-  [/^Video frame · (.+) · preview (.+) · ([\d.]+) s$/, '영상 프레임 · $1 · 미리보기 $2 · $3초'],
   [/^Remove page (\d+)$/, '$1쪽 빼기'],
   [/^Added as page (\d+)\.$/, '$1쪽으로 추가했습니다.'],
   [/^Edges refined · (\d+)$/, '가장자리 보정 · $1'],

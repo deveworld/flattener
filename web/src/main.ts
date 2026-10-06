@@ -6,7 +6,6 @@ import { CropEditor } from './crop-editor';
 import { MaskEditor } from './mask-editor';
 import { pdfFromJpegs, type PdfPage } from './pdf';
 import type {
-  CaptureInfo,
   EditReply,
   EditRequest,
   EditSettings,
@@ -41,6 +40,8 @@ let refining = false;
 let activeOptions: Options | undefined, resultOptions: Options | undefined;
 /** The color mode last chosen; new scans start in it. */
 let colorChoice = true;
+/** The result shows its edit tools (color, fingers, crop, rotate, 100% view). */
+let editMode = false;
 let preparationState: PreparationState = 'idle';
 let rawBlob: Blob | undefined, suggestion: Mask | undefined, settings: EditSettings | undefined;
 let editWorker: Worker | undefined,
@@ -52,7 +53,7 @@ const steps = new Map<string, ProcessingStep & { url: string; button: HTMLButton
 const maskEditor = new MaskEditor();
 const cropEditor = new CropEditor();
 const camera = new Camera(
-  (file, info) => chooseFile(file, info),
+  (file) => chooseFile(file),
   (dismissed) => {
     if (dismissed && !selected && !followingHistory) leaveAway();
   },
@@ -138,9 +139,9 @@ function busyState(value: boolean) {
     : refining
       ? 'Cancel refinement'
       : 'Cancel scan';
-  $<HTMLFieldSetElement>('settings-fields').disabled = locked;
-  for (const id of ['rescan', 'refine', 'crop', 'rotate', 'zoom', 'remove-fingers', 'add-page'])
+  for (const id of ['refine', 'crop', 'rotate', 'zoom', 'remove-fingers', 'add-page', 'edit-open'])
     $<HTMLButtonElement>(id).disabled = locked || (id === 'add-page' && pageAdded);
+  $<HTMLButtonElement>('edit-done').disabled = locked;
   $<HTMLSelectElement>('color-mode').disabled = locked;
   $<HTMLButtonElement>('undo-edit').disabled = locked || !editHistory.length;
   $<HTMLButtonElement>('reset-edits').disabled = locked || !edited();
@@ -148,13 +149,16 @@ function busyState(value: boolean) {
   $('reset-edits').hidden = !edited();
   $('progress').hidden = !value && !editing;
   $('work-controls').hidden = !selected || editorOpen;
-  $('result-actions').hidden = !resultBlob || editing || editorOpen;
-  $('refine-controls').hidden = !resultBlob || resultOptions?.quality !== 'fast' || locked;
+  $('result-actions').hidden = !resultBlob || editing || editorOpen || editMode;
+  $('refine-controls').hidden =
+    !resultBlob || resultOptions?.quality !== 'fast' || locked || editMode;
   $('refine-help').textContent = editHistory.length
     ? 'Takes longer and replaces your edits.'
     : 'Take more time to refine the page shape.';
-  $('edit-controls').hidden = !resultBlob || busy || editorOpen;
-  $('adjustments').hidden = !resultBlob || busy || editorOpen;
+  const tools = !resultBlob || busy || editorOpen || !editMode;
+  $('edit-controls').hidden = tools;
+  $('adjustments').hidden = tools;
+  $('edit-done').hidden = tools;
   $('view-controls').hidden = !resultBlob || locked || !$('process-view').hidden;
   for (const step of steps.values()) step.button.disabled = locked;
   $('workspace').setAttribute('aria-busy', String(value || editing));
@@ -254,16 +258,14 @@ function clearResult() {
   $('result-actions').hidden = true;
   $('refine-controls').hidden = true;
   $('edit-controls').hidden = true;
-  $('rescan-controls').hidden = true;
-  $('scan-details').hidden = true;
+  $('edit-done').hidden = true;
+  editMode = false;
   $('view-controls').hidden = true;
   $('warnings').hidden = true;
   $('adjustments').hidden = true;
   $<HTMLButtonElement>('show-scan').disabled = true;
   $<HTMLButtonElement>('show-compare').disabled = true;
-  $('images').classList.remove('zoomed');
-  $('zoom').setAttribute('aria-pressed', 'false');
-  $('zoom').textContent = '100% view';
+  setZoom(false);
 }
 function scrollTo(element: HTMLElement, block: ScrollLogicalPosition = 'start') {
   element.scrollIntoView({
@@ -299,7 +301,6 @@ function showStart() {
   $('images').hidden = true;
   $('file-toolbar').hidden = true;
   $('work-controls').hidden = true;
-  $('settings-container').hidden = true;
   $('view-controls').hidden = true;
   $('error').hidden = true;
   $('filename').textContent = '';
@@ -342,7 +343,7 @@ function view(mode: 'original' | 'scan' | 'compare') {
   for (const name of ['original', 'scan', 'compare'])
     $(`show-${name}`).setAttribute('aria-pressed', String(name === mode));
 }
-function chooseFile(file: File, capture?: CaptureInfo) {
+function chooseFile(file: File) {
   if (busy || editing || editorOpen || camera.isOpen) return;
   if (file.size > 40 * 1024 * 1024) {
     showError('This photo is larger than 40 MB. Choose a smaller image.');
@@ -368,21 +369,8 @@ function chooseFile(file: File, capture?: CaptureInfo) {
   $('images').hidden = false;
   $('file-toolbar').hidden = false;
   $('work-controls').hidden = false;
-  $('settings-container').hidden = false;
-  $<HTMLDetailsElement>('scan-settings').open = false;
   $('filename').textContent = file.name;
   $('filename').title = file.name;
-  $('source-size').textContent = '';
-  $('capture-row').hidden = !capture;
-  if (capture)
-    $('capture-info').textContent =
-      `${capture.method === 'photo' ? 'Camera photo' : 'Video frame'} · ` +
-      `${capture.width} × ${capture.height} · ` +
-      `preview ${capture.preview.width} × ${capture.preview.height} · ` +
-      (capture.view
-        ? `photo view ${(1 / capture.view).toFixed(2)}× the preview, not used · `
-        : '') +
-      `${capture.seconds.toFixed(1)} s`;
   view('original');
   busyState(false);
   message('Opening your photo…');
@@ -401,7 +389,6 @@ originalImage.onload = () => {
   }
   photoReady = true;
   originalImage.hidden = false;
-  $('source-size').textContent = `${width} × ${height}`;
   startScan();
 };
 originalImage.onerror = () =>
@@ -630,9 +617,6 @@ function scannerWorker(): Worker {
           progress.max = 1;
           progress.value = data.fraction;
         }
-      } else if (data.type === 'backend') {
-        $('engine').textContent =
-          data.backend === 'webgpu' ? 'WebGPU · on this device' : 'CPU · on this device';
       } else if (data.type === 'step') {
         addStep(data);
       } else if (data.type === 'reset-steps') {
@@ -657,14 +641,8 @@ function scannerWorker(): Worker {
         busyState(false);
         $<HTMLButtonElement>('show-scan').disabled = false;
         $<HTMLButtonElement>('show-compare').disabled = false;
-        $('result-size').textContent = `${metadata.width} × ${metadata.height}`;
-        $('result-info').textContent = `${metadata.seconds.toFixed(1)} seconds`;
         $('warnings').textContent = metadata.warnings.join(' ');
         $('warnings').hidden = metadata.warnings.length === 0;
-        $('result-actions').hidden = false;
-        $('edit-controls').hidden = false;
-        $('rescan-controls').hidden = false;
-        $('scan-details').hidden = false;
         $('view-controls').hidden = false;
         scanButton.textContent = 'Scan again';
         view('scan');
@@ -672,9 +650,7 @@ function scannerWorker(): Worker {
           resultOptions?.quality === 'refined'
             ? 'Your refined scan is ready.'
             : 'Your scan is ready.',
-          maskCount(suggestion)
-            ? 'Possible fingers found. Open Remove fingers to review.'
-            : 'Paper lighting and color corrected.',
+          maskCount(suggestion) ? 'Possible fingers found. Review them under Edit.' : '',
         );
         if (focusAction) $('download').focus({ preventScroll: true });
         if (matchMedia('(max-width: 700px)').matches) scrollTo($('work-controls'), 'end');
@@ -709,18 +685,16 @@ function startScan(quality: Options['quality'] = 'fast') {
     );
     return;
   }
-  focusAction = [scanButton, $('rescan'), $('refine')].some((button) =>
-    button.matches(':focus-visible'),
-  );
+  focusAction = [scanButton, $('refine')].some((button) => button.matches(':focus-visible'));
   $('error').hidden = true;
   const options: Options =
     quality === 'refined'
       ? { ...resultOptions!, quality, cleanColor: colorChoice }
       : {
           quality,
-          orient: $<HTMLInputElement>('orient').checked,
-          maxSide: Number($<HTMLSelectElement>('resolution').value),
-          sharpen: $<HTMLInputElement>('sharpen').checked,
+          orient: true,
+          maxSide: 2560,
+          sharpen: true,
           cleanColor: colorChoice,
         };
   if (quality === 'refined') {
@@ -732,7 +706,6 @@ function startScan(quality: Options['quality'] = 'fast') {
     view('original');
   }
   activeOptions = options;
-  $<HTMLDetailsElement>('scan-settings').open = false;
   busyState(true);
   if (focusAction) $('cancel').focus({ preventScroll: true });
   message(refining ? 'Refining your scan…' : 'Starting your scan…');
@@ -753,7 +726,6 @@ function startScan(quality: Options['quality'] = 'fast') {
 }
 scanButton.onclick = () => startScan();
 $('refine').onclick = () => startScan('refined');
-$('rescan').onclick = () => scanButton.click();
 $('cancel').onclick = () => {
   const restoreFocus = $('cancel').matches(':focus-visible');
   if (editing) {
@@ -787,10 +759,25 @@ $('cancel').onclick = () => {
 for (const mode of ['original', 'scan', 'compare'] as const)
   $(`show-${mode}`).onclick = () => view(mode);
 $('process-back').onclick = () => view(resultBlob ? 'scan' : 'original');
-$('zoom').onclick = () => {
-  const active = $('images').classList.toggle('zoomed');
+function setZoom(active: boolean) {
+  $('images').classList.toggle('zoomed', active);
   $('zoom').setAttribute('aria-pressed', String(active));
   $('zoom').textContent = active ? 'Fit to view' : '100% view';
+}
+$('zoom').onclick = () => setZoom(!$('images').classList.contains('zoomed'));
+$('edit-open').onclick = () => {
+  const keyboard = $('edit-open').matches(':focus-visible');
+  editMode = true;
+  busyState(busy);
+  if (keyboard) $('color-mode').focus({ preventScroll: true });
+  if (matchMedia('(max-width: 700px)').matches) scrollTo($('adjustments'));
+};
+$('edit-done').onclick = () => {
+  const keyboard = $('edit-done').matches(':focus-visible');
+  editMode = false;
+  setZoom(false);
+  busyState(busy);
+  if (keyboard) $('edit-open').focus({ preventScroll: true });
 };
 function editFailed(detail: string) {
   editWorker?.terminate();
@@ -835,7 +822,6 @@ function applyEdit(next: EditSettings, history: 'push' | 'pop' | 'reset' = 'push
         installResult(data.blob);
         editing = false;
         $<HTMLSelectElement>('color-mode').value = settings.cleanColor ? 'clean' : 'original';
-        $('result-size').textContent = `${data.width} × ${data.height}`;
         if (metadata) {
           metadata.width = data.width;
           metadata.height = data.height;
@@ -886,7 +872,6 @@ function closeEditor() {
   cropEditor.close();
   $('finger-editor').hidden = true;
   $('crop-editor').hidden = true;
-  $('settings-container').hidden = false;
   $('process-history').hidden = !steps.size;
   view('scan');
   busyState(false);
@@ -908,7 +893,6 @@ $('remove-fingers').onclick = async () => {
     $('images').hidden = true;
     $('process-view').hidden = true;
     $('finger-editor').hidden = false;
-    $('settings-container').hidden = true;
     $('process-history').hidden = true;
     if (keyboard) $('brush-add').focus({ preventScroll: true });
     scrollTo($('finger-editor'));
@@ -942,7 +926,6 @@ $('crop').onclick = async () => {
     $('images').hidden = true;
     $('process-view').hidden = true;
     $('crop-editor').hidden = false;
-    $('settings-container').hidden = true;
     $('process-history').hidden = true;
     if (keyboard) document.querySelector<HTMLElement>('.crop-handle')?.focus();
     scrollTo($('crop-editor'));

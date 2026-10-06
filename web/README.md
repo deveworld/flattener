@@ -67,7 +67,7 @@ Browsers without cross-origin isolation or WASM thread support use one thread.
   The shutter takes a still photo at the camera's full resolution where the browser supports it (`ImageCapture.takePhoto`), and a frame of the preview video otherwise.
   Some phones take the still photo with another lens than the preview (an ultra-wide one at 0.6x while the preview is at 1x).
   Each photo's view is matched against the preview; a photo with a different view is not used, the next try asks for the browser's default photo size, and if that also differs, that camera uses preview frames while the page is open.
-  Photos above 20 megapixels are reduced when taken. The scan details show the method, the photo and preview sizes, a rejected photo's view, and the capture time.
+  Photos above 20 megapixels are reduced when taken.
   One hint at a time guides the framing, judged from the page outline only: no page, page cut off at the edge, too close, too small, tilted.
   The scanner loads and warms up while you frame the page, then stays ready for the next photo.
   You can take a photo while it prepares; processing starts as soon as it is ready.
@@ -81,18 +81,18 @@ Browsers without cross-origin isolation or WASM thread support use one thread.
   The current scan stays visible and can be saved while refinement runs.
   Canceling or failing refinement keeps that scan and its edits; completing refinement replaces them.
 - Follow page detection, geometry and color correction under **See processing steps**.
-- Use **Clean color** to balance paper color and smooth lighting variation, darken text and whiten the paper.
+- The result offers **Save**, **Add to PDF** and **Edit**. **Edit** shows the color mode, finger removal, crop, rotate and 100% view; **Done** returns.
+- **Clean color** balances paper color and smooth lighting variation, darkens text and whitens the paper.
   New scans start in the color mode you chose last.
+  **Original color** is sharpened once, more when the photo was reduced more, and not at all when it was enlarged.
+  Clean color is not sharpened: it already darkens text, and sharpening on top of it lowered OCR accuracy on test photos.
 - Review suggested fingers near page edges, then adjust the selection with the brush.
 - Crop by dragging the frame's corners, edges or inside; rotate, undo edits, compare with the source and inspect at 100%.
 - Save the scan as PNG, JPG or PDF. **Add to PDF** collects scans as pages, kept while you go back (**<**) to scan the next one, and **Save PDF** writes them into one file.
-- Use **Scan settings** to change options and scan again.
-  **Sharpen text in Original color** (on by default) sharpens the page in Original color, more when the photo was reduced more, and not at all when it was enlarged.
-  Clean color does not sharpen: it already darkens text, and sharpening on top of it lowered OCR accuracy on test photos.
 
 The browser flattens one photo at a time.
 Inputs are limited to 40 MB and 20 megapixels, with at least 64 pixels on each side.
-Output is capped at four megapixels and the selected long edge, subject to the source's sampling density.
+Output is capped at four megapixels and 2560 pixels on the long edge, subject to the source's sampling density.
 The browser handles EXIF orientation, color profiles and decoding.
 Processing time starts after model download and setup.
 

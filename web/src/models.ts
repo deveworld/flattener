@@ -171,7 +171,6 @@ export class Models {
   }
 
   private async createSessions() {
-    this.report({ type: 'backend', backend: this.backend });
     for (const role of this.activeRoles) {
       this.report({
         type: 'progress',

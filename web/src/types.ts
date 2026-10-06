@@ -29,19 +29,6 @@ export type Options = {
 export type Backend = 'webgpu' | 'wasm';
 export type Point = [number, number];
 export type PageOutline = { points: Point[]; area: number; clipped: boolean };
-/** How a camera photo was taken: a still photo or a preview frame, its size and how long
- * the shutter took (seconds). */
-export type CaptureInfo = {
-  method: 'photo' | 'frame';
-  width: number;
-  height: number;
-  /** The live preview's video size, to compare its framing with the photo's. */
-  preview: { width: number; height: number };
-  seconds: number;
-  /** A photo showed another view than the preview and was not used: the preview's share of
-   * that photo's width (0.6: the photo was 1.67 times wider). */
-  view?: number;
-};
 export type CameraRequest =
   { type: 'load'; base: string } | { type: 'frame'; image: Pixels; width: number; height: number };
 export type CameraReply =
@@ -108,7 +95,6 @@ export type WorkerReply =
   | { type: 'progress'; stage: string; detail: string; fraction?: number }
   | { type: 'reset-steps' }
   | ({ type: 'step' } & ProcessingStep)
-  | { type: 'backend'; backend: Backend }
   | { type: 'result'; blob: Blob; raw: Blob; suggestion: Mask; metadata: ScanMetadata }
   | { type: 'error'; message: string };
 export type EditRequest = {

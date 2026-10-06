@@ -95,15 +95,6 @@ dd {
 h1 {
   text-wrap: balance;
 }
-.visually-hidden {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  padding: 0;
-  overflow: hidden;
-  clip-path: inset(50%);
-  white-space: nowrap;
-}
 .skip-link {
   position: fixed;
   left: 16px;
@@ -191,6 +182,13 @@ h1 {
 }
 .workspace:focus {
   outline: none;
+}
+/* Past the start screen the scan takes the whole height; the back button stays. */
+body.has-photo .app-header {
+  display: none;
+}
+body.has-photo .workspace {
+  margin-top: max(16px, env(safe-area-inset-top));
 }
 
 .button {
@@ -1025,30 +1023,6 @@ summary {
 summary::marker {
   color: var(--muted);
 }
-.scan-settings {
-  border-top: 1px solid var(--line);
-}
-.scan-settings > summary {
-  font-weight: 600;
-}
-.scan-settings fieldset {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 24px 32px;
-  border: 0;
-  padding: 16px 0 24px;
-  margin: 0;
-  min-width: 0;
-  max-width: 760px;
-}
-.setting {
-  min-width: 0;
-}
-.setting label {
-  display: block;
-  margin-bottom: 8px;
-  font-weight: 600;
-}
 select {
   width: 100%;
   min-height: 48px;
@@ -1060,44 +1034,6 @@ select {
 .help {
   color: var(--muted);
   margin-top: 8px;
-}
-.check-setting {
-  display: inline-flex;
-  align-items: center;
-  gap: 12px;
-  min-height: 44px;
-  grid-column: 1 / -1;
-  cursor: pointer;
-}
-.check-setting input {
-  width: 20px;
-  height: 20px;
-  margin: 0;
-}
-#rescan-controls {
-  padding-bottom: 24px;
-}
-#rescan {
-  background: var(--white);
-  border: 1px solid #a9b7ad;
-}
-#rescan:hover {
-  background: #e4ebe5;
-}
-.scan-details {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 24px;
-  border-top: 1px solid var(--line);
-  padding: 24px 0;
-  font-variant-numeric: tabular-nums;
-}
-.scan-details dt {
-  color: var(--muted);
-}
-.scan-details dd {
-  margin-top: 4px;
-  overflow-wrap: anywhere;
 }
 .workspace-footer {
   display: flex;
@@ -1350,10 +1286,6 @@ body.camera-open {
     height: 28px;
     margin-right: 8px;
   }
-  /* Past the start screen the scan takes the whole height; the back button stays. */
-  body.has-photo .app-header {
-    display: none;
-  }
   body.has-photo .workspace {
     margin-top: max(8px, env(safe-area-inset-top));
   }
@@ -1476,7 +1408,8 @@ body.camera-open {
   .save-group #download {
     flex: 1;
   }
-  #add-page {
+  #add-page,
+  #edit-open {
     flex: 1;
   }
   .crop-editor {
@@ -1485,14 +1418,6 @@ body.camera-open {
   .edit-controls {
     width: 100%;
     justify-content: center;
-  }
-  .scan-settings fieldset {
-    grid-template-columns: minmax(0, 1fr);
-    gap: 20px;
-  }
-  .scan-details {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 16px;
   }
   .workspace-footer {
     margin-top: 16px;

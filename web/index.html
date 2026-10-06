@@ -282,12 +282,19 @@
                   100% view
                 </button>
               </div>
+              <button id="edit-done" class="button primary" type="button" hidden>Done</button>
               <button id="scan" class="button primary" type="button" disabled>Flatten photo</button>
               <button id="cancel" class="button secondary" type="button" hidden>Cancel scan</button>
               <div id="result-actions" class="result-actions" hidden>
                 <button id="add-page" class="button secondary" type="button">
                   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
                   <span id="add-page-label">Add to PDF</span>
+                </button>
+                <button id="edit-open" class="button secondary" type="button">
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M4 20h4L19 9l-4-4L4 16v4ZM13 7l4 4" />
+                  </svg>
+                  Edit
                 </button>
                 <div class="save-group">
                   <a id="download" class="button primary" download aria-disabled="true">
@@ -332,56 +339,6 @@
           <p class="help">Actual intermediate results from this scan, before your edits.</p>
           <ol id="process-steps"></ol>
         </details>
-
-        <div id="settings-container" hidden>
-          <details id="scan-settings" class="scan-settings">
-            <summary>Scan settings</summary>
-            <fieldset id="settings-fields">
-              <legend class="visually-hidden">Scan settings</legend>
-              <div class="setting">
-                <label for="resolution">Longest edge</label>
-                <select id="resolution">
-                  <option value="2560">Up to 2560 px</option>
-                  <option value="1600">Up to 1600 px</option>
-                  <option value="1024">Up to 1024 px</option>
-                </select>
-              </div>
-              <label class="check-setting"
-                ><input id="orient" type="checkbox" checked /><span>Auto-rotate text</span></label
-              >
-              <label class="check-setting"
-                ><input id="sharpen" type="checkbox" checked /><span
-                  >Sharpen text in Original color</span
-                ></label
-              >
-            </fieldset>
-            <div id="rescan-controls" hidden>
-              <button id="rescan" class="button secondary" type="button">Scan again</button>
-            </div>
-            <dl id="scan-details" class="scan-details" hidden>
-              <div>
-                <dt>Original</dt>
-                <dd id="source-size" translate="no"></dd>
-              </div>
-              <div>
-                <dt>Scan</dt>
-                <dd id="result-size" translate="no"></dd>
-              </div>
-              <div id="capture-row" hidden>
-                <dt>Capture</dt>
-                <dd id="capture-info"></dd>
-              </div>
-              <div>
-                <dt>Processing time</dt>
-                <dd id="result-info"></dd>
-              </div>
-              <div>
-                <dt>Processing device</dt>
-                <dd id="engine">This device</dd>
-              </div>
-            </dl>
-          </details>
-        </div>
 
         <footer class="workspace-footer">
           <div class="privacy">

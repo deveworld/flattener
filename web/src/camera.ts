@@ -6,7 +6,7 @@ import {
   type Gray,
   type Guidance,
 } from './camera-outline';
-import type { CameraReply, CameraRequest, CaptureInfo, PageOutline } from './types';
+import type { CameraReply, CameraRequest, PageOutline } from './types';
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const MAX_PIXELS = 20_000_000; // the scanner's input limit
@@ -47,12 +47,12 @@ function grayOf(source: CanvasImageSource, width: number, height: number, long: 
 
 /** ``blob`` as a capture within the scanner's pixel limit (re-encoded only when larger), with
  * a small grayscale copy to compare its view with the preview's. */
-async function fitShot(blob: Blob, method: CaptureInfo['method']) {
+async function fitShot(blob: Blob) {
   const bitmap = await createImageBitmap(blob, { imageOrientation: 'from-image' });
   try {
     const { width, height } = bitmap;
     const gray = grayOf(bitmap, width, height, 256);
-    if (width * height <= MAX_PIXELS) return { blob, method, width, height, gray };
+    if (width * height <= MAX_PIXELS) return { blob, gray };
     const scale = Math.sqrt(MAX_PIXELS / (width * height));
     const canvas = document.createElement('canvas');
     canvas.width = Math.floor(width * scale);
@@ -62,16 +62,15 @@ async function fitShot(blob: Blob, method: CaptureInfo['method']) {
       canvas.toBlob(resolve, 'image/jpeg', 0.95),
     );
     if (!smaller) throw new Error('encode');
-    return { blob: smaller, method, width: canvas.width, height: canvas.height, gray };
+    return { blob: smaller, gray };
   } finally {
     bitmap.close();
   }
 }
 
 /** Still photos per camera (device id) while the page is open: at the largest size, at the
- * browser's default size, or none, after photos showed another view than the preview; and
- * the view of the last photo that was not used. */
-const photoModes = new Map<string, { mode: 'largest' | 'default' | 'off'; view?: number }>();
+ * browser's default size, or none, after photos showed another view than the preview. */
+const photoModes = new Map<string, 'largest' | 'default' | 'off'>();
 
 const HINTS: Record<Guidance, string> = {
   none: 'Point the camera at a page',
@@ -109,7 +108,7 @@ export class Camera {
   private inFlight = false;
 
   constructor(
-    private captured: (file: File, info?: CaptureInfo) => void,
+    private captured: (file: File) => void,
     /** After the camera closes; ``dismissed`` is false when it closed for a taken photo. */
     private closed: (dismissed: boolean) => void = () => {},
   ) {
@@ -438,7 +437,7 @@ export class Camera {
           height = capabilities.imageHeight?.max;
         if (width && height) settings = { imageWidth: width, imageHeight: height };
       }
-      return await fitShot(await within(capture.takePhoto(settings), 8000), 'photo');
+      return await fitShot(await within(capture.takePhoto(settings), 8000));
     } catch {
       return null;
     }
@@ -448,26 +447,24 @@ export class Camera {
    * A still photo that shows what the preview shows. Some phones take the photo with another
    * lens (an ultra-wide one at 0.6x while the preview is at 1x). Such a photo is not used:
    * the next try asks for the browser's default photo size, and after that this camera uses
-   * preview frames. ``view`` is the preview's share of the last rejected photo's width.
+   * preview frames.
    */
   private async takeMatchingStill() {
     const preview = this.video.videoWidth
       ? grayOf(this.video, this.video.videoWidth, this.video.videoHeight, 64)
       : null;
     const camera = this.stream?.getVideoTracks()[0]?.getSettings().deviceId ?? '';
-    let { mode, view } = photoModes.get(camera) ?? { mode: 'largest' };
+    let mode = photoModes.get(camera) ?? 'largest';
     while (mode !== 'off') {
       const photo = await this.takeStill(mode === 'largest');
-      if (!photo) return { shot: null, view };
+      if (!photo) return null;
       const match = preview ? previewInPhoto(preview, photo.gray) : null;
       // A poor match (motion, a rotated photo) cannot tell; the photo is kept then.
-      if (!match || match.score < 0.5 || Math.abs(match.scale - 1) <= 0.1)
-        return { shot: photo, view };
-      view = match.scale;
+      if (!match || match.score < 0.5 || Math.abs(match.scale - 1) <= 0.1) return photo.blob;
       mode = mode === 'largest' ? 'default' : 'off';
-      photoModes.set(camera, { mode, view });
+      photoModes.set(camera, mode);
     }
-    return { shot: null, view };
+    return null;
   }
 
   /** The current preview frame, the fallback where still photos are not offered. */
@@ -484,14 +481,12 @@ export class Camera {
       canvas.toBlob(resolve, 'image/jpeg', 0.96),
     );
     if (!blob) throw new Error('The photo could not be saved. Try taking it again.');
-    return { blob, method: 'frame' as const, width: canvas.width, height: canvas.height };
+    return blob;
   }
 
   private async capture() {
     if (!this.stream || this.shutter.disabled || this.capturing) return;
     const generation = this.generation;
-    const started = performance.now();
-    const preview = { width: this.video.videoWidth, height: this.video.videoHeight };
     this.capturing = true;
     this.shutter.disabled = true;
     this.flip.disabled = true;
@@ -502,20 +497,12 @@ export class Camera {
     try {
       const still = await this.takeMatchingStill();
       if (generation !== this.generation) return;
-      const shot = still.shot ?? (await this.grabFrame());
+      const blob = still ?? (await this.grabFrame());
       if (generation !== this.generation) return;
-      const info: CaptureInfo = {
-        method: shot.method,
-        width: shot.width,
-        height: shot.height,
-        preview,
-        seconds: (performance.now() - started) / 1000,
-      };
-      if (still.view !== undefined) info.view = still.view;
-      const file = new File([shot.blob], `document-${Date.now()}.jpg`, { type: 'image/jpeg' });
+      const file = new File([blob], `document-${Date.now()}.jpg`, { type: 'image/jpeg' });
       this.capturedClose = true;
       this.close();
-      this.captured(file, info);
+      this.captured(file);
     } catch {
       if (generation !== this.generation) return;
       this.capturing = false;
