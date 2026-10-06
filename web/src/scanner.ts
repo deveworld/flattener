@@ -147,8 +147,14 @@ export async function scan(
   // Dewarp passes behind the result, a confirming try (below) included.
   let passes = 0;
   // Flattens the page from ``placement``, turned ``quarter`` times: the first pass, a corner
-  // fill and in Refined mode two edge refinements. ``restore`` undoes a kept corner fill.
-  async function flatten(placement: Placement, quarter: number, label = '') {
+  // fill and in Refined mode two edge refinements, each shown by ``show``. ``restore`` undoes
+  // a kept corner fill.
+  async function flatten(
+    placement: Placement,
+    quarter: number,
+    label = '',
+    show: typeof steps.mesh = steps.mesh,
+  ) {
     const notes: string[] = [];
     let restore = () => {};
     let grid = await predict(placement);
@@ -180,7 +186,7 @@ export async function scan(
         restore = unpaint;
       } else unpaint();
     }
-    await steps.mesh(image, grid, passes);
+    await show(image, grid, 0);
     if (refined)
       for (let i = 0; i < 2; i++) {
         status(
@@ -202,7 +208,7 @@ export async function scan(
           break;
         }
         grid = next;
-        await steps.mesh(image, grid, passes);
+        await show(image, grid, i + 1);
       }
     return { grid, notes, restore };
   }
@@ -244,10 +250,15 @@ export async function scan(
       const quarter = (rotation + result.k) % 4;
       const view = turnPlacement(boxView, quarter);
       place('page box, turned to confirm', view);
-      const again = await flatten(view, quarter, 'confirm ');
+      // Its previews replace the shown ones only when it is kept.
+      const shown: Parameters<typeof steps.mesh>[] = [];
+      const again = await flatten(view, quarter, 'confirm ', async (...args) => {
+        shown.push(args);
+      });
       if (!('error' in again)) {
         const confirmed = await check(again.grid, 'confirm');
         if (confirmed.accepted && confirmed.k === 0) {
+          for (const args of shown) await steps.mesh(...args);
           ({ grid, notes } = again);
           rotation = quarter;
           uncertain = false;

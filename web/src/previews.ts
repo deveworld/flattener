@@ -74,7 +74,8 @@ export function createSteps(report: (reply: WorkerReply) => void) {
         canvas,
       );
     },
-    async mesh(image: Pixels, grid: Grid, pass: number) {
+    /** ``refinement`` 0 is the first estimate of the page shape, then each edge refinement. */
+    async mesh(image: Pixels, grid: Grid, refinement: number) {
       const { canvas, ctx } = await canvasFor(image);
       const point = (r: number, c: number) => {
         const i = (r * grid.cols + c) * 2;
@@ -102,8 +103,8 @@ export function createSteps(report: (reply: WorkerReply) => void) {
       ctx.strokeStyle = '#a2ffbd';
       ctx.stroke();
       await send(
-        `mesh-${pass}`,
-        pass === 1 ? 'Page shape estimated' : `Edges refined · ${pass - 1}`,
+        `mesh-${refinement}`,
+        refinement ? `Edges refined · ${refinement}` : 'Page shape estimated',
         'These lines follow the calculated page surface. They become straight in the scan.',
         canvas,
       );
