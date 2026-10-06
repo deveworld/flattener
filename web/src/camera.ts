@@ -52,7 +52,7 @@ async function fitShot(blob: Blob) {
   try {
     const { width, height } = bitmap;
     const gray = grayOf(bitmap, width, height, 256);
-    if (width * height <= MAX_PIXELS) return { blob, gray };
+    if (width * height <= MAX_PIXELS) return { blob, gray, width, height };
     const scale = Math.sqrt(MAX_PIXELS / (width * height));
     const canvas = document.createElement('canvas');
     canvas.width = Math.floor(width * scale);
@@ -62,7 +62,7 @@ async function fitShot(blob: Blob) {
       canvas.toBlob(resolve, 'image/jpeg', 0.95),
     );
     if (!smaller) throw new Error('encode');
-    return { blob: smaller, gray };
+    return { blob: smaller, gray, width, height };
   } finally {
     bitmap.close();
   }
@@ -106,6 +106,17 @@ export class Camera {
   private nativeCapture = $<HTMLInputElement>('camera-capture');
   /** A frame is with the detector; one frame at a time keeps a single loop. */
   private inFlight = false;
+
+  /** Filled only with ``?debug``: recent live outlines and how each photo was taken. */
+  diagnostics?: {
+    frames: {
+      time: number;
+      video: number[];
+      outline: number[][] | null;
+      shown: number[][] | null;
+    }[];
+    captures: Record<string, unknown>[];
+  };
 
   constructor(
     private captured: (file: File) => void,
@@ -390,6 +401,16 @@ export class Camera {
     if (!outline) this.clearOutline();
     else {
       this.outline = smoothOutline(this.outline, outline);
+      if (this.diagnostics) {
+        const frames = this.diagnostics.frames;
+        frames.push({
+          time: Math.round(performance.now()),
+          video: [this.video.videoWidth, this.video.videoHeight],
+          outline: outline.points,
+          shown: this.outline.points,
+        });
+        if (frames.length > 40) frames.shift();
+      }
       this.path.setAttribute(
         'd',
         this.outline.points.map(([x, y], i) => `${i ? 'L' : 'M'}${x} ${y}`).join(' ') + 'Z',
@@ -459,6 +480,13 @@ export class Camera {
       const photo = await this.takeStill(mode === 'largest');
       if (!photo) return null;
       const match = preview ? previewInPhoto(preview, photo.gray) : null;
+      this.diagnostics?.captures.push({
+        time: Math.round(performance.now()),
+        mode,
+        photo: [photo.width, photo.height],
+        preview: [this.video.videoWidth, this.video.videoHeight],
+        match,
+      });
       // A poor match (motion, a rotated photo) cannot tell; the photo is kept then.
       if (!match || match.score < 0.5 || Math.abs(match.scale - 1) <= 0.1) return photo.blob;
       mode = mode === 'largest' ? 'default' : 'off';

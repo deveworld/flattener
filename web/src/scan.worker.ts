@@ -10,7 +10,7 @@ import {
 } from './cleanup';
 import { createSteps, encode } from './previews';
 import { sharpenPixels } from './sharpen';
-import type { Backend, Pixels, WorkerReply, WorkerRequest } from './types';
+import type { Backend, Pixels, ScanTrace, WorkerReply, WorkerRequest } from './types';
 
 let models: Models | undefined;
 let preparation: Promise<Models> | undefined;
@@ -103,6 +103,7 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
   busy = true;
   try {
     const { file, options, base, backend } = event.data;
+    let trace: ScanTrace | undefined;
     report({
       type: 'progress',
       stage: 'Opening your photo',
@@ -119,7 +120,8 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
     const start = performance.now();
     let output;
     try {
-      output = await scan(source, models, options, report);
+      trace = event.data.trace ? { placements: [], orientation: [], passes: [] } : undefined;
+      output = await scan(source, models, options, report, { trace });
     } catch (error) {
       // Retry actual GPU/runtime failures, never turn a failed geometry check into success.
       if (
@@ -129,7 +131,8 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
         throw error;
       report({ type: 'reset-steps' });
       await models.fallback();
-      output = await scan(source, models, options, report);
+      trace = event.data.trace ? { placements: [], orientation: [], passes: [] } : undefined;
+      output = await scan(source, models, options, report, { trace });
     }
     const { result, warnings, passes, rotation } = output;
     const steps = createSteps(report),
@@ -183,6 +186,7 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
         model: models.manifest.version,
         sharpen: output.sharpen,
       },
+      trace,
     });
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);

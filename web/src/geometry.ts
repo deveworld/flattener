@@ -162,7 +162,14 @@ export function fromCHW(data: Float32Array, rows: number, cols: number): Grid {
   return { rows, cols, data: result };
 }
 
-export function blendFlip(grid: Grid, flipped: Grid): Grid {
+/** The mean of a grid and its mirrored-input prediction, or the grid alone when the two
+ * disagree (half the median node distance above 0.03). ``info`` receives that distance and
+ * the half distance at every node, a map of where the two predictions disagree. */
+export function blendFlip(
+  grid: Grid,
+  flipped: Grid,
+  info: { gap?: number; gaps?: number[] } = {},
+): Grid {
   const mirror = new Float64Array(grid.data.length),
     gaps = [];
   for (let y = 0; y < grid.rows; y++)
@@ -173,7 +180,9 @@ export function blendFlip(grid: Grid, flipped: Grid): Grid {
       mirror[a + 1] = flipped.data[b + 1];
       gaps.push(Math.hypot(grid.data[a] - mirror[a], grid.data[a + 1] - mirror[a + 1]) / 2);
     }
-  if (median(gaps) > 0.03) return grid;
+  info.gap = median(gaps);
+  info.gaps = gaps;
+  if (info.gap > 0.03) return grid;
   return { ...grid, data: grid.data.map((v, i) => Math.fround((v + mirror[i]) / 2)) };
 }
 

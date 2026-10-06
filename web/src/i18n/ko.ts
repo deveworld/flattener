@@ -76,6 +76,7 @@ export const ko: Record<string, string> = {
   'Possible fingers found. Review them under Edit.':
     '손가락으로 보이는 부분이 있습니다. 편집에서 확인하세요.',
   Edit: '편집',
+  'Download diagnostics': '진단 정보 내려받기',
   Done: '완료',
   'Scan cancelled.': '스캔을 취소했습니다.',
   'Refinement cancelled.': '정밀 스캔을 취소했습니다.',

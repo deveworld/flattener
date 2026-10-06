@@ -11,6 +11,31 @@ export type EditSettings = {
 };
 export type ProcessingStep = { id: string; title: string; detail: string; blob: Blob };
 export type Grid = { rows: number; cols: number; data: Float64Array };
+/** What one scan decided, for diagnostics: collected only when a trace object is passed. */
+export type ScanTrace = {
+  gate?: { width: number; height: number; probability: number[] };
+  /** The gate's page box in photo pixels [left, top, right, bottom], and how it was found. */
+  box?: { value: number[] | null; pieces: number; split: boolean; fromWholePass: boolean };
+  placements: { name: string; placement: Placement }[];
+  orientation: {
+    stage: 'before' | 'after';
+    probabilities: number[];
+    k: number;
+    accepted: boolean;
+  }[];
+  /** Every dewarp prediction: its grid in photo-normalized coordinates and what became of it. */
+  passes: {
+    name: string;
+    grid: { rows: number; cols: number; data: number[] };
+    flipGap?: number;
+    /** Half the distance between the grid and its mirrored-input prediction at each node. */
+    flipGaps?: number[];
+    error: string | null;
+    used: boolean;
+  }[];
+  rotation?: number;
+  output?: { height: number; width: number };
+};
 export type Placement = {
   matrix: [number, number, number, number];
   offset: [number, number];
@@ -89,13 +114,22 @@ export type WorkerRequest =
       options: Options;
       base: string;
       backend?: Backend;
+      /** Collect a ScanTrace for the diagnostics download (``?debug``). */
+      trace?: boolean;
     };
 export type WorkerReply =
   | { type: 'preparation'; state: PreparationState }
   | { type: 'progress'; stage: string; detail: string; fraction?: number }
   | { type: 'reset-steps' }
   | ({ type: 'step' } & ProcessingStep)
-  | { type: 'result'; blob: Blob; raw: Blob; suggestion: Mask; metadata: ScanMetadata }
+  | {
+      type: 'result';
+      blob: Blob;
+      raw: Blob;
+      suggestion: Mask;
+      metadata: ScanMetadata;
+      trace?: ScanTrace;
+    }
   | { type: 'error'; message: string };
 export type EditRequest = {
   id: number;

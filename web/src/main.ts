@@ -14,6 +14,7 @@ import type {
   ProcessingStep,
   PreparationState,
   ScanMetadata,
+  ScanTrace,
   WorkerReply,
   WorkerRequest,
 } from './types';
@@ -42,6 +43,9 @@ let activeOptions: Options | undefined, resultOptions: Options | undefined;
 let colorChoice = true;
 /** The result shows its edit tools (color, fingers, crop, rotate, 100% view). */
 let editMode = false;
+/** ``?debug``: each scan records its decisions for a diagnostics download. */
+const debug = new URLSearchParams(location.search).has('debug');
+let lastTrace: ScanTrace | undefined;
 let preparationState: PreparationState = 'idle';
 let rawBlob: Blob | undefined, suggestion: Mask | undefined, settings: EditSettings | undefined;
 let editWorker: Worker | undefined,
@@ -58,6 +62,7 @@ const camera = new Camera(
     if (dismissed && !selected && !followingHistory) leaveAway();
   },
 );
+if (debug) camera.diagnostics = { frames: [], captures: [] };
 
 // History: the camera and an open photo share one entry above the start screen, so the
 // browser's back gesture returns to the start screen instead of leaving the app.
@@ -256,6 +261,7 @@ function clearResult() {
   $('refine-controls').hidden = true;
   $('edit-controls').hidden = true;
   $('edit-done').hidden = true;
+  $('diagnostics').hidden = true;
   editMode = false;
   $('view-controls').hidden = true;
   $('warnings').hidden = true;
@@ -627,6 +633,8 @@ function scannerWorker(): Worker {
         refining = false;
         metadata = data.metadata;
         rawBlob = data.raw;
+        lastTrace = data.trace;
+        $('diagnostics').hidden = !lastTrace;
         suggestion = data.suggestion;
         settings = {
           cleanColor: resultOptions?.cleanColor ?? true,
@@ -712,6 +720,7 @@ function startScan(quality: Options['quality'] = 'fast') {
     file: selected,
     options,
     base: new URL('.', document.baseURI).href,
+    trace: debug || undefined,
   };
   try {
     scannerWorker().postMessage(request);
@@ -756,6 +765,19 @@ $('cancel').onclick = () => {
 for (const mode of ['original', 'scan', 'compare'] as const)
   $(`show-${mode}`).onclick = () => view(mode);
 $('process-back').onclick = () => view(resultBlob ? 'scan' : 'original');
+$('diagnostics').onclick = () => {
+  const link = $<HTMLAnchorElement>('diagnostics');
+  URL.revokeObjectURL(link.href);
+  const report = {
+    userAgent: navigator.userAgent,
+    file: selected && { name: selected.name, size: selected.size, type: selected.type },
+    options: resultOptions,
+    metadata,
+    trace: lastTrace,
+    camera: camera.diagnostics,
+  };
+  link.href = URL.createObjectURL(new Blob([JSON.stringify(report)], { type: 'application/json' }));
+};
 function setZoom(active: boolean) {
   $('images').classList.toggle('zoomed', active);
   $('zoom').setAttribute('aria-pressed', String(active));

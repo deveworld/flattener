@@ -137,6 +137,23 @@ npm run build
 Tests cover geometry against Python fixtures, color correction, sharpening, removal masks, rotations, capture guidance and the photo view check.
 Regenerate the fixtures with `uv run python tools/web/generate_fixtures.py`.
 
+### Diagnostics
+
+Open the app with `?debug` to record what each scan decided: the gate's page probability and box, every placement, the orientation probabilities before and after flattening, each dewarp pass's grid with why it was kept or dropped, and how far the mirrored-view prediction disagreed at each node.
+The result then offers **Download diagnostics**, a JSON file that also holds the camera's recent live outlines and how each photo matched the preview.
+Without `?debug` nothing is recorded.
+
+The same pipeline runs outside the browser on ONNX Runtime Web's WASM backend:
+
+```sh
+uv run python tools/web/decode_photos.py DECODED_DIR photo.jpg ...
+node --import tsx scripts/trace.ts DECODED_DIR OUT_DIR [fast|refined|both]
+```
+
+`decode_photos.py` applies EXIF orientation and color profiles as a browser does.
+For each photo and mode the harness writes the trace as JSON and the flattened page, before color edits, as raw RGBA.
+On one photo its grids matched the browser's within 1e-4 of the page width.
+
 Browser checks used Chromium on Linux with WASM.
 Testing on hardware WebGPU devices is pending.
 
