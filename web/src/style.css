@@ -1210,3 +1210,8 @@ body.camera-open {
     grid-row: 2;
   }
 }
+
+/* Korean breaks lines between words, not inside them. */
+:lang(ko) body {
+  word-break: keep-all;
+}

@@ -89,6 +89,12 @@ Processing time starts after model download and setup.
 
 For book splitting, batches and the full rendering options, use the [Python scanner](../README.md#scan).
 
+## Languages
+
+The interface is in Korean when the browser's first preferred language is Korean, and in English otherwise.
+`src/i18n.ts` translates the page and every text the app writes, using the English text as the key; Korean text lives in `src/i18n/ko.ts`.
+Add an entry there for any new English interface text.
+
 ## Color and finger cleanup
 
 Edits are recalculated from the original flattened image.

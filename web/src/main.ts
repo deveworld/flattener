@@ -14,6 +14,9 @@ import type {
   WorkerReply,
   WorkerRequest,
 } from './types';
+import { localize } from './i18n';
+
+localize();
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const fileInput = $<HTMLInputElement>('file-input'),
