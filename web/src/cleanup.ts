@@ -321,6 +321,133 @@ export function estimatePaper(image: Pixels, excluded?: Mask): PaperField {
   return { width: cols, height: rows, data: smooth };
 }
 
+const ease = (x: number, from: number, to: number) => {
+  const t = clamp((x - from) / (to - from), 0, 1);
+  return t * t * (3 - 2 * t);
+};
+
+/** A 3x3 weighted average over a small per-cell field (``channels`` values per cell). */
+function smoothCells(data: Float32Array, cols: number, rows: number, channels: number) {
+  const out = data.slice();
+  for (let y = 0; y < rows; y++)
+    for (let x = 0; x < cols; x++)
+      for (let c = 0; c < channels; c++) {
+        let sum = 0,
+          weight = 0;
+        for (let dy = -1; dy <= 1; dy++)
+          for (let dx = -1; dx <= 1; dx++) {
+            const w = (dx === 0 ? 2 : 1) * (dy === 0 ? 2 : 1);
+            sum +=
+              data[
+                (clamp(y + dy, 0, rows - 1) * cols + clamp(x + dx, 0, cols - 1)) * channels + c
+              ] * w;
+            weight += w;
+          }
+        out[(y * cols + x) * channels + c] = sum / weight;
+      }
+  return out;
+}
+
+/** Ink stretch and paper whitening, set on the KR-Real development pages (OCR and by eye). */
+export const INK = {
+  percentile: 0.05, // the ink level of a cell: this low percentile of luma over paper
+  inkBelow: 0.65, // luma over paper below this is ink
+  midBelow: 0.88, // between inkBelow and this: midtones (photos, gray fills, shading)
+  target: 18, // the stretched ink level in text cells (0..255)
+  maxGain: 2.2, // the largest stretch of the paper-to-ink range
+  whiteFrom: 0.8, // levels above this share of the paper ease to white
+  tintFrom: 6, // channel spread (0..255) where whitening starts to fade: light tints stay
+  tintTo: 20,
+  maxChroma: 1.5, // the stretch grows a pixel's channel spread by at most this factor
+};
+
+/** Per cell: ink level (luma over paper), stretch strength and whitening strength. */
+export type InkField = { width: number; height: number; data: Float32Array };
+
+/**
+ * Ink levels and how strongly to stretch them, from the same cells as ``estimatePaper``.
+ * Text cells (strong contrast, little ink cover, few midtones) are stretched; cells full of
+ * midtones (photos, colored print, dark pages) are neither stretched nor whitened; plain
+ * paper is whitened only. A page with few text cells is stretched less overall.
+ */
+export function estimateInk(image: Pixels, paper: PaperField, excluded?: Mask): InkField {
+  const scale = Math.min(1, 512 / Math.max(image.width, image.height));
+  const sw = Math.max(1, Math.round(image.width * scale)),
+    sh = Math.max(1, Math.round(image.height * scale));
+  const cols = Math.max(2, Math.round(sw / 32)),
+    rows = Math.max(2, Math.round(sh / 32));
+  const ratios: number[][] = Array.from({ length: cols * rows }, () => []);
+  for (let y = 0; y < sh; y++)
+    for (let x = 0; x < sw; x++) {
+      if (selected(excluded, x, y, sw, sh)) continue;
+      const sx = ((x + 0.5) * image.width) / sw - 0.5,
+        sy = ((y + 0.5) * image.height) / sh - 0.5;
+      const luma =
+        0.2126 * bilinear(image.data, image.width, image.height, sx, sy, 4, 0) +
+        0.7152 * bilinear(image.data, image.width, image.height, sx, sy, 4, 1) +
+        0.0722 * bilinear(image.data, image.width, image.height, sx, sy, 4, 2);
+      const paperLuma =
+        0.2126 * paperAt(paper, x, y, sw, sh, 0) +
+        0.7152 * paperAt(paper, x, y, sw, sh, 1) +
+        0.0722 * paperAt(paper, x, y, sw, sh, 2);
+      const cell =
+        Math.min(rows - 1, Math.floor((y * rows) / sh)) * cols +
+        Math.min(cols - 1, Math.floor((x * cols) / sw));
+      ratios[cell].push(luma / Math.max(paperLuma, 1));
+    }
+  const data = new Float32Array(cols * rows * 3);
+  let content = 0,
+    text = 0;
+  for (let cell = 0; cell < ratios.length; cell++) {
+    const values = ratios[cell];
+    if (values.length < 16) {
+      data.set([1, 0, 1], cell * 3);
+      continue;
+    }
+    values.sort((a, b) => a - b);
+    const ink = values[Math.floor(values.length * INK.percentile)];
+    let inked = 0,
+      mid = 0;
+    for (const v of values) {
+      if (v < INK.inkBelow) inked++;
+      else if (v < INK.midBelow) mid++;
+    }
+    const cover = inked / values.length,
+      midtones = mid / values.length;
+    const plain = 1 - ease(midtones, 0.12, 0.3);
+    const strength = ease(1 - ink, 0.3, 0.5) * plain * (1 - ease(cover, 0.3, 0.5));
+    data.set([Math.min(1, ink), strength, plain], cell * 3);
+    if (cover > 0.003 || midtones > 0.05) {
+      content++;
+      if (strength > 0.5) text++;
+    }
+  }
+  const page = content ? clamp(0.35 + (0.65 * (text / content)) / 0.4, 0.35, 1) : 1;
+  for (let cell = 0; cell < ratios.length; cell++) data[cell * 3 + 1] *= page;
+  return { width: cols, height: rows, data: smoothCells(data, cols, rows, 3) };
+}
+
+/** Bilinear rows of a small field across ``width`` pixels, ``channels`` values per cell. */
+function fieldRows(
+  field: { width: number; height: number; data: Float32Array },
+  channels: number,
+  width: number,
+) {
+  const rows = new Float64Array(field.height * width * channels);
+  for (let x = 0; x < width; x++) {
+    const sx = clamp(((x + 0.5) * field.width) / width - 0.5, 0, field.width - 1);
+    const x0 = Math.floor(sx),
+      x1 = Math.min(x0 + 1, field.width - 1),
+      dx = sx - x0;
+    for (let y = 0; y < field.height; y++)
+      for (let c = 0; c < channels; c++)
+        rows[(y * width + x) * channels + c] =
+          field.data[(y * field.width + x0) * channels + c] * (1 - dx) +
+          field.data[(y * field.width + x1) * channels + c] * dx;
+  }
+  return rows;
+}
+
 export function paperAt(
   field: PaperField,
   x: number,
@@ -340,12 +467,16 @@ export function paperAt(
   );
 }
 
-/** Non-destructive edits: every invocation starts with the same uncorrected scan. */
+/** Non-destructive edits: every invocation starts with the same uncorrected scan.
+ * Clean color divides out the paper's light and color, stretches ink in text areas and
+ * eases near-paper levels to white (``estimateInk``); ``contrast: false`` keeps only the
+ * division. */
 export function cleanDocument(
   image: Pixels,
   mask: Mask,
   cleanColor: boolean,
   field?: PaperField,
+  { contrast = true, ink }: { contrast?: boolean; ink?: InkField } = {},
 ): Pixels {
   validateMask(mask);
   const data = image.data.slice(),
@@ -353,36 +484,73 @@ export function cleanDocument(
   const hasMask = maskCount(mask) > 0;
   if (!cleanColor && !hasMask) return { width, height, data };
   field ??= estimatePaper(image, mask);
-  // Cache horizontal interpolation across the much smaller lighting grid.
-  const horizontal = new Float64Array(field.height * width * 3);
-  for (let x = 0; x < width; x++) {
-    const sx = clamp(((x + 0.5) * field.width) / width - 0.5, 0, field.width - 1);
-    const x0 = Math.floor(sx),
-      x1 = Math.min(x0 + 1, field.width - 1),
-      dx = sx - x0;
-    for (let y = 0; y < field.height; y++)
-      for (let c = 0; c < 3; c++)
-        horizontal[(y * width + x) * 3 + c] =
-          field.data[(y * field.width + x0) * 3 + c] * (1 - dx) +
-          field.data[(y * field.width + x1) * 3 + c] * dx;
-  }
+  if (cleanColor && contrast) ink ??= estimateInk(image, field, mask);
+  // Cache horizontal interpolation across the much smaller lighting grids.
+  const paperRows = fieldRows(field, 3, width);
+  const inkRows = cleanColor && contrast && ink ? fieldRows(ink, 3, width) : undefined;
+  const lerp = (rows: Float64Array, y0: number, y1: number, dy: number, x: number, c: number) =>
+    rows[(y0 * width + x) * 3 + c] * (1 - dy) + rows[(y1 * width + x) * 3 + c] * dy;
+  const level = 248,
+    white = level * INK.whiteFrom; // the white point: stretched below, eased to white above
+  const lit = new Float64Array(3),
+    out = new Float64Array(3);
+  const spread = (v: Float64Array) => Math.max(v[0], v[1], v[2]) - Math.min(v[0], v[1], v[2]);
   for (let y = 0; y < height; y++) {
     const sy = clamp(((y + 0.5) * field.height) / height - 0.5, 0, field.height - 1);
     const y0 = Math.floor(sy),
       y1 = Math.min(y0 + 1, field.height - 1),
       dy = sy - y0;
+    let k0 = 0,
+      k1 = 0,
+      ky = 0;
+    if (ink) {
+      const ty = clamp(((y + 0.5) * ink.height) / height - 0.5, 0, ink.height - 1);
+      k0 = Math.floor(ty);
+      k1 = Math.min(k0 + 1, ink.height - 1);
+      ky = ty - k0;
+    }
     for (let x = 0; x < width; x++) {
       const i = (y * width + x) * 4,
         remove = hasMask && selected(mask, x, y, width, height);
       if (!cleanColor && !remove) continue;
+      let gain = 1,
+        whiten = 0;
+      if (inkRows) {
+        // Levels below the white point stretch so that the ink reaches its target; the
+        // white point stays, so light show-through from the other side is not darkened.
+        const inkIn = Math.min(lerp(inkRows, k0, k1, ky, x, 0) * level, white - 1),
+          stretch = lerp(inkRows, k0, k1, ky, x, 1);
+        whiten = lerp(inkRows, k0, k1, ky, x, 2);
+        const target = inkIn * (1 - stretch) + INK.target * stretch;
+        gain = clamp((white - target) / (white - inkIn), 1, INK.maxGain);
+      }
       for (let c = 0; c < 3; c++) {
-        const paper =
-          horizontal[(y0 * width + x) * 3 + c] * (1 - dy) +
-          horizontal[(y1 * width + x) * 3 + c] * dy;
+        const paper = lerp(paperRows, y0, y1, dy, x, c);
         // Mask-only fill leaves every unselected source pixel exactly unchanged.
         const value = remove ? paper : image.data[i + c];
-        data[i + c] = cleanColor ? value * clamp(248 / Math.max(paper, 70), 0.85, 2.5) : value;
+        if (!cleanColor) data[i + c] = value;
+        else lit[c] = value * clamp(level / Math.max(paper, 70), 0.85, 2.5);
       }
+      if (!cleanColor) continue;
+      if (!inkRows) {
+        data.set(lit, i);
+        continue;
+      }
+      for (let c = 0; c < 3; c++)
+        out[c] = lit[c] < white ? white - (white - lit[c]) * gain : lit[c];
+      // Each channel stretches on its own, so colored ink keeps its hue; its spread
+      // around the gray level is capped so color print is not oversaturated.
+      const spreadIn = spread(lit),
+        spreadOut = spread(out);
+      if (spreadOut > spreadIn * INK.maxChroma) {
+        const gray = (out[0] + out[1] + out[2]) / 3,
+          k = (spreadIn * INK.maxChroma) / spreadOut;
+        for (let c = 0; c < 3; c++) out[c] = gray + (out[c] - gray) * k;
+      }
+      // Near-paper levels ease to white, except light tints (colored panels, shading).
+      const neutral = whiten * (1 - ease(spreadIn, INK.tintFrom, INK.tintTo));
+      for (let c = 0; c < 3; c++)
+        data[i + c] = out[c] + (255 - out[c]) * ease(out[c], white, level) * neutral;
     }
   }
   return { width, height, data };

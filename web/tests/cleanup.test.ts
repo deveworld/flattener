@@ -73,6 +73,58 @@ test('colored ink keeps its hue and original color is an exact no-op', () => {
   assert.ok(output.data[i] > output.data[i + 1] * 3 && output.data[i + 1] > output.data[i + 2]);
 });
 
+test('the ink stretch darkens faint text and whitens paper; contrast off keeps the division', () => {
+  const source = paper();
+  for (let i = 0; i < source.data.length; i += 4)
+    if (source.data[i] < 120)
+      source.data.set(
+        [105, 102, 98].map((v) => v + (i % 7)),
+        i,
+      );
+  const mask = emptyMask(source.width, source.height);
+  const divided = cleanDocument(source, mask, true, undefined, { contrast: false }),
+    stretched = cleanDocument(source, mask, true);
+  const text = (16 * source.width + 128) * 4,
+    blank = (10 * source.width + 128) * 4;
+  assert.ok(stretched.data[text] < divided.data[text] - 60, `${stretched.data[text]}`);
+  assert.ok(stretched.data[text] < 70);
+  assert.ok(stretched.data[blank] >= 253 && divided.data[blank] < 252);
+});
+
+test('light tints and photo midtones keep their color under the ink stretch', () => {
+  const source = paper();
+  // A pale pink print (paper times 1, 0.92, 0.92) in the same shadow as the paper (smaller than a paper cell; a large
+  // one is taken as paper) and a photo-like gradient block on the same page.
+  for (let y = 104; y < 120; y++)
+    for (let x = 56; x < 72; x++) {
+      const shade = 0.68 + (0.3 * x) / source.width;
+      source.data.set(
+        [...[246, 209, 186].map((v) => Math.round(v * shade)), 255],
+        (y * source.width + x) * 4,
+      );
+    }
+  for (let y = 100; y < 220; y++)
+    for (let x = 140; x < 236; x++) {
+      const v = 70 + ((x - 140) * 130) / 96;
+      source.data.set([v, v * 0.9, v * 0.75, 255], (y * source.width + x) * 4);
+    }
+  const mask = emptyMask(source.width, source.height);
+  const divided = cleanDocument(source, mask, true, undefined, { contrast: false }),
+    stretched = cleanDocument(source, mask, true);
+  const pink = (112 * source.width + 64) * 4;
+  for (let c = 0; c < 3; c++)
+    assert.ok(Math.abs(stretched.data[pink + c] - divided.data[pink + c]) <= 3, 'the tint stays');
+  let change = 0,
+    count = 0;
+  for (let y = 120; y < 200; y++)
+    for (let x = 160; x < 216; x++, count++)
+      for (let c = 0; c < 3; c++) {
+        const i = (y * source.width + x) * 4 + c;
+        change += Math.abs(stretched.data[i] - divided.data[i]);
+      }
+  assert.ok(change / (count * 3) < 6, `photo change ${change / (count * 3)}`);
+});
+
 test('removal fills selected pixels from paper and leaves all other pixels unchanged', () => {
   const source = paper(),
     mask = emptyMask(source.width, source.height);

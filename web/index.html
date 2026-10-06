@@ -321,6 +321,7 @@
           <div class="pages-head">
             <h2 id="pages-title">PDF</h2>
             <span id="pages-count" class="pages-count"></span>
+            <span id="pages-progress" class="pages-progress" role="status" hidden></span>
             <div class="pages-actions">
               <button id="pages-clear" class="text-button" type="button">Clear</button>
               <a id="pages-save" class="button primary" download="scans.pdf">
@@ -356,6 +357,11 @@
               <label class="check-setting"
                 ><input id="orient" type="checkbox" checked /><span>Auto-rotate text</span></label
               >
+              <label class="check-setting"
+                ><input id="sharpen" type="checkbox" checked /><span
+                  >Sharpen text in Original color</span
+                ></label
+              >
             </fieldset>
             <div id="rescan-controls" hidden>
               <button id="rescan" class="button secondary" type="button">Scan again</button>
@@ -368,6 +374,10 @@
               <div>
                 <dt>Scan</dt>
                 <dd id="result-size" translate="no"></dd>
+              </div>
+              <div id="capture-row" hidden>
+                <dt>Capture</dt>
+                <dd id="capture-info"></dd>
               </div>
               <div>
                 <dt>Processing time</dt>
@@ -395,6 +405,13 @@
       <div class="camera-layout">
         <header class="camera-header">
           <h2 id="camera-title">Scan a document</h2>
+          <button id="camera-auto" class="camera-auto" type="button" aria-pressed="false">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="12" cy="12" r="8" />
+              <path d="M12 8v4l3 2" />
+            </svg>
+            Auto capture
+          </button>
           <button
             id="camera-close"
             class="camera-icon-button"
@@ -426,6 +443,7 @@
         <footer class="camera-footer">
           <p id="camera-status" class="camera-status" role="status">Opening camera…</p>
           <p id="camera-hint">Keep the whole page in view.</p>
+          <p id="camera-batch" class="camera-batch" role="status" hidden></p>
           <div class="scanner-preparation" data-state="loading">
             <span data-scanner-status role="status">Preparing scanner…</span>
             <button type="button" data-prepare-retry hidden>Retry</button>

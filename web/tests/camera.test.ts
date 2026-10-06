@@ -110,3 +110,70 @@ test('overlay matches contained video in portrait and landscape letterboxing', (
     top: 0,
   });
 });
+
+test('capture guidance names one problem at a time, in priority order', async () => {
+  const { guidance } = await import('../src/camera-outline');
+  const quad = (pts: [number, number][], area: number, clipped = false) => ({
+    points: pts,
+    area,
+    clipped,
+  });
+  const square = (x0: number, y0: number, x1: number, y1: number): [number, number][] => [
+    [x0, y0],
+    [x1, y0],
+    [x1, y1],
+    [x0, y1],
+  ];
+  assert.equal(guidance(null, 0.75), 'none');
+  assert.equal(guidance(quad(square(0.45, 0.1, 0.5, 0.9), 0.04), 0.75), 'shape');
+  assert.equal(guidance(quad(square(0, 0.1, 0.8, 0.9), 0.64, true), 0.75), 'clipped');
+  assert.equal(guidance(quad(square(0.02, 0.02, 0.98, 0.98), 0.92), 0.75), 'close');
+  assert.equal(guidance(quad(square(0.4, 0.4, 0.6, 0.6), 0.04), 0.75), 'small');
+  const keystone: [number, number][] = [
+    [0.35, 0.15],
+    [0.65, 0.15],
+    [0.85, 0.85],
+    [0.15, 0.85],
+  ];
+  assert.equal(guidance(quad(keystone, 0.35), 0.75), 'tilted');
+  assert.equal(guidance(quad(square(0.15, 0.1, 0.85, 0.9), 0.56), 0.75), 'ok');
+});
+
+test('auto capture waits for a steady page and re-arms only after a big change', async () => {
+  const { AUTO, autoStep } = await import('../src/camera-outline');
+  let state = { armed: true, steadySince: null as number | null };
+  let step = autoStep(state, 0.005, true, 0);
+  state = step.state;
+  step = autoStep(state, 0.005, true, AUTO.steadyMs + AUTO.countdownMs / 2);
+  assert.ok(step.progress > 0.4 && step.progress < 0.6);
+  step = autoStep(step.state, 0.05, true, AUTO.steadyMs + AUTO.countdownMs); // a shake
+  assert.equal(step.progress, 0);
+  step = autoStep(step.state, 0.005, false, 5000); // badly framed
+  assert.equal(step.progress, 0);
+  // After a capture nothing happens until the page changes a lot.
+  state = { armed: false, steadySince: null };
+  for (const motion of [0.005, 0.03, 0.08]) {
+    step = autoStep(state, motion, true, 10_000);
+    assert.equal(step.state.armed, false);
+  }
+  assert.equal(autoStep(state, 0.2, true, 10_000).state.armed, true);
+  assert.equal(autoStep(state, null, true, 10_000).state.armed, true);
+});
+
+test('the live outline joins a page that a dark band split, but not a separate object', () => {
+  const [w, h] = [40, 50];
+  const probability = new Float32Array(w * h);
+  const fill = (x0: number, y0: number, x1: number, y1: number) => {
+    for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) probability[y * w + x] = 0.95;
+  };
+  fill(8, 6, 32, 20); // title area
+  fill(8, 23, 32, 45); // illustration below a dark band
+  const joined = pageOutline(probability, w, h)!;
+  const ys = joined.points.map(([, y]) => y);
+  assert.ok(Math.min(...ys) <= 6 / h + 0.01 && Math.max(...ys) >= 45 / h - 0.01);
+  probability.fill(0);
+  fill(8, 23, 32, 45);
+  fill(2, 0, 10, 8); // a narrow object off to the side
+  const alone = pageOutline(probability, w, h)!;
+  assert.ok(Math.min(...alone.points.map(([, y]) => y)) >= 23 / h - 0.01);
+});

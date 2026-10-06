@@ -6,6 +6,7 @@ import { CropEditor } from './crop-editor';
 import { MaskEditor } from './mask-editor';
 import { pdfFromJpegs, type PdfPage } from './pdf';
 import type {
+  CaptureInfo,
   EditReply,
   EditRequest,
   EditSettings,
@@ -17,7 +18,7 @@ import type {
   WorkerReply,
   WorkerRequest,
 } from './types';
-import { localize } from './i18n';
+import { localize, translate } from './i18n';
 
 localize();
 
@@ -49,7 +50,7 @@ const steps = new Map<string, ProcessingStep & { url: string; button: HTMLButton
 const maskEditor = new MaskEditor();
 const cropEditor = new CropEditor();
 const camera = new Camera(
-  (file) => chooseFile(file),
+  (file, info, continuous) => (continuous ? queuePage(file) : chooseFile(file, info)),
   () => fileInput.click(),
   (dismissed) => {
     if (dismissed && !selected && !followingHistory) leaveAway();
@@ -286,6 +287,7 @@ function showStart() {
   }
   clearResult();
   selected = undefined;
+  waitingForBatch = false;
   document.body.classList.remove('has-photo');
   photoReady = false;
   retryable = false;
@@ -340,7 +342,7 @@ function view(mode: 'original' | 'scan' | 'compare') {
   for (const name of ['original', 'scan', 'compare'])
     $(`show-${name}`).setAttribute('aria-pressed', String(name === mode));
 }
-function chooseFile(file: File) {
+function chooseFile(file: File, capture?: CaptureInfo) {
   if (busy || editing || editorOpen || camera.isOpen) return;
   if (file.size > 40 * 1024 * 1024) {
     showError('This photo is larger than 40 MB. Choose a smaller image.');
@@ -371,6 +373,11 @@ function chooseFile(file: File) {
   $('filename').textContent = file.name;
   $('filename').title = file.name;
   $('source-size').textContent = '';
+  $('capture-row').hidden = !capture;
+  if (capture)
+    $('capture-info').textContent =
+      `${capture.method === 'photo' ? 'Camera photo' : 'Video frame'} · ` +
+      `${capture.width} × ${capture.height} · ${capture.seconds.toFixed(1)} s`;
   view('original');
   busyState(false);
   message('Opening your photo…');
@@ -390,7 +397,10 @@ originalImage.onload = () => {
   photoReady = true;
   originalImage.hidden = false;
   $('source-size').textContent = `${width} × ${height}`;
-  startScan();
+  if (batchActive()) {
+    waitingForBatch = true;
+    message('Waiting for the pages in progress…');
+  } else startScan();
 };
 originalImage.onerror = () =>
   rejectPhoto('This image could not be opened. Save it as JPEG or PNG and try again.');
@@ -570,6 +580,7 @@ function renderPages() {
   if (pagesURL) URL.revokeObjectURL(pagesURL);
   pagesURL = pages.length ? URL.createObjectURL(pdfFromJpegs(pages)) : '';
   const save = $<HTMLAnchorElement>('pages-save');
+  save.hidden = !pages.length;
   if (pagesURL) save.href = pagesURL;
   else save.removeAttribute('href');
   save.download = `scans-${pages.length}p.pdf`;
@@ -594,6 +605,9 @@ $('add-page').onclick = async () => {
 $('pages-clear').onclick = () => {
   for (const page of pages) URL.revokeObjectURL(page.url);
   pages.length = 0;
+  batchDone = 0;
+  batchFailed = 0;
+  batchStatus();
   pageAdded = false;
   $('add-page-label').textContent = 'Add to PDF';
   renderPages();
@@ -609,6 +623,8 @@ function scannerWorker(): Worker {
       const data = event.data;
       if (data.type === 'preparation') {
         preparationStatus(data.state);
+      } else if (batchJob) {
+        if (data.type === 'result' || data.type === 'error') void finishPage(data);
       } else if (data.type === 'progress') {
         message(data.stage, data.detail);
         const progress = $<HTMLProgressElement>('progress');
@@ -669,6 +685,13 @@ function scannerWorker(): Worker {
     };
     worker.onerror = () => {
       if (worker !== active) return;
+      if (batchJob) {
+        active.terminate();
+        worker = undefined;
+        preparationStatus('idle');
+        void finishPage({ type: 'error', message: 'The scanner stopped unexpectedly.' });
+        return;
+      }
       if (!busy) {
         active.terminate();
         worker = undefined;
@@ -683,8 +706,77 @@ function scannerWorker(): Worker {
   return worker;
 }
 
+// Auto capture: pages taken while the camera stays open are scanned one by one with the
+// current settings and added to the PDF. A photo opened meanwhile waits for them.
+const batch: File[] = [];
+let batchJob: File | undefined,
+  batchDone = 0,
+  batchFailed = 0,
+  waitingForBatch = false;
+function batchActive() {
+  return !!batchJob || batch.length > 0;
+}
+function batchStatus() {
+  const pending = batch.length + (batchJob ? 1 : 0);
+  const parts = [];
+  if (batchDone) parts.push(batchDone === 1 ? '1 page added' : `${batchDone} pages added`);
+  if (pending) parts.push(`${pending} in progress`);
+  if (batchFailed) parts.push(batchFailed === 1 ? '1 not scanned' : `${batchFailed} not scanned`);
+  camera.setPages(parts.map(translate).join(' · '));
+  $('pages-progress').textContent = pending ? `${pending} in progress` : '';
+  $('pages-progress').hidden = !pending;
+  if (pending) $('pages').hidden = false;
+}
+function queuePage(file: File) {
+  batch.push(file);
+  prepareScanner();
+  batchStatus();
+  runBatch();
+}
+function runBatch() {
+  if (batchJob || busy || editing || !batch.length) return;
+  batchJob = batch.shift();
+  batchStatus();
+  try {
+    scannerWorker().postMessage({
+      type: 'scan',
+      file: batchJob!,
+      options: {
+        quality: 'fast',
+        orient: $<HTMLInputElement>('orient').checked,
+        maxSide: Number($<HTMLSelectElement>('resolution').value),
+        sharpen: $<HTMLInputElement>('sharpen').checked,
+      },
+      base: new URL('.', document.baseURI).href,
+    } satisfies WorkerRequest);
+  } catch {
+    void finishPage({ type: 'error', message: 'The scanner could not start.' });
+  }
+}
+async function finishPage(
+  data: { type: 'result'; blob: Blob } | { type: 'error'; message: string },
+) {
+  if (data.type === 'result') {
+    try {
+      const page = await jpegPage(data.blob);
+      pages.push({ ...page, url: URL.createObjectURL(page.blob) });
+      batchDone++;
+      renderPages();
+    } catch {
+      batchFailed++;
+    }
+  } else batchFailed++;
+  batchJob = undefined;
+  batchStatus();
+  if (batch.length) runBatch();
+  else if (waitingForBatch) {
+    waitingForBatch = false;
+    startScan();
+  }
+}
+
 function startScan(quality: Options['quality'] = 'fast') {
-  if (!selected || !photoReady || busy || editing || editorOpen) return;
+  if (!selected || !photoReady || busy || editing || editorOpen || batchActive()) return;
   if (quality === 'refined' && (!resultBlob || !resultOptions)) return;
   if (!window.isSecureContext) {
     showError('Open this app over HTTPS or localhost so the scanner can load securely.');
@@ -707,6 +799,7 @@ function startScan(quality: Options['quality'] = 'fast') {
           quality,
           orient: $<HTMLInputElement>('orient').checked,
           maxSide: Number($<HTMLSelectElement>('resolution').value),
+          sharpen: $<HTMLInputElement>('sharpen').checked,
         };
   if (quality === 'refined') {
     refining = true;
@@ -837,6 +930,7 @@ function applyEdit(next: EditSettings, history: 'push' | 'pop' | 'reset' = 'push
       raw: rawBlob,
       settings: next,
       suggestion: suggestion!,
+      sharpen: metadata?.sharpen ?? 0,
     };
     editWorker.postMessage(request);
   } catch (error) {

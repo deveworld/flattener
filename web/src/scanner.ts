@@ -8,6 +8,7 @@ import {
   gateSplit,
   mirroredInput,
   modelInput,
+  outlinePolygon,
   outputSize,
   pageAngle,
   pageBox,
@@ -21,6 +22,7 @@ import {
 } from './geometry';
 import { orientationViews } from './orientation';
 import { createSteps } from './previews';
+import { sharpenAmount } from './sharpen';
 import type { Models } from './models';
 import type { Grid, Options, Pixels, Placement, WorkerReply } from './types';
 
@@ -128,11 +130,22 @@ export async function scan(
   status('Rendering your scan', 'Writing the corrected image at full output resolution.');
   const [height, width] = outputSize(grid, image, options.maxSide);
   const result = render(image, grid, height, width);
+  // Sharpening for Original color, applied by the editor: Clean color already darkens
+  // text, and sharpening on top of it lowered OCR accuracy on the KR-Real pages.
+  let sharpen = 0;
+  if (options.sharpen) {
+    // Source pixels per output pixel over the page, by area: reduction sharpens more.
+    const polygon = outlinePolygon(grid, image.width, image.height);
+    let area = 0;
+    for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++)
+      area += (polygon[j][0] + polygon[i][0]) * (polygon[j][1] - polygon[i][1]);
+    sharpen = sharpenAmount(Math.sqrt(Math.abs(area / 2) / (width * height)));
+  }
   await steps.image(
     result,
     'flat',
     'Page flattened',
     'The original photo sampled through the final page map, before color or finger edits.',
   );
-  return { result, warnings, rotation, passes, grid, probability, gw, gh };
+  return { result, warnings, rotation, passes, grid, probability, gw, gh, sharpen };
 }

@@ -10,7 +10,7 @@ export function pageOutline(
   if (!probability.every(Number.isFinite)) return null;
   const visited = new Uint8Array(probability.length);
   const queue = new Int32Array(probability.length);
-  let largest: number[] = [];
+  const pieces: number[][] = [];
   for (let start = 0; start < probability.length; start++) {
     if (visited[start] || probability[start] < 0.55) continue;
     let head = 0,
@@ -32,9 +32,11 @@ export function pageOutline(
         queue[tail++] = next;
       }
     }
-    if (tail > largest.length) largest = Array.from(queue.subarray(0, tail));
+    pieces.push(Array.from(queue.subarray(0, tail)));
   }
-  if (largest.length < probability.length * 0.025) return null;
+  pieces.sort((a, b) => b.length - a.length);
+  const largest = joinPieces(pieces, width, height);
+  if (!largest || largest.length < probability.length * 0.025) return null;
   const confidence = largest.reduce((sum, i) => sum + probability[i], 0) / largest.length;
   if (confidence < 0.7) return null;
 
@@ -67,6 +69,47 @@ export function pageOutline(
   );
   if (outer.length < 3) return null;
   return { points: resample(outer, 64), area: largest.length / probability.length, clipped };
+}
+
+/** The largest piece joined with pieces of the same page that a dark band (a printed
+ * title bar, a ruled header) split from it: stacked above or below with a small gap, about
+ * as wide and overlapping it across. The live guide cannot run the dewarp model, so it
+ * joins only such clear cases. */
+function joinPieces(pieces: number[][], width: number, height: number): number[] | null {
+  if (!pieces.length) return null;
+  const bounds = (cells: number[]) => {
+    let l = width,
+      r = 0,
+      t = height,
+      b = 0;
+    for (const i of cells) {
+      const x = i % width,
+        y = Math.floor(i / width);
+      l = Math.min(l, x);
+      r = Math.max(r, x + 1);
+      t = Math.min(t, y);
+      b = Math.max(b, y + 1);
+    }
+    return { l, r, t, b };
+  };
+  const joined = pieces[0].slice();
+  let box = bounds(joined);
+  for (const piece of pieces.slice(1)) {
+    if (piece.length < width * height * 0.02) break;
+    const other = bounds(piece);
+    const overlap = Math.min(box.r, other.r) - Math.max(box.l, other.l);
+    const widths = [box.r - box.l, other.r - other.l];
+    const gap = Math.max(other.t - box.b, box.t - other.b);
+    if (
+      overlap >= 0.6 * Math.min(...widths) &&
+      Math.min(...widths) >= 0.7 * Math.max(...widths) &&
+      gap <= 0.1 * height
+    ) {
+      joined.push(...piece);
+      box = bounds(joined);
+    }
+  }
+  return joined;
 }
 
 function convexHull(points: Point[]): Point[] {
@@ -141,4 +184,90 @@ export function containVideo(
   const w = frameWidth * scale,
     h = frameHeight * scale;
   return { width: w, height: h, left: (width - w) / 2, top: (height - h) / 2 };
+}
+
+/** Root-mean-square move of the outline points between two frames, after matching the
+ * starting point, as a share of the page size (the square root of its frame area). */
+export function outlineMotion(previous: PageOutline, next: PageOutline): number {
+  if (previous.points.length !== next.points.length) return Infinity;
+  const count = next.points.length;
+  let best = Infinity;
+  for (let shift = 0; shift < count; shift++) {
+    let sum = 0;
+    for (let i = 0; i < count; i++) {
+      const p = previous.points[i],
+        q = next.points[(i + shift) % count];
+      sum += (p[0] - q[0]) ** 2 + (p[1] - q[1]) ** 2;
+    }
+    best = Math.min(best, sum);
+  }
+  return Math.sqrt(best / count) / Math.sqrt(Math.max(next.area, 1e-6));
+}
+
+export type Guidance = 'none' | 'shape' | 'clipped' | 'close' | 'small' | 'tilted' | 'ok';
+
+/** Starting values; they are tuned on phones (RESEARCH.md, capture guidance). */
+export const GUIDANCE = {
+  maxAspect: 4, // a page outline longer than this many times its width is not one page
+  maxArea: 0.85, // share of the frame above which the page is too close
+  minArea: 0.18, // share of the frame below which the page is too small
+  maxSideRatio: 1.3, // opposite sides differing more than this: the camera is tilted
+};
+
+/** One capture hint from the live outline, in priority order: no page or an odd shape,
+ * an edge cut by the frame, too close, too small, tilted, then ok. ``aspect`` is the
+ * frame's width over its height. */
+export function guidance(outline: PageOutline | null, aspect: number): Guidance {
+  if (!outline || outline.points.length < 4) return 'none';
+  const points = outline.points.map(([x, y]) => [x * aspect, y] as Point);
+  const pick = (score: (p: Point) => number) =>
+    points.reduce((best, p) => (score(p) > score(best) ? p : best));
+  const tl = pick(([x, y]) => -x - y),
+    br = pick(([x, y]) => x + y),
+    tr = pick(([x, y]) => x - y),
+    bl = pick(([x, y]) => y - x);
+  const length = (a: Point, b: Point) => Math.hypot(a[0] - b[0], a[1] - b[1]);
+  const top = length(tl, tr),
+    bottom = length(bl, br),
+    left = length(tl, bl),
+    right = length(tr, br);
+  const width = (top + bottom) / 2,
+    height = (left + right) / 2;
+  if (!width || !height || Math.max(width / height, height / width) > GUIDANCE.maxAspect)
+    return 'shape';
+  if (outline.clipped) return 'clipped';
+  if (outline.area > GUIDANCE.maxArea) return 'close';
+  if (outline.area < GUIDANCE.minArea) return 'small';
+  const ratio = (a: number, b: number) => Math.max(a, b) / Math.max(Math.min(a, b), 1e-6);
+  if (Math.max(ratio(top, bottom), ratio(left, right)) > GUIDANCE.maxSideRatio) return 'tilted';
+  return 'ok';
+}
+
+/** Auto capture: a steady, well-framed page starts a countdown; a capture needs the page
+ * to change a lot first (a turned page, a hand), so one page is not taken twice. */
+export const AUTO = {
+  steady: 0.02, // outline motion per frame below this share of the page size is steady
+  change: 0.12, // motion above this, or a lost outline, re-arms after a capture
+  steadyMs: 700, // steady time before the countdown
+  countdownMs: 1300,
+};
+
+export type AutoState = { armed: boolean; steadySince: number | null };
+
+/** The next auto-capture state and the countdown progress (0..1, 1 = take the photo). */
+export function autoStep(
+  state: AutoState,
+  motion: number | null,
+  ok: boolean,
+  now: number,
+): { state: AutoState; progress: number } {
+  if (!state.armed) {
+    const changed = motion === null || motion > AUTO.change;
+    return { state: { armed: changed, steadySince: null }, progress: 0 };
+  }
+  if (!ok || motion === null || motion > AUTO.steady)
+    return { state: { armed: true, steadySince: null }, progress: 0 };
+  const since = state.steadySince ?? now;
+  const progress = Math.max(0, (now - since - AUTO.steadyMs) / AUTO.countdownMs);
+  return { state: { armed: true, steadySince: since }, progress: Math.min(1, progress) };
 }

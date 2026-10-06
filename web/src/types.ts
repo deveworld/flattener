@@ -17,10 +17,24 @@ export type Placement = {
   width: number;
   height: number;
 };
-export type Options = { quality: 'fast' | 'refined'; orient: boolean; maxSide: number };
+export type Options = {
+  quality: 'fast' | 'refined';
+  orient: boolean;
+  maxSide: number;
+  /** Unsharp masking after the render, scaled by how much the page was reduced. */
+  sharpen: boolean;
+};
 export type Backend = 'webgpu' | 'wasm';
 export type Point = [number, number];
 export type PageOutline = { points: Point[]; area: number; clipped: boolean };
+/** How a camera photo was taken: a still photo or a preview frame, its size and how long
+ * the shutter took (seconds). */
+export type CaptureInfo = {
+  method: 'photo' | 'frame';
+  width: number;
+  height: number;
+  seconds: number;
+};
 export type CameraRequest =
   { type: 'load'; base: string } | { type: 'frame'; image: Pixels; width: number; height: number };
 export type CameraReply =
@@ -69,6 +83,8 @@ export type ScanMetadata = {
   rotation: number;
   source: { width: number; height: number };
   model: string;
+  /** Sharpening strength for Original color; 0 when off. */
+  sharpen: number;
 };
 export type PreparationState = 'idle' | 'loading' | 'ready' | 'error';
 export type WorkerRequest =
@@ -88,7 +104,13 @@ export type WorkerReply =
   | { type: 'backend'; backend: Backend }
   | { type: 'result'; blob: Blob; raw: Blob; suggestion: Mask; metadata: ScanMetadata }
   | { type: 'error'; message: string };
-export type EditRequest = { id: number; raw: Blob; settings: EditSettings; suggestion: Mask };
+export type EditRequest = {
+  id: number;
+  raw: Blob;
+  settings: EditSettings;
+  suggestion: Mask;
+  sharpen: number;
+};
 export type EditReply =
   | { type: 'edited'; id: number; blob: Blob; width: number; height: number }
   | { type: 'error'; id: number; message: string };

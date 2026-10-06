@@ -1,7 +1,66 @@
-import { containVideo, smoothOutline } from './camera-outline';
-import type { CameraReply, CameraRequest, PageOutline } from './types';
+import {
+  AUTO,
+  autoStep,
+  containVideo,
+  guidance,
+  outlineMotion,
+  smoothOutline,
+  type AutoState,
+  type Guidance,
+} from './camera-outline';
+import type { CameraReply, CameraRequest, CaptureInfo, PageOutline } from './types';
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
+const MAX_PIXELS = 20_000_000; // the scanner's input limit
+
+type StillCapture = {
+  getPhotoCapabilities(): Promise<{
+    imageWidth?: { max?: number };
+    imageHeight?: { max?: number };
+  }>;
+  takePhoto(settings?: { imageWidth?: number; imageHeight?: number }): Promise<Blob>;
+};
+const StillCaptureClass = (
+  globalThis as unknown as { ImageCapture?: new (track: MediaStreamTrack) => StillCapture }
+).ImageCapture;
+
+function within<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) => window.setTimeout(() => reject(new Error('timeout')), ms)),
+  ]);
+}
+
+/** ``blob`` as a capture within the scanner's pixel limit (re-encoded only when larger). */
+async function fitShot(blob: Blob, method: CaptureInfo['method']) {
+  const bitmap = await createImageBitmap(blob, { imageOrientation: 'from-image' });
+  try {
+    const { width, height } = bitmap;
+    if (width * height <= MAX_PIXELS) return { blob, method, width, height };
+    const scale = Math.sqrt(MAX_PIXELS / (width * height));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.floor(width * scale);
+    canvas.height = Math.floor(height * scale);
+    canvas.getContext('2d')!.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    const smaller = await new Promise<Blob | null>((resolve) =>
+      canvas.toBlob(resolve, 'image/jpeg', 0.95),
+    );
+    if (!smaller) throw new Error('encode');
+    return { blob: smaller, method, width: canvas.width, height: canvas.height };
+  } finally {
+    bitmap.close();
+  }
+}
+
+const HINTS: Record<Guidance, string> = {
+  none: 'Point the camera at a page',
+  shape: 'Point the camera at one page',
+  clipped: 'Move back to fit the page',
+  close: 'Move back a little',
+  small: 'Move closer to the page',
+  tilted: 'Hold the camera straight over the page',
+  ok: 'Page found',
+};
 
 export class Camera {
   private dialog = $<HTMLDialogElement>('camera');
@@ -25,9 +84,19 @@ export class Camera {
   private capturedClose = false;
   private permission?: PermissionStatus;
   private nativeCapture = $<HTMLInputElement>('camera-capture');
+  private autoButton = $<HTMLButtonElement>('camera-auto');
+  private auto = false;
+  private autoState: AutoState = { armed: true, steadySince: null };
+  private previous: PageOutline | null = null;
+  private unavailable: () => void = () => {};
+  /** A frame is with the detector; one frame at a time keeps a single loop. */
+  private inFlight = false;
+  /** Auto mode: the page changed (turned, moved) while the last photo was taken. */
+  private changedWhileCapturing = false;
 
   constructor(
-    private captured: (file: File) => void,
+    /** A taken photo; ``continuous`` keeps the camera open for the next page. */
+    private captured: (file: File, info?: CaptureInfo, continuous?: boolean) => void,
     private choosePhoto: () => void,
     /** After the camera closes; ``dismissed`` is false when it closed for a taken photo. */
     private closed: (dismissed: boolean) => void = () => {},
@@ -50,6 +119,23 @@ export class Camera {
       this.choosePhoto();
     };
     this.shutter.onclick = () => void this.capture();
+    try {
+      this.auto = localStorage.getItem('flattener-auto') === 'on';
+    } catch {
+      /* Storage can be unavailable; auto capture starts off. */
+    }
+    this.showAuto();
+    this.autoButton.onclick = () => {
+      this.auto = !this.auto;
+      try {
+        localStorage.setItem('flattener-auto', this.auto ? 'on' : 'off');
+      } catch {
+        /* The choice still applies to this visit. */
+      }
+      this.autoState = { armed: true, steadySince: null };
+      this.showAuto();
+      this.setCountdown(0);
+    };
     this.flip.onclick = () => {
       this.facing = this.facing === 'environment' ? 'user' : 'environment';
       void this.start();
@@ -78,6 +164,25 @@ export class Camera {
     return this.dialog.open;
   }
 
+  /** Progress of pages taken in auto mode, shown under the viewfinder. */
+  setPages(text: string) {
+    $('camera-batch').textContent = text;
+    $('camera-batch').hidden = !text;
+  }
+
+  private showAuto() {
+    this.autoButton.setAttribute('aria-pressed', String(this.auto));
+    this.dialog.classList.toggle('auto', this.auto);
+    $('camera-hint').textContent = this.auto
+      ? 'Auto capture takes each page when it is steady.'
+      : 'Keep the whole page in view.';
+  }
+
+  private setCountdown(progress: number) {
+    this.shutter.style.setProperty('--countdown', String(progress));
+    this.shutter.classList.toggle('counting', progress > 0);
+  }
+
   open(trigger: HTMLElement) {
     if (this.dialog.open) return;
     this.trigger = trigger;
@@ -102,6 +207,7 @@ export class Camera {
 
   private stop() {
     ++this.generation;
+    this.inFlight = false;
     window.clearTimeout(this.timer);
     window.clearTimeout(this.watchdog);
     this.detector?.terminate();
@@ -183,7 +289,9 @@ export class Camera {
       this.shutter.disabled = false;
       this.resize();
       this.status('Finding the page…');
-      $('camera-hint').textContent = 'Keep the whole page in view.';
+      this.autoState = { armed: true, steadySince: null };
+      this.previous = null;
+      this.showAuto();
       stream.getVideoTracks()[0].addEventListener('ended', () => {
         if (generation === this.generation)
           this.fail('The camera disconnected. Try opening it again.');
@@ -230,6 +338,7 @@ export class Camera {
   }
 
   private loadDetector(generation: number) {
+    this.inFlight = false;
     const unavailable = () => {
       if (generation !== this.generation) return;
       window.clearTimeout(this.watchdog);
@@ -240,6 +349,7 @@ export class Camera {
       this.status('Camera ready');
       $('camera-hint').textContent = 'Live outline unavailable. You can still take a photo.';
     };
+    this.unavailable = unavailable;
     try {
       this.detector = new Worker(new URL('./camera.worker.ts', import.meta.url), {
         type: 'module',
@@ -247,7 +357,20 @@ export class Camera {
       this.detector.onerror = unavailable;
       this.watchdog = window.setTimeout(unavailable, 60000);
       this.detector.onmessage = ({ data }: MessageEvent<CameraReply>) => {
-        if (generation !== this.generation || this.capturing) return;
+        if (generation !== this.generation) return;
+        if (data.type === 'outline') this.inFlight = false;
+        if (this.capturing) {
+          // Auto mode keeps watching while a photo is taken, so a page turned meanwhile
+          // still counts as a change; otherwise the loop pauses until the capture ends.
+          if (data.type === 'outline' && this.auto) {
+            const motion =
+              data.outline && this.previous ? outlineMotion(this.previous, data.outline) : null;
+            if (motion === null || motion > AUTO.change) this.changedWhileCapturing = true;
+            this.previous = data.outline;
+            this.timer = window.setTimeout(() => this.sendFrame(generation, unavailable), 160);
+          }
+          return;
+        }
         if (data.type === 'progress') {
           this.status('Loading page detection…');
         } else if (data.type === 'ready') {
@@ -270,7 +393,13 @@ export class Camera {
   }
 
   private sendFrame(generation: number, unavailable: () => void) {
-    if (generation !== this.generation || !this.detector || this.capturing) return;
+    if (
+      generation !== this.generation ||
+      !this.detector ||
+      (this.capturing && !this.auto) ||
+      this.inFlight
+    )
+      return;
     if (this.video.readyState < 2 || !this.video.videoWidth) {
       this.timer = window.setTimeout(() => this.sendFrame(generation, unavailable), 100);
       return;
@@ -286,6 +415,8 @@ export class Camera {
       this.detector.postMessage({ type: 'frame', image, width, height } satisfies CameraRequest, [
         image.data.buffer,
       ]);
+      this.inFlight = true;
+      window.clearTimeout(this.watchdog);
       this.watchdog = window.setTimeout(unavailable, 15000);
     } catch {
       unavailable();
@@ -295,29 +426,36 @@ export class Camera {
   private clearOutline() {
     window.clearTimeout(this.expiry);
     this.outline = null;
+    this.setCountdown(0);
     this.path.setAttribute('d', '');
     this.dialog.classList.remove('page-found', 'page-clipped');
   }
 
   private drawOutline(outline: PageOutline | null) {
     window.clearTimeout(this.expiry);
-    if (!outline) {
-      this.clearOutline();
-      this.status('Finding the page…');
-      return;
+    const motion = outline && this.previous ? outlineMotion(this.previous, outline) : null;
+    this.previous = outline;
+    const hint = guidance(outline, this.video.videoWidth / Math.max(1, this.video.videoHeight));
+    if (!outline) this.clearOutline();
+    else {
+      this.outline = smoothOutline(this.outline, outline);
+      this.path.setAttribute(
+        'd',
+        this.outline.points.map(([x, y], i) => `${i ? 'L' : 'M'}${x} ${y}`).join(' ') + 'Z',
+      );
+      this.dialog.classList.toggle('page-found', hint === 'ok');
+      this.dialog.classList.toggle('page-clipped', hint !== 'ok');
+      this.expiry = window.setTimeout(() => this.drawOutline(null), 1200);
     }
-    this.outline = smoothOutline(this.outline, outline);
-    this.path.setAttribute(
-      'd',
-      this.outline.points.map(([x, y], i) => `${i ? 'L' : 'M'}${x} ${y}`).join(' ') + 'Z',
-    );
-    this.dialog.classList.toggle('page-found', !outline.clipped);
-    this.dialog.classList.toggle('page-clipped', outline.clipped);
-    this.status(outline.clipped ? 'Move back to fit the page' : 'Page found');
-    this.expiry = window.setTimeout(() => {
-      this.clearOutline();
-      this.status('Finding the page…');
-    }, 1200);
+    let text = HINTS[hint];
+    if (this.auto) {
+      const step = autoStep(this.autoState, motion, hint === 'ok', performance.now());
+      this.autoState = step.state;
+      this.setCountdown(step.progress);
+      if (hint === 'ok') text = this.autoState.armed ? 'Hold still' : 'Turn to the next page';
+      if (step.progress >= 1) void this.capture();
+    }
+    this.status(text);
   }
 
   private resize() {
@@ -337,33 +475,85 @@ export class Camera {
     });
   }
 
+  /** A still photo at the sensor's resolution where the browser offers one. */
+  private async takeStill() {
+    const track = this.stream?.getVideoTracks()[0];
+    if (!track || !StillCaptureClass) return null;
+    try {
+      const capture = new StillCaptureClass(track);
+      const capabilities = await within(capture.getPhotoCapabilities(), 3000);
+      const width = capabilities.imageWidth?.max,
+        height = capabilities.imageHeight?.max;
+      const blob = await within(
+        capture.takePhoto(width && height ? { imageWidth: width, imageHeight: height } : {}),
+        8000,
+      );
+      return await fitShot(blob, 'photo');
+    } catch {
+      return null;
+    }
+  }
+
+  /** The current preview frame, the fallback where still photos are not offered. */
+  private async grabFrame() {
+    const canvas = document.createElement('canvas');
+    const scale = Math.min(
+      1,
+      Math.sqrt(MAX_PIXELS / (this.video.videoWidth * this.video.videoHeight)),
+    );
+    canvas.width = Math.floor(this.video.videoWidth * scale);
+    canvas.height = Math.floor(this.video.videoHeight * scale);
+    canvas.getContext('2d')!.drawImage(this.video, 0, 0, canvas.width, canvas.height);
+    const blob = await new Promise<Blob | null>((resolve) =>
+      canvas.toBlob(resolve, 'image/jpeg', 0.96),
+    );
+    if (!blob) throw new Error('The photo could not be saved. Try taking it again.');
+    return { blob, method: 'frame' as const, width: canvas.width, height: canvas.height };
+  }
+
   private async capture() {
     if (!this.stream || this.shutter.disabled || this.capturing) return;
     const generation = this.generation;
+    const started = performance.now();
     this.capturing = true;
+    this.changedWhileCapturing = false;
     this.shutter.disabled = true;
     this.flip.disabled = true;
+    this.setCountdown(0);
     this.status('Taking photo…');
-    window.clearTimeout(this.timer);
-    window.clearTimeout(this.watchdog);
     window.clearTimeout(this.expiry);
+    if (!this.auto) {
+      window.clearTimeout(this.timer);
+      window.clearTimeout(this.watchdog);
+    }
     try {
-      const canvas = document.createElement('canvas');
-      const scale = Math.min(
-        1,
-        Math.sqrt(20_000_000 / (this.video.videoWidth * this.video.videoHeight)),
-      );
-      canvas.width = Math.floor(this.video.videoWidth * scale);
-      canvas.height = Math.floor(this.video.videoHeight * scale);
-      canvas.getContext('2d')!.drawImage(this.video, 0, 0, canvas.width, canvas.height);
-      const blob = await new Promise<Blob | null>((resolve) =>
-        canvas.toBlob(resolve, 'image/jpeg', 0.96),
-      );
+      const shot = (await this.takeStill()) ?? (await this.grabFrame());
       if (generation !== this.generation) return;
-      if (!blob) throw new Error('The photo could not be saved. Try taking it again.');
-      this.capturedClose = true;
-      this.close();
-      this.captured(new File([blob], `document-${Date.now()}.jpg`, { type: 'image/jpeg' }));
+      const info: CaptureInfo = {
+        method: shot.method,
+        width: shot.width,
+        height: shot.height,
+        seconds: (performance.now() - started) / 1000,
+      };
+      const file = new File([shot.blob], `document-${Date.now()}.jpg`, { type: 'image/jpeg' });
+      if (!this.auto) {
+        this.capturedClose = true;
+        this.close();
+        this.captured(file, info);
+        return;
+      }
+      // Auto mode keeps the camera open; the next page needs a big change first.
+      this.captured(file, info, true);
+      this.autoState = { armed: this.changedWhileCapturing, steadySince: null };
+      this.capturing = false;
+      this.shutter.disabled = false;
+      this.flip.disabled = this.flip.hidden;
+      const viewfinder = $('camera-viewfinder');
+      viewfinder.classList.remove('flash');
+      void viewfinder.offsetWidth;
+      viewfinder.classList.add('flash');
+      this.status('Page taken');
+      this.timer = window.setTimeout(() => this.sendFrame(generation, this.unavailable), 160);
     } catch {
       if (generation !== this.generation) return;
       this.capturing = false;

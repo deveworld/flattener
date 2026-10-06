@@ -64,23 +64,33 @@ Browsers without cross-origin isolation or WASM thread support use one thread.
 ## Scanning and editing
 
 - Open **Camera** for a live page outline. Taking a photo starts flattening automatically.
+  The shutter takes a still photo at the camera's full resolution where the browser supports it (`ImageCapture.takePhoto`), and a frame of the preview video otherwise.
+  Photos above 20 megapixels are reduced when taken. The scan details show the method, size and capture time.
+  One hint at a time guides the framing, judged from the page outline only: no page, page cut off at the edge, too close, too small, tilted.
   The scanner loads and warms up while you frame the page, then stays ready for the next photo.
   You can take a photo while it prepares; processing starts as soon as it is ready.
   Camera access requires HTTPS or localhost and browser permission.
   If the live camera cannot open, **Use the camera app** takes the photo with the device's camera app, which needs no site permission.
   After the camera is allowed in the site settings, the live camera reopens by itself.
-  The camera closes after capture, on leaving the page, or when the tab is hidden.
+  The camera closes after capture (unless auto capture is on), on leaving the page, or when the tab is hidden.
+- **Auto capture** in the camera is for scanning a book page by page.
+  When the outline holds still and the framing hint is clear, a countdown runs on the shutter and the photo is taken.
+  A large outline change (turning the page, a hand in the frame) restarts the countdown, and the next photo waits for such a change, so a page is not taken twice.
+  The camera stays open; each photo is flattened in turn with the current settings and added to the PDF pages.
+  The choice is remembered on the device.
 - Open a JPEG, PNG or WebP by file picker, drop or paste. Flattening starts as soon as the photo opens.
 - Scans start with Quick processing and automatic orientation.
   Choose **Refine scan** on the result to run flip averaging and two crop refinement passes.
   The current scan stays visible and can be saved while refinement runs.
   Canceling or failing refinement keeps that scan and its edits; completing refinement replaces them.
 - Follow page detection, geometry and color correction under **See processing steps**.
-- Use **Clean color** to balance paper color and smooth lighting variation.
+- Use **Clean color** to balance paper color and smooth lighting variation, darken text and whiten the paper.
 - Review suggested fingers near page edges, then adjust the selection with the brush.
 - Crop by dragging the frame's corners, edges or inside; rotate, undo edits, compare with the source and inspect at 100%.
 - Save the scan as PNG, JPG or PDF. **Add to PDF** collects scans as pages, kept while you go back (**<**) to scan the next one, and **Save PDF** writes them into one file.
 - Use **Scan settings** to change options and scan again.
+  **Sharpen text in Original color** (on by default) sharpens the page in Original color, more when the photo was reduced more, and not at all when it was enlarged.
+  Clean color does not sharpen: it already darkens text, and sharpening on top of it lowered OCR accuracy on test photos.
 
 The browser flattens one photo at a time.
 Inputs are limited to 40 MB and 20 megapixels, with at least 64 pixels on each side.
@@ -110,6 +120,8 @@ Review the selection before applying it; gloves, fingers within the page and col
 Filling replaces selected pixels with surrounding paper color, including any writing or illustrations inside the selection.
 
 Color correction estimates paper brightness and color from local patches, then adjusts the image toward that estimate.
+In the same patches it estimates the ink level (a low percentile of brightness relative to the paper) and stretches the range between ink and paper so that text turns dark; levels near the paper ease to white.
+Patches with many midtones (photos, colored print, dark pages) are stretched and whitened less, a page with few text patches is stretched less overall, and light tints keep their color.
 For strong shadow boundaries, textured or colored paper and large illustrations, compare with **Original color**.
 See [Bako et al., Removing Shadows from Images of Documents](https://civc.ucsb.edu/graphics/Papers/ACCV2016_DocShadow/) for background-estimation methods.
 
@@ -123,7 +135,7 @@ npm test
 npm run build
 ```
 
-Tests cover geometry against Python fixtures, color correction, removal masks and rotations.
+Tests cover geometry against Python fixtures, color correction, sharpening, removal masks, rotations, capture guidance and auto capture.
 Regenerate the fixtures with `uv run python tools/web/generate_fixtures.py`.
 
 Browser checks used Chromium on Linux with WASM.

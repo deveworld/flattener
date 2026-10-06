@@ -1,6 +1,7 @@
 import { cleanDocument, estimatePaper, rotatePixels } from './cleanup';
 import { cropPixels, FULL_CROP } from './crop';
 import { encode } from './previews';
+import { sharpenPixels } from './sharpen';
 import type { EditReply, EditRequest } from './types';
 
 self.onmessage = async ({ data }: MessageEvent<EditRequest>) => {
@@ -21,16 +22,16 @@ self.onmessage = async ({ data }: MessageEvent<EditRequest>) => {
       data: data.settings.mask.data.map((v, i) => (v || data.suggestion.data[i] ? 1 : 0)),
     };
     // Color and removal work on the whole page; the crop follows, then the quarter turns.
+    let page = cleanDocument(
+      source,
+      data.settings.mask,
+      data.settings.cleanColor,
+      estimatePaper(source, excluded),
+    );
+    // Sharpening only in Original color (see ``scan`` in scanner.ts).
+    if (!data.settings.cleanColor) page = sharpenPixels(page, data.sharpen);
     const result = rotatePixels(
-      cropPixels(
-        cleanDocument(
-          source,
-          data.settings.mask,
-          data.settings.cleanColor,
-          estimatePaper(source, excluded),
-        ),
-        data.settings.crop ?? FULL_CROP,
-      ),
+      cropPixels(page, data.settings.crop ?? FULL_CROP),
       data.settings.rotation,
     );
     reply({

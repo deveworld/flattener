@@ -179,6 +179,7 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
         rotation,
         source: { width: source.width, height: source.height },
         model: models.manifest.version,
+        sharpen: output.sharpen,
       },
     });
   } catch (error) {
