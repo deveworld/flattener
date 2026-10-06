@@ -22,6 +22,8 @@ export class Camera {
   private outline: PageOutline | null = null;
   private trigger?: HTMLElement;
   private capturing = false;
+  private permission?: PermissionStatus;
+  private nativeCapture = $<HTMLInputElement>('camera-capture');
 
   constructor(
     private captured: (file: File) => void,
@@ -29,6 +31,17 @@ export class Camera {
   ) {
     $('camera-close').onclick = () => this.close();
     $('camera-retry').onclick = () => void this.start();
+    // The phone's camera app needs no site permission prompt, so it works when the browser
+    // cannot ask (an app drawing over the screen) or remembers a refusal.
+    $('camera-native').onclick = () => {
+      this.close();
+      this.nativeCapture.click();
+    };
+    this.nativeCapture.onchange = () => {
+      const file = this.nativeCapture.files?.[0];
+      this.nativeCapture.value = '';
+      if (file) this.captured(file);
+    };
     $('camera-gallery').onclick = () => {
       this.close();
       this.choosePhoto();
@@ -72,6 +85,7 @@ export class Camera {
 
   close() {
     const wasOpen = this.dialog.open;
+    this.unwatchPermission();
     this.stop();
     if (this.dialog.open) this.dialog.close();
     document.body.classList.remove('camera-open');
@@ -97,7 +111,37 @@ export class Camera {
     if ($('camera-status').textContent !== text) $('camera-status').textContent = text;
   }
 
+  private unwatchPermission() {
+    if (this.permission) this.permission.onchange = null;
+    this.permission = undefined;
+  }
+
+  /** After a refusal: name a remembered block, and reopen the camera once it is allowed. */
+  private async watchPermission(generation: number) {
+    let status: PermissionStatus;
+    try {
+      status = await navigator.permissions.query({ name: 'camera' as PermissionName });
+    } catch {
+      return; // Browsers without a camera permission query keep the general message.
+    }
+    if (generation !== this.generation || !this.dialog.open) return;
+    this.unwatchPermission();
+    this.permission = status;
+    const explain = () => {
+      if (status.state === 'denied')
+        $('camera-error-message').textContent =
+          'Camera access is blocked for this site. Allow it in the site settings next to the ' +
+          'address bar, and the camera opens here. Or use the camera app.';
+    };
+    explain();
+    status.onchange = () => {
+      if (status.state === 'granted' && this.dialog.open && !this.stream) void this.start();
+      else explain();
+    };
+  }
+
   private async start() {
+    this.unwatchPermission();
     this.stop();
     const generation = this.generation;
     $('camera-error').hidden = true;
@@ -152,7 +196,9 @@ export class Camera {
       const name = error instanceof DOMException ? error.name : '';
       this.fail(
         name === 'NotAllowedError'
-          ? 'Camera access is blocked. Allow it in your browser settings, or choose a photo.'
+          ? 'The camera was not allowed. If no permission prompt appeared, close apps that ' +
+              'draw over the screen, such as chat bubbles or screen filters, and try again. ' +
+              'Or use the camera app.'
           : name === 'NotFoundError'
             ? 'No camera was found. Connect one or choose a photo.'
             : name === 'NotReadableError'
@@ -161,6 +207,7 @@ export class Camera {
                 ? error.message
                 : 'The camera could not open. Try again.',
       );
+      if (name === 'NotAllowedError') void this.watchPermission(this.generation);
     }
   }
 

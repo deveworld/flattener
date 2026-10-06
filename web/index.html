@@ -35,6 +35,13 @@
 
       <main id="workspace" class="workspace" tabindex="-1">
         <input id="file-input" type="file" accept="image/jpeg,image/png,image/webp" hidden />
+        <input
+          id="camera-capture"
+          type="file"
+          accept="image/jpeg,image/png,image/webp"
+          capture="environment"
+          hidden
+        />
         <div id="file-toolbar" class="file-toolbar" hidden>
           <div class="document-label">
             <span id="filename"></span>
@@ -331,6 +338,7 @@
           <div id="camera-error" class="camera-error" hidden>
             <p id="camera-error-message" role="alert"></p>
             <button id="camera-retry" class="button" type="button">Try camera again</button>
+            <button id="camera-native" class="button" type="button">Use the camera app</button>
           </div>
         </div>
         <footer class="camera-footer">

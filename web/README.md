@@ -63,6 +63,8 @@ Browsers without cross-origin isolation or WASM thread support use one thread.
   The scanner loads and warms up while you frame the page, then stays ready for the next photo.
   You can take a photo while it prepares; processing starts as soon as it is ready.
   Camera access requires HTTPS or localhost and browser permission.
+  If the live camera cannot open, **Use the camera app** takes the photo with the device's camera app, which needs no site permission.
+  After the camera is allowed in the site settings, the live camera reopens by itself.
   The camera closes after capture, on leaving the page, or when the tab is hidden.
 - Open a JPEG, PNG or WebP by file picker, drop or paste.
 - Scans start with Quick processing and automatic orientation.
