@@ -30,8 +30,15 @@ import type { Grid, Options, Pixels, Placement, ScanTrace, WorkerReply } from '.
 export type ScanModels = Pick<Models, 'manifest' | 'run'>;
 
 /** Optional diagnostics: ``trace`` is filled with every decision; ``steps`` replaces the
- * preview images (for runs outside the browser). */
-export type ScanDebug = { trace?: ScanTrace; steps?: ReturnType<typeof createSteps> };
+ * preview images (for runs outside the browser). For experiments, ``box`` fixes the crop box
+ * (photo pixels: left, top, right, bottom) and ``turn`` fixes the quarter turns applied
+ * before flattening in place of the orientation model's choice. */
+export type ScanDebug = {
+  trace?: ScanTrace;
+  steps?: ReturnType<typeof createSteps>;
+  box?: number[];
+  turn?: number;
+};
 
 const traced = (grid: Grid) => ({
   rows: grid.rows,
@@ -44,7 +51,7 @@ export async function scan(
   models: ScanModels,
   options: Options,
   report: (event: WorkerReply) => void,
-  { trace, steps = createSteps(report) }: ScanDebug = {},
+  { trace, steps = createSteps(report), box: fixedBox, turn }: ScanDebug = {},
 ) {
   const warnings: string[] = [];
   const status = (stage: string, detail: string) => report({ type: 'progress', stage, detail });
@@ -77,9 +84,9 @@ export async function scan(
     trace?.passes.push({ name, grid: traced(grid), flipGap, flipGaps, error, used });
   const place = (name: string, placement: Placement) => trace?.placements.push({ name, placement });
 
-  let box = pageBox(probability, gh, gw, image);
+  let box = fixedBox ?? pageBox(probability, gh, gw, image);
   const components = pageComponents(probability, gh, gw);
-  const split = gateSplit(components);
+  const split = !fixedBox && gateSplit(components);
   let fromWholePass = false;
   if (split) {
     // Printed covers and dark bands split the gate's page into pieces; the page outline
@@ -113,7 +120,11 @@ export async function scan(
     const k = Array.from(probabilities).indexOf(Math.max(...probabilities));
     return { k, accepted: probabilities[k] >= manifest.models.orient.threshold, probabilities };
   }
-  if (options.orient) {
+  if (turn !== undefined) {
+    rotation = ((turn % 4) + 4) % 4;
+    placement = turnPlacement(placement, rotation);
+    place('page box, turned as fixed', placement);
+  } else if (options.orient) {
     status('Reading the direction', 'Finding the upright direction of the text.');
     const result = await orientation(image, placement);
     trace?.orientation.push({
