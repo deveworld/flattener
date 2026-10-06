@@ -349,7 +349,7 @@ export const SPLIT_RULES = {
   dominance: 0.85, // a largest piece below this share of the page cells: the gate split the page
   minArea: 0.01, // pieces smaller than this share of the grid are ignored
   minInside: 0.5, // a piece belongs to the page when this share of it lies in the outline
-  minPrecision: 0.5, // the outline is used when this share of it is page cells
+  minPrecision: 0.5, // the outline is used when this share of it is page cells (any piece)
 };
 
 /** Whether the gate split one page into several pieces (``SPLIT_RULES.dominance``). */
@@ -386,13 +386,17 @@ export function splitPageBox(
         cells++;
       }
   if (!cells) return null;
-  let held = 0;
+  // A piece that also covers clutter outside the outline (tissues touching a cover's
+  // title) is still paper inside it, so every piece's cells count for the precision.
+  let held = false,
+    paper = 0;
   for (const piece of components) {
-    if (piece.length < width * height * SPLIT_RULES.minArea) continue;
-    const share = piece.reduce((sum, i) => sum + inside[i], 0) / piece.length;
-    if (share >= SPLIT_RULES.minInside) held += piece.reduce((sum, i) => sum + inside[i], 0);
+    const within = piece.reduce((sum, i) => sum + inside[i], 0);
+    paper += within;
+    if (piece.length >= width * height * SPLIT_RULES.minArea)
+      held ||= within / piece.length >= SPLIT_RULES.minInside;
   }
-  if (!held || held / cells < SPLIT_RULES.minPrecision) return null;
+  if (!held || paper / cells < SPLIT_RULES.minPrecision) return null;
   const xs = polygon.map(([x]) => x),
     ys = polygon.map(([, y]) => y);
   const [l, r, t, b] = [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)];

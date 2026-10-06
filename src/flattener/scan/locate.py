@@ -14,9 +14,9 @@ Rules (``THRESHOLDS``, the design's starting values; they are recorded with ever
   when the two largest components lie side by side) asks G0: its outline is the page
   (box and angle, method ``outline``) and the pieces holding at least half of their
   cells inside it are the mask; the code stays as a warning with the component boxes.
-  When G0 has no outline, holds no piece, or the held pieces cover less than half of its
-  outline (``outline_mask_precision``; a desk or a keyboard the gate cut into pieces, or a
-  close-up whose page runs out of the photo), the split ends the scan. A page under 1 % of
+  When G0 has no outline, holds no piece, or the gate's page cells cover less than half of
+  its outline (``outline_mask_precision``; a desk or a keyboard the gate cut into pieces,
+  or a close-up whose page runs out of the photo), the split ends the scan. A page under 1 % of
   the photo or with a long side under 600 full-resolution pixels is ``page_too_small``.
 * A mask over 90 % of the frame or touching three borders fills the frame
   (``page_fills_frame``, informational): B is the whole image and theta is 0.
@@ -571,7 +571,9 @@ def locate_page(
                 return rejected
             grid = pass0()
             held = _held_pieces(grid, labels, items, source_size)
-            precision = outline_mask_precision(grid, np.isin(labels, held)) if held else 0.0
+            # Page cells of any piece count: a piece that also covers clutter outside the
+            # outline (tissues touching a cover's title) is still paper inside it.
+            precision = outline_mask_precision(grid, binary) if held else 0.0
             rejected.metrics["split_precision"] = precision
             if precision < THRESHOLDS["split_min_precision"]:
                 rejected.pass0 = grid
