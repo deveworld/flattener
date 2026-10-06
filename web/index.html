@@ -9,6 +9,9 @@
       content="Flatten document photos directly in your browser. Your photos stay on your device."
     />
     <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
+    <!-- Adds the cross-origin isolation headers on hosts that cannot set them (GitHub Pages),
+         so the WASM runtime can use threads. It does nothing where the server sends them. -->
+    <script src="./coi-serviceworker.js"></script>
     <title>Flattener — your page, straightened out.</title>
   </head>
   <body>
