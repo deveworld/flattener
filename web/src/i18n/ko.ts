@@ -178,8 +178,12 @@ export const ko: Record<string, string> = {
   'Refining the edges': '가장자리 다듬는 중',
   'An edge refinement was unstable; the previous valid correction was kept.':
     '가장자리 보정 하나가 불안정해서 이전 보정을 유지했습니다.',
+  'The page may be bent near an edge or a corner. If text looks warped, take the photo again with the whole page flat and visible.':
+    '가장자리나 모서리 근처가 휘었을 수 있습니다. 글자가 일그러져 보이면 페이지 전체가 평평하게 보이도록 다시 찍어 주세요.',
   'Checking the result': '결과 확인 중',
   'Checking text direction on the flattened page.': '편 페이지에서 글자 방향을 확인하고 있습니다.',
+  'Flattening the page again in the suggested direction.':
+    '제안된 방향으로 페이지를 다시 펴고 있습니다.',
   'Text direction is uncertain. Check the result and use Rotate if needed.':
     '글자 방향이 확실하지 않습니다. 결과를 확인하고 필요하면 회전하세요.',
   'Rendering your scan': '스캔 이미지 만드는 중',

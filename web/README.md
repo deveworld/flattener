@@ -77,6 +77,9 @@ Browsers without cross-origin isolation or WASM thread support use one thread.
   The camera closes after capture, on leaving the page, or when the tab is hidden.
 - Open a JPEG, PNG or WebP by file picker, drop or paste. Flattening starts as soon as the photo opens.
 - Scans start with Quick processing and automatic orientation.
+  When the direction read on the flattened page is uncertain, the page is flattened again turned that way and kept only if it then reads upright.
+  A page corner missing from the photo (a dog-ear, a hand) is painted with the paper color and the page flattened again, kept when the page comes out less bent.
+  A page that stays bent near an edge or a corner gets a warning to retake the photo.
   Choose **Refine scan** on the result to run flip averaging and two crop refinement passes.
   The current scan stays visible and can be saved while refinement runs.
   Canceling or failing refinement keeps that scan and its edits; completing refinement replaces them.

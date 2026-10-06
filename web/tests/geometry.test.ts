@@ -154,3 +154,85 @@ test('a page the gate split into pieces is taken from the whole-photo outline', 
   // An outline over the background holds no piece.
   assert.equal(splitPageBox(grid(0.6, 0.95, 0.6, 0.95), components, h, w, image), null);
 });
+
+/** A 45 × 31 page grid in photo-normalized coordinates: ``page(u, v)`` gives page units,
+ * mapped through a perspective homography into a 3000 × 4000 photo. */
+function perspectiveGrid(page: (u: number, v: number) => [number, number]) {
+  const rows = 45,
+    cols = 31,
+    data = new Float64Array(rows * cols * 2);
+  for (let r = 0; r < rows; r++)
+    for (let c = 0; c < cols; c++) {
+      const [u, v] = page(c / (cols - 1), r / (rows - 1));
+      const z = 1 + 0.25 * u - 0.15 * v;
+      const x = (600 + 1700 * u + 300 * v) / z,
+        y = (700 + 200 * u + 2300 * v) / z;
+      data[2 * (r * cols + c)] = (2 * x) / 3000 - 1;
+      data[2 * (r * cols + c) + 1] = (2 * y) / 4000 - 1;
+    }
+  return { rows, cols, data };
+}
+
+test('grid distortion ignores perspective and smooth curl and finds a local bend', async () => {
+  const { gridDistortion } = await import('../src/geometry');
+  const flat = gridDistortion(
+    perspectiveGrid((u, v) => [u, v]),
+    3000,
+    4000,
+  )!;
+  assert.ok(flat.bend < 1e-6 && flat.strain < 1e-5, JSON.stringify(flat.bend));
+  // A page bowed along its width (curl) is smooth: the cubic takes it out.
+  const curl = gridDistortion(
+    perspectiveGrid((u, v) => [u + 0.02 * Math.sin(Math.PI * v), v + 0.03 * u * (1 - u)]),
+    3000,
+    4000,
+  )!;
+  assert.ok(curl.bend < 0.002, `curl ${curl.bend}`);
+  // An edge pulled inward over a short stretch (an occluder at the left edge, rows 26–34).
+  const pulled = gridDistortion(
+    perspectiveGrid((u, v) => [u + 0.03 * Math.exp(-((v - 0.68) ** 2) / 0.003 - u / 0.08), v]),
+    3000,
+    4000,
+  )!;
+  assert.ok(pulled.bend > 0.015, `bend ${pulled.bend}`);
+  assert.equal(pulled.bendAt[1], 0);
+  assert.ok(Math.abs(pulled.bendAt[0] - 30) <= 2, `at ${pulled.bendAt}`);
+  assert.ok(pulled.notch > 0.015 && pulled.notchAt[1] === 0, `notch ${pulled.notch}`);
+  assert.ok(pulled.strain > 20 * curl.strain);
+});
+
+test('a dog-eared page corner is found from the gate and painted with paper only off the page', async () => {
+  const { cornerGaps, fillCorners } = await import('../src/geometry');
+  const gw = 144,
+    gh = 192;
+  // The page covers cells 20..124 × 30..170; a dog-ear cuts its top-left corner diagonally.
+  const gate = (cut: boolean) =>
+    Float32Array.from({ length: gw * gh }, (_, i) => {
+      const x = i % gw,
+        y = Math.floor(i / gw);
+      const inPage = x >= 20 && x < 124 && y >= 30 && y < 170;
+      return inPage && !(cut && x - 20 + (y - 30) < 22) ? 0.95 : 0.05;
+    });
+  assert.equal(cornerGaps(gate(false), gw, gh, 1440, 1920).length, 0);
+  const gaps = cornerGaps(gate(true), gw, gh, 1440, 1920);
+  assert.equal(gaps.length, 1);
+  const cx = gaps[0].reduce((s, p) => s + p[0], 0) / gaps[0].length,
+    cy = gaps[0].reduce((s, p) => s + p[1], 0) / gaps[0].length;
+  assert.ok(cx < 340 && cy < 440, `${cx} ${cy}`); // near the page's top-left corner (200, 300)
+  // Paper (230) on the page, a dark background (40) elsewhere.
+  const probability = gate(true);
+  const image = { width: 1440, height: 1920, data: new Uint8ClampedArray(1440 * 1920 * 4) };
+  for (let y = 0; y < 1920; y++)
+    for (let x = 0; x < 1440; x++) {
+      const p = probability[Math.floor(y / 10) * gw + Math.floor(x / 10)] >= 0.5;
+      image.data.set(p ? [230, 230, 230, 255] : [40, 40, 40, 255], (y * 1440 + x) * 4);
+    }
+  const before = image.data.slice();
+  const restore = fillCorners(image, gaps, probability, gw, gh);
+  const at = (x: number, y: number) => image.data[(y * 1440 + x) * 4];
+  assert.ok(at(215, 315) > 200, 'the missing corner is paper colored');
+  assert.equal(at(100, 100), 40, 'background outside the gap stays');
+  assert.equal(at(700, 900), 230, 'the page stays');
+  restore();
+  assert.deepEqual(image.data, before);
+});

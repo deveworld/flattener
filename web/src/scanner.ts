@@ -3,9 +3,12 @@ import {
   boxPlacement,
   checkGrid,
   compose,
+  cornerGaps,
+  fillCorners,
   fromCHW,
   gateInput,
   gateSplit,
+  gridDistortion,
   mirroredInput,
   modelInput,
   outlinePolygon,
@@ -106,7 +109,8 @@ export async function scan(
       'No clear page was found. Try a well-lit photo with the full document visible.',
     );
   await steps.page(image, probability, gw, gh);
-  let placement = boxPlacement(box, image),
+  const boxView = boxPlacement(box, image);
+  let placement = boxView,
     rotation = 0;
   place('page box', placement);
 
@@ -139,54 +143,127 @@ export async function scan(
       place('page box, turned upright', placement);
     }
   }
+
+  // Dewarp passes behind the result, a confirming try (below) included.
+  let passes = 0;
+  // Flattens the page from ``placement``, turned ``quarter`` times: the first pass, a corner
+  // fill and in Refined mode two edge refinements. ``restore`` undoes a kept corner fill.
+  async function flatten(placement: Placement, quarter: number, label = '') {
+    const notes: string[] = [];
+    let restore = () => {};
+    let grid = await predict(placement);
+    passes++;
+    const firstError = checkGrid(grid);
+    record(`${label}first pass`, grid, firstError, !firstError);
+    if (firstError) return { error: firstError } as const;
+    // A page corner missing from the photo (a dog-ear, a corner under another sheet or a
+    // hand) makes the model bend the whole page toward the cut. When the page comes out bent
+    // and the gate's page has a corner gap, the gap is painted with the paper color (in
+    // ``image`` itself) and the page predicted again; the painted photo is kept only when the
+    // page comes out clearly less bent (by a fifth), and restored otherwise.
+    const bend = gridDistortion(grid, image.width, image.height)?.bend ?? 0;
+    const gaps = bend >= 0.02 ? cornerGaps(probability, gw, gh, image.width, image.height) : [];
+    if (gaps.length) {
+      const unpaint = fillCorners(image, gaps, probability, gw, gh);
+      const filled = await predict(placement);
+      passes++;
+      const error = checkGrid(filled);
+      const after = error
+        ? Infinity
+        : (gridDistortion(filled, image.width, image.height)?.bend ?? Infinity);
+      const better = after < 0.8 * bend;
+      record(`${label}corners filled`, filled, error, better);
+      if (trace)
+        trace.corners = { gaps, bend, after: Number.isFinite(after) ? after : null, used: better };
+      if (better) {
+        grid = filled;
+        restore = unpaint;
+      } else unpaint();
+    }
+    await steps.mesh(image, grid, passes);
+    if (refined)
+      for (let i = 0; i < 2; i++) {
+        status(
+          'Refining the edges',
+          `Crop refinement ${i + 1} of 2. Sampling from your original photo.`,
+        );
+        const angle = pageAngle(grid, image.width, image.height);
+        placement = tightPlacement(grid, image, angle ?? quarter * 90);
+        place(`${label}refinement ${i + 1}`, placement);
+        const next = await predict(placement);
+        passes++;
+        const error = checkGrid(next);
+        // Every valid refinement is kept. Rejecting one that bends the page more (by
+        // gridDistortion) threw away tighter, straighter crops on KR-Real: a tighter crop
+        // raises the bend, and a bent first refinement was set right by the second.
+        record(`${label}refinement ${i + 1}`, next, error, !error);
+        if (error) {
+          notes.push('An edge refinement was unstable; the previous valid correction was kept.');
+          break;
+        }
+        grid = next;
+        await steps.mesh(image, grid, passes);
+      }
+    return { grid, notes, restore };
+  }
+
   status(
     'Flattening the page',
     refined
       ? 'Estimating the paper shape and checking a mirrored view.'
       : 'Estimating the paper shape.',
   );
-  let grid = await predict(placement),
-    passes = 1;
-  const firstError = checkGrid(grid);
-  record('first pass', grid, firstError, !firstError);
-  if (firstError) throw new Error(firstError);
-  await steps.mesh(image, grid, passes);
-  if (refined)
-    for (let i = 0; i < 2; i++) {
-      status(
-        'Refining the edges',
-        `Crop refinement ${i + 1} of 2. Sampling from your original photo.`,
-      );
-      const angle = pageAngle(grid, image.width, image.height);
-      placement = tightPlacement(grid, image, angle ?? rotation * 90);
-      place(`refinement ${i + 1}`, placement);
-      const next = await predict(placement);
-      passes++;
-      const error = checkGrid(next);
-      record(`refinement ${i + 1}`, next, error, !error);
-      if (error) {
-        warnings.push('An edge refinement was unstable; the previous valid correction was kept.');
-        break;
-      }
-      grid = next;
-      await steps.mesh(image, grid, passes);
-    }
+  const flat = await flatten(placement, rotation);
+  if ('error' in flat) throw new Error(flat.error);
+  let { grid, notes } = flat,
+    uncertain = false;
   if (options.orient) {
     status('Checking the result', 'Checking text direction on the flattened page.');
-    const [ph, pw] = outputSize(grid, image, 1024);
-    const preview = render(image, grid, ph, pw);
-    const result = await orientation(preview, whole(preview));
-    trace?.orientation.push({
-      stage: 'after',
-      probabilities: Array.from(result.probabilities),
-      k: result.k,
-      accepted: result.accepted,
-    });
+    const check = async (grid: Grid, stage: 'after' | 'confirm') => {
+      const [ph, pw] = outputSize(grid, image, 1024);
+      const preview = render(image, grid, ph, pw);
+      const result = await orientation(preview, whole(preview));
+      trace?.orientation.push({
+        stage,
+        probabilities: Array.from(result.probabilities),
+        k: result.k,
+        accepted: result.accepted,
+      });
+      return result;
+    };
+    const result = await check(grid, 'after');
+    uncertain = !result.accepted;
     if (result.accepted) {
       grid = quarterTurn(grid, result.k);
       rotation = (rotation + result.k) % 4;
-    } else warnings.push('Text direction is uncertain. Check the result and use Rotate if needed.');
+    } else if (result.k !== 0) {
+      // An uncertain turn is tried: the page is flattened again turned that way and kept when
+      // the check then reads it as upright. On DocUNet photos in four turns this set right 5 of
+      // 7 wrong turns; the tries that were wrong (a cut-off KR-Real page) did not read upright.
+      status('Checking the result', 'Flattening the page again in the suggested direction.');
+      const quarter = (rotation + result.k) % 4;
+      const view = turnPlacement(boxView, quarter);
+      place('page box, turned to confirm', view);
+      const again = await flatten(view, quarter, 'confirm ');
+      if (!('error' in again)) {
+        const confirmed = await check(again.grid, 'confirm');
+        if (confirmed.accepted && confirmed.k === 0) {
+          ({ grid, notes } = again);
+          rotation = quarter;
+          uncertain = false;
+        } else again.restore();
+      }
+    }
   }
+  warnings.push(...notes);
+  if (uncertain)
+    warnings.push('Text direction is uncertain. Check the result and use Rotate if needed.');
+  // Bends of 0.05 and more were visible on every KR-Real page that showed them (an occluded
+  // corner, a page held in the hand); the scan is kept but the user is told.
+  if ((gridDistortion(grid, image.width, image.height)?.bend ?? 0) >= 0.05)
+    warnings.push(
+      'The page may be bent near an edge or a corner. If text looks warped, take the photo again with the whole page flat and visible.',
+    );
   status('Rendering your scan', 'Writing the corrected image at full output resolution.');
   const [height, width] = outputSize(grid, image, options.maxSide);
   if (trace) {

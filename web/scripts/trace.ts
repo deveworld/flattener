@@ -67,12 +67,10 @@ mkdirSync(out, { recursive: true });
 const photos: Photo[] = JSON.parse(readFileSync(join(decoded, 'photos.json'), 'utf8'));
 const modes = which === 'both' ? (['fast', 'refined'] as const) : [which as 'fast' | 'refined'];
 for (const photo of photos) {
-  const image = {
-    width: photo.width,
-    height: photo.height,
-    data: new Uint8ClampedArray(readFileSync(join(decoded, `${photo.stem}.rgba`))),
-  };
+  const pixels = new Uint8ClampedArray(readFileSync(join(decoded, `${photo.stem}.rgba`)));
   for (const quality of modes) {
+    // A scan may paint missing page corners into its photo; each mode gets a fresh copy.
+    const image = { width: photo.width, height: photo.height, data: pixels.slice() };
     const options: Options = {
       quality,
       orient: true,

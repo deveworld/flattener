@@ -555,3 +555,387 @@ export function render(image: Pixels, grid: Grid, height: number, width: number)
     }
   return { width, height, data };
 }
+
+/** Solves the square system ``a x = b`` (row-major ``a``) by Gaussian elimination with
+ * partial pivoting; null when it is singular. */
+function solve(a: number[][], b: number[]): number[] | null {
+  const n = b.length,
+    m = a.map((row, i) => [...row, b[i]]);
+  for (let c = 0; c < n; c++) {
+    let p = c;
+    for (let r = c + 1; r < n; r++) if (Math.abs(m[r][c]) > Math.abs(m[p][c])) p = r;
+    if (Math.abs(m[p][c]) < 1e-12) return null;
+    [m[c], m[p]] = [m[p], m[c]];
+    for (let r = c + 1; r < n; r++) {
+      const f = m[r][c] / m[c][c];
+      for (let k = c; k <= n; k++) m[r][k] -= f * m[c][k];
+    }
+  }
+  const x = new Array<number>(n).fill(0);
+  for (let r = n - 1; r >= 0; r--) {
+    let sum = m[r][n];
+    for (let k = r + 1; k < n; k++) sum -= m[r][k] * x[k];
+    x[r] = sum / m[r][r];
+  }
+  return x;
+}
+
+/** Weighted least squares: the coefficients minimizing sum w (rows·c − y)². */
+function leastSquares(rows: number[][], y: number[], w: number[]): number[] | null {
+  const n = rows[0].length,
+    a = Array.from({ length: n }, () => new Array<number>(n).fill(0)),
+    b = new Array<number>(n).fill(0);
+  rows.forEach((row, i) => {
+    for (let j = 0; j < n; j++) {
+      b[j] += w[i] * row[j] * y[i];
+      for (let k = 0; k < n; k++) a[j][k] += w[i] * row[j] * row[k];
+    }
+  });
+  return solve(a, b);
+}
+
+/** Tukey biweights of residual sizes ``r`` with scale 4.685·1.4826·MAD. */
+function tukey(r: number[]): number[] {
+  const scale = 4.685 * 1.4826 * Math.max(median(r), 1e-9);
+  return r.map((v) => (v < scale ? (1 - (v / scale) ** 2) ** 2 : 0));
+}
+
+export type GridDistortion = {
+  /** Largest residual displacement of a node, in page units (1 = the page's width or height). */
+  bend: number;
+  bendAt: [number, number];
+  /** Strain of the residual field: ‖∂E/∂(u, v)‖ per cell, 95th percentile and largest. */
+  strain95: number;
+  strain: number;
+  strainAt: [number, number];
+  /** Largest inward residual of an outline node, in page units: an edge pulled into the page. */
+  notch: number;
+  notchAt: [number, number];
+  /** The residual field E per node (rows × cols × 2), in page units. */
+  residual: Float64Array;
+};
+
+/**
+ * Local distortion of a page grid that perspective and smooth curl do not explain. The node
+ * positions P (photo pixels) are fit by a homography H of the page square, robustly, and
+ * mapped back: D = H⁻¹(P) − (u, v) is what perspective leaves. A cubic polynomial S(u, v),
+ * also robust, takes out smooth curl; E = D − S is the residual: bends, folds and edges
+ * pulled by occluders. Null when the fits fail (a degenerate grid).
+ */
+export function gridDistortion(grid: Grid, width: number, height: number): GridDistortion | null {
+  const { rows, cols } = grid,
+    n = rows * cols;
+  const u = new Array<number>(n),
+    v = new Array<number>(n),
+    x = new Array<number>(n),
+    y = new Array<number>(n);
+  let mx = 0,
+    my = 0;
+  for (let r = 0; r < rows; r++)
+    for (let c = 0; c < cols; c++) {
+      const i = r * cols + c;
+      u[i] = c / (cols - 1);
+      v[i] = r / (rows - 1);
+      x[i] = ((grid.data[2 * i] + 1) * width) / 2;
+      y[i] = ((grid.data[2 * i + 1] + 1) * height) / 2;
+      mx += x[i] / n;
+      my += y[i] / n;
+    }
+  // Normalized coordinates keep the homography solve well conditioned.
+  let spread = 0;
+  for (let i = 0; i < n; i++) spread += Math.hypot(x[i] - mx, y[i] - my) / n;
+  const s = Math.SQRT2 / Math.max(spread, 1e-9);
+  const px = x.map((value) => (value - mx) * s),
+    py = y.map((value) => (value - my) * s);
+  // H (u, v, 1) ~ (px, py, 1), h33 = 1, refit twice with Tukey weights on the reprojection.
+  let w = new Array<number>(n).fill(1),
+    h: number[] | null = null;
+  for (let round = 0; round < 3; round++) {
+    const design: number[][] = [],
+      target: number[] = [],
+      weights: number[] = [];
+    for (let i = 0; i < n; i++) {
+      design.push([u[i], v[i], 1, 0, 0, 0, -u[i] * px[i], -v[i] * px[i]]);
+      target.push(px[i]);
+      design.push([0, 0, 0, u[i], v[i], 1, -u[i] * py[i], -v[i] * py[i]]);
+      target.push(py[i]);
+      weights.push(w[i], w[i]);
+    }
+    h = leastSquares(design, target, weights);
+    if (!h) return null;
+    const errors = u.map((_, i) => {
+      const d = h![6] * u[i] + h![7] * v[i] + 1;
+      return Math.hypot(
+        (h![0] * u[i] + h![1] * v[i] + h![2]) / d - px[i],
+        (h![3] * u[i] + h![4] * v[i] + h![5]) / d - py[i],
+      );
+    });
+    w = tukey(errors);
+  }
+  // Q = H⁻¹(P): each node in page coordinates as perspective alone would place it.
+  const [a, b, c, d, e, f, g, k] = h!;
+  const inverse = [
+    e - f * k,
+    c * k - b,
+    b * f - c * e,
+    f * g - d,
+    a - c * g,
+    c * d - a * f,
+    d * k - e * g,
+    b * g - a * k,
+    a * e - b * d,
+  ];
+  const du = new Array<number>(n),
+    dv = new Array<number>(n);
+  for (let i = 0; i < n; i++) {
+    const z = inverse[6] * px[i] + inverse[7] * py[i] + inverse[8];
+    if (!(Math.abs(z) > 1e-12)) return null;
+    du[i] = (inverse[0] * px[i] + inverse[1] * py[i] + inverse[2]) / z - u[i];
+    dv[i] = (inverse[3] * px[i] + inverse[4] * py[i] + inverse[5]) / z - v[i];
+  }
+  // S: total-degree-3 polynomial in (u, v) per axis, robust like the homography.
+  const basis = (p: number, q: number) => {
+    const s = 2 * p - 1,
+      t = 2 * q - 1;
+    return [1, s, t, s * s, s * t, t * t, s * s * s, s * s * t, s * t * t, t * t * t];
+  };
+  const design = u.map((_, i) => basis(u[i], v[i]));
+  w = new Array<number>(n).fill(1);
+  let su: number[] | null = null,
+    sv: number[] | null = null;
+  const residual = new Float64Array(2 * n);
+  for (let round = 0; round < 3; round++) {
+    su = leastSquares(design, du, w);
+    sv = leastSquares(design, dv, w);
+    if (!su || !sv) return null;
+    const sizes = new Array<number>(n);
+    for (let i = 0; i < n; i++) {
+      let fu = 0,
+        fv = 0;
+      for (let j = 0; j < 10; j++) {
+        fu += design[i][j] * su[j];
+        fv += design[i][j] * sv[j];
+      }
+      residual[2 * i] = du[i] - fu;
+      residual[2 * i + 1] = dv[i] - fv;
+      sizes[i] = Math.hypot(residual[2 * i], residual[2 * i + 1]);
+    }
+    w = tukey(sizes);
+  }
+  let bend = 0,
+    bendAt: [number, number] = [0, 0];
+  for (let i = 0; i < n; i++) {
+    const size = Math.hypot(residual[2 * i], residual[2 * i + 1]);
+    if (size > bend) [bend, bendAt] = [size, [Math.floor(i / cols), i % cols]];
+  }
+  // Strain per node from differences along the grid (one-sided at the border).
+  const at = (r: number, c: number, axis: number) => residual[2 * (r * cols + c) + axis];
+  const strains: number[] = [];
+  let strain = 0,
+    strainAt: [number, number] = [0, 0];
+  for (let r = 0; r < rows; r++)
+    for (let c = 0; c < cols; c++) {
+      const r0 = Math.max(0, r - 1),
+        r1 = Math.min(rows - 1, r + 1),
+        c0 = Math.max(0, c - 1),
+        c1 = Math.min(cols - 1, c + 1);
+      let sum = 0;
+      for (let axis = 0; axis < 2; axis++) {
+        const dEu = (at(r, c1, axis) - at(r, c0, axis)) / ((c1 - c0) / (cols - 1)),
+          dEv = (at(r1, c, axis) - at(r0, c, axis)) / ((r1 - r0) / (rows - 1));
+        sum += dEu * dEu + dEv * dEv;
+      }
+      const value = Math.sqrt(sum);
+      strains.push(value);
+      if (value > strain) [strain, strainAt] = [value, [r, c]];
+    }
+  strains.sort((p, q) => p - q);
+  // Inward residual on the outline: the page edge pulled toward the inside.
+  let notch = 0,
+    notchAt: [number, number] = [0, 0];
+  for (let r = 0; r < rows; r++)
+    for (let c = 0; c < cols; c++) {
+      if (r > 0 && r < rows - 1 && c > 0 && c < cols - 1) continue;
+      const nu = c === 0 ? 1 : c === cols - 1 ? -1 : 0,
+        nv = r === 0 ? 1 : r === rows - 1 ? -1 : 0;
+      const inward = (at(r, c, 0) * nu + at(r, c, 1) * nv) / Math.hypot(nu, nv);
+      if (inward > notch) [notch, notchAt] = [inward, [r, c]];
+    }
+  return {
+    bend,
+    bendAt,
+    strain95: strains[Math.floor(strains.length * 0.95)],
+    strain,
+    strainAt,
+    notch,
+    notchAt,
+    residual,
+  };
+}
+
+/** The convex hull of ``points`` (counterclockwise in image coordinates, y down). */
+function hull(points: [number, number][]): [number, number][] {
+  const sorted = [...points].sort((p, q) => p[0] - q[0] || p[1] - q[1]);
+  const cross = (o: [number, number], a: [number, number], b: [number, number]) =>
+    (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+  const half = (list: [number, number][]) => {
+    const out: [number, number][] = [];
+    for (const p of list) {
+      while (out.length >= 2 && cross(out[out.length - 2], out[out.length - 1], p) <= 0) out.pop();
+      out.push(p);
+    }
+    out.pop();
+    return out;
+  };
+  return [...half(sorted), ...half(sorted.reverse())];
+}
+
+function polygonArea(poly: [number, number][]) {
+  let sum = 0;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++)
+    sum += poly[j][0] * poly[i][1] - poly[i][0] * poly[j][1];
+  return Math.abs(sum) / 2;
+}
+
+/**
+ * Page corners missing from the photo, from the gate's page component: its convex hull is
+ * reduced to an enclosing quadrilateral (each step drops the hull vertex whose neighbouring
+ * edges, extended, add the least area), and each quad corner's gap is the region between it
+ * and the hull. Returns the gap polygons (photo pixels) of at least ``minGap`` of the quad's
+ * area: a dog-ear, a corner under another sheet or a hand.
+ */
+export function cornerGaps(
+  probability: Float32Array,
+  gw: number,
+  gh: number,
+  width: number,
+  height: number,
+  minGap = 0.004,
+): [number, number][][] {
+  const [best] = pageComponents(probability, gh, gw);
+  if (!best) return [];
+  const sx = width / gw,
+    sy = height / gh;
+  const cells: [number, number][] = [];
+  for (const i of best) {
+    const x = i % gw,
+      y = Math.floor(i / gw);
+    cells.push(
+      [x * sx, y * sy],
+      [(x + 1) * sx, y * sy],
+      [x * sx, (y + 1) * sy],
+      [(x + 1) * sx, (y + 1) * sy],
+    );
+  }
+  const outline = hull(cells);
+  if (outline.length < 4) return [];
+  const meet = (
+    a: [number, number],
+    b: [number, number],
+    c: [number, number],
+    d: [number, number],
+  ) => {
+    const d1 = [b[0] - a[0], b[1] - a[1]],
+      d2 = [d[0] - c[0], d[1] - c[1]];
+    const den = d1[0] * d2[1] - d1[1] * d2[0];
+    if (Math.abs(den) < 1e-9) return null;
+    const t = ((c[0] - a[0]) * d2[1] - (c[1] - a[1]) * d2[0]) / den;
+    return [a[0] + t * d1[0], a[1] + t * d1[1]] as [number, number];
+  };
+  const quad = [...outline];
+  while (quad.length > 4) {
+    let pick: { added: number; i: number; q: [number, number] } | null = null;
+    const n = quad.length;
+    for (let i = 0; i < n; i++) {
+      const q = meet(quad[(i + n - 1) % n], quad[i], quad[(i + 1) % n], quad[(i + 2) % n]);
+      if (!q) continue;
+      const added = polygonArea([quad[i], q, quad[(i + 1) % n]]);
+      if (!pick || added < pick.added) pick = { added, i, q };
+    }
+    if (!pick) break;
+    quad[pick.i] = pick.q;
+    quad.splice((pick.i + 1) % quad.length, 1);
+  }
+  if (quad.length !== 4) return [];
+  const area = polygonArea(quad),
+    near = 0.25 * Math.sqrt(area);
+  const gaps: [number, number][][] = [];
+  for (const corner of quad) {
+    const around = outline.filter((p) => Math.hypot(p[0] - corner[0], p[1] - corner[1]) < near);
+    if (around.length < 2) continue;
+    const gap = hull([corner, ...around]);
+    if (gap.length >= 3 && polygonArea(gap) >= minGap * area) gaps.push(gap);
+  }
+  return gaps;
+}
+
+/**
+ * Paints the ``gaps`` (from ``cornerGaps``) in place with the paper color around them, only
+ * where the gate does not see page. Returns a function that restores the painted pixels.
+ */
+export function fillCorners(
+  image: Pixels,
+  gaps: [number, number][][],
+  probability: Float32Array,
+  gw: number,
+  gh: number,
+): () => void {
+  const { width, height, data } = image;
+  const page = (x: number, y: number) =>
+    bilinear(
+      probability,
+      gw,
+      gh,
+      ((x + 0.5) * gw) / width - 0.5,
+      ((y + 0.5) * gh) / height - 0.5,
+    ) >= 0.5;
+  const inside = (poly: [number, number][], x: number, y: number) => {
+    let c = false;
+    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++)
+      if (
+        poly[i][1] > y !== poly[j][1] > y &&
+        x < ((poly[j][0] - poly[i][0]) * (y - poly[i][1])) / (poly[j][1] - poly[i][1]) + poly[i][0]
+      )
+        c = !c;
+    return c;
+  };
+  const saved: [number, number, number, number][] = [];
+  for (const gap of gaps) {
+    const xs = gap.map((p) => p[0]),
+      ys = gap.map((p) => p[1]);
+    const x0 = Math.max(0, Math.floor(Math.min(...xs))),
+      x1 = Math.min(width - 1, Math.ceil(Math.max(...xs))),
+      y0 = Math.max(0, Math.floor(Math.min(...ys))),
+      y1 = Math.min(height - 1, Math.ceil(Math.max(...ys)));
+    // The paper color: the brighter 30% of page pixels around the gap.
+    const gx = (x1 - x0) * 0.6,
+      gy = (y1 - y0) * 0.6,
+      sample: number[][] = [];
+    for (let y = Math.max(0, Math.floor(y0 - gy)); y <= Math.min(height - 1, y1 + gy); y += 4)
+      for (let x = Math.max(0, Math.floor(x0 - gx)); x <= Math.min(width - 1, x1 + gx); x += 4)
+        if (page(x, y)) {
+          const i = (y * width + x) * 4;
+          sample.push([data[i], data[i + 1], data[i + 2]]);
+        }
+    if (sample.length < 20) continue;
+    sample.sort((a, b) => a[0] + a[1] + a[2] - (b[0] + b[1] + b[2]));
+    const bright = sample.slice(Math.floor(sample.length * 0.7));
+    const color = [0, 1, 2].map((k) => bright.reduce((sum, c) => sum + c[k], 0) / bright.length);
+    for (let y = y0; y <= y1; y++)
+      for (let x = x0; x <= x1; x++)
+        if (inside(gap, x, y) && !page(x, y)) {
+          const i = (y * width + x) * 4;
+          saved.push([i, data[i], data[i + 1], data[i + 2]]);
+          data[i] = color[0];
+          data[i + 1] = color[1];
+          data[i + 2] = color[2];
+        }
+  }
+  return () => {
+    for (const [i, r, g, b] of saved) {
+      data[i] = r;
+      data[i + 1] = g;
+      data[i + 2] = b;
+    }
+  };
+}

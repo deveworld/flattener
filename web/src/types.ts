@@ -18,7 +18,7 @@ export type ScanTrace = {
   box?: { value: number[] | null; pieces: number; split: boolean; fromWholePass: boolean };
   placements: { name: string; placement: Placement }[];
   orientation: {
-    stage: 'before' | 'after';
+    stage: 'before' | 'after' | 'confirm';
     probabilities: number[];
     k: number;
     accepted: boolean;
@@ -33,6 +33,8 @@ export type ScanTrace = {
     error: string | null;
     used: boolean;
   }[];
+  /** Missing page corners painted before predicting again, and the page's bend before and after. */
+  corners?: { gaps: [number, number][][]; bend: number; after: number | null; used: boolean };
   rotation?: number;
   output?: { height: number; width: number };
 };
