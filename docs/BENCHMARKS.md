@@ -35,7 +35,7 @@ The main ForCenNet model is left out because it trains on the flat scans of DocU
 ## Reproduce
 
 Run these commands from the repository root with the final checkpoint.
-Download `dewarp.pt` from [Hugging Face](https://huggingface.co/DevWorld/flattener/tree/1.0.0) and use its path for `checkpoint.pt`.
+Download `dewarp.pt` from [Hugging Face](https://huggingface.co/DevWorld/flattener/tree/1.1.0) and use its path for `checkpoint.pt`.
 Replace the input paths with your dataset locations.
 
 ### DocUNet

@@ -22,6 +22,8 @@ npm run dev
 The exporter writes `manifest.json` and three FP32 ONNX models to `public/models/`.
 Model files are generated locally and excluded from Git.
 Pass `--bundle /path/to/bundle.json` to export a custom bundle.
+The same files for the default models are on Hugging Face; download them instead of exporting with
+`uvx hf download DevWorld/flattener manifest.json dewarp.onnx gate.onnx orient.onnx --revision 1.1.0 --local-dir web/public/models`.
 
 ## Build and host
 

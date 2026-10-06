@@ -14,10 +14,9 @@ from time import perf_counter
 
 import numpy as np
 import PIL
-import torch
 
 import flattener
-from flattener import RenderConfig, Status, identity_map, render
+from flattener import RenderConfig, Status, identity_map, ops, render
 from flattener.validation import validate_size
 
 
@@ -92,8 +91,7 @@ def main():
         max_side=config.max_side,
         name="benchmark size",
     )
-    torch.set_num_threads(args.threads)
-    torch.set_num_interop_threads(1)
+    ops.set_threads(args.threads)
 
     fixture_started = perf_counter()
     # Independent integer channel patterns; only 1D coordinate temporaries.
@@ -147,11 +145,9 @@ def main():
                 "python": platform.python_version(),
                 "flattener": flattener.__version__,
                 "numpy": np.__version__,
-                "torch": str(torch.__version__),
                 "pillow": PIL.__version__,
             },
-            "torch_cpu_threads": torch.get_num_threads(),
-            "torch_interop_threads": torch.get_num_interop_threads(),
+            "sampling_threads": ops.threads(),
         },
         "input_size": list(size),
         "output_size": list(size),

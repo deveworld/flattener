@@ -165,7 +165,7 @@ def parser() -> argparse.ArgumentParser:
         f"default: <stem>{DEFAULT_SUFFIX}.jpg in the current directory",
     )
     parser.add_argument("-y", "--overwrite", action="store_true", help="replace existing files")
-    parser.add_argument("-q", "--quiet", action="store_true", help="print nothing on stderr")
+    parser.add_argument("-q", "--quiet", action="store_true", help="print no progress lines")
     parser.add_argument("--json", action="store_true", help="print one JSON line per page")
     parser.add_argument(
         "--record", action="store_true", help="also write the scan record as <name>.json"
@@ -180,9 +180,11 @@ def parser() -> argparse.ArgumentParser:
     run.add_argument("--device", default="auto", help="auto, cpu or cuda[:N]")
     run.add_argument("--threads", type=int, help="CPU threads")
     run.add_argument(
-        "--bundle", type=Path, help="local bundle JSON; default: download models from Hugging Face"
+        "--bundle",
+        type=Path,
+        help="local ONNX or PyTorch bundle JSON; default: download from Hugging Face",
     )
-    run.add_argument("--weights", type=Path, help="dewarp checkpoint (without --bundle)")
+    run.add_argument("--weights", type=Path, help="PyTorch dewarp checkpoint (without --bundle)")
     run.add_argument("--gate", type=Path, help="page gate checkpoint (with --weights)")
     run.add_argument("--orient-weights", type=Path, help="OrientNet checkpoint (with --weights)")
     run.add_argument(

@@ -40,7 +40,7 @@ The data builder writes page batches and a sample manifest.
 The trainer resumes from `checkpoints/latest.json`.
 `best.json` names the checkpoint with the best mean accuracy across classes.
 Use that checkpoint in the export command.
-Install `onnx` and `onnxscript` for export; `onnxruntime` adds a comparison with PyTorch:
+Install `onnxscript` for this export; it is compared with PyTorch in ONNX Runtime:
 
 ```sh
 python -m flattener.scan.orient export \
@@ -57,3 +57,5 @@ Validation fits a temperature and confidence threshold on synthetic pages, limit
 Choose the operating threshold on the real-photo development split and set it in the bundle's `orient.threshold` or with `--orient-threshold`.
 Pass the same value to `export --threshold`.
 The scanner defaults to 0.9.
+
+The scanner's default ONNX models come from `tools/models/export_onnx.py`, which exports all three models with a fixed batch of 1.

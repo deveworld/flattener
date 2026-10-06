@@ -20,7 +20,8 @@
 * ``SourceImage.level(f)`` is the image reduced by f (2, 4 or 8) with a box filter over
   the full extent, so flattener coordinates are the same on every level.
 
-``save_scan`` writes ``<stem>.jpg`` (or ``.png``) and ``<stem>.scan.json``. JPEG is
+``save_scan`` writes ``<stem>.jpg`` (or ``.png``) and ``<stem>.scan.json``;
+``save_scan_files`` writes a named image and, optionally, a named record beside it. JPEG is
 quality 95 with 4:4:4 chroma (``subsampling=0``); PNG is lossless. The source's ICC
 profile and a known DPI can be embedded. Every file is written to a temporary file in
 the target directory, flushed to disk and moved into place, so a reader sees either the

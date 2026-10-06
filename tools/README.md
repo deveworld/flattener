@@ -4,7 +4,7 @@ Run these commands from the repository root.
 
 | Task | Command |
 |---|---|
-| Export browser models | `uv run python tools/models/export_onnx.py` |
+| Export ONNX models (Python scanner and browser) | `uv run python tools/models/export_onnx.py` |
 | Blend trained checkpoints | `uv run python tools/models/blend.py dewarp.pt first.pt second.pt --weight 0.5` |
 | Evaluate model predictions | `uv run python -m tools.benchmark --help` |
 | Measure renderer performance | `uv run python -m tools.benchmark.renderer` |

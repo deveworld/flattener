@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "flattener-scan"
-version = "1.1.0"
+version = "1.1.1"
 description = "Document photo scanner: page detection, orientation, dewarping and one render"
 readme = "README.md"
 requires-python = ">=3.12"

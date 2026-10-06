@@ -19,7 +19,7 @@ Or install it with `pip install flattener-scan` and run `flattener-scan -i photo
 Flattener needs Python 3.12 or newer and is tested on Linux x86_64.
 
 The models run on the CPU with ONNX Runtime, so the install stays small.
-To use an NVIDIA GPU, add PyTorch: `uvx --with torch flattener-scan -i photo.jpg scan.jpg`, or `pip install "flattener-scan[torch]"`.
+To use an NVIDIA GPU on Linux, add PyTorch: `uvx --with torch flattener-scan -i photo.jpg scan.jpg`, or `pip install "flattener-scan[torch]"`.
 With PyTorch installed, a CUDA GPU is used automatically; `--device cpu` or `--backend onnx` keeps the CPU.
 
 The first scan downloads the Apache-2.0 models from [Hugging Face](https://huggingface.co/DevWorld/flattener), version `1.1.0`.
@@ -30,7 +30,7 @@ Without an output name, the scan is saved as `photo-scan.jpg` in the current dir
 Repeat `-i` for a batch and give an output directory: `flattener-scan -i a.jpg -i b.jpg scans/`.
 Book spreads produce separate page files, such as `scan-p1.jpg` and `scan-p2.jpg`.
 Existing files are kept unless you pass `-y`.
-Use `--record` to save a JSON record of each scan, or `--json` to print one.
+Use `--record` to save a JSON record next to each scan, or `--json` to print a one-line summary per page.
 Use `--region`, `--quad`, `--quarter` or `--output-size` for manual control; run `flattener-scan --help` for all options.
 
 From Python:
