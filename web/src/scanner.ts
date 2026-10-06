@@ -5,13 +5,16 @@ import {
   compose,
   fromCHW,
   gateInput,
+  gateSplit,
   mirroredInput,
   modelInput,
   outputSize,
   pageAngle,
   pageBox,
+  pageComponents,
   quarterTurn,
   render,
+  splitPageBox,
   tightPlacement,
   turnPlacement,
   whole,
@@ -36,7 +39,28 @@ export async function scan(
   const { probability } = await models.run('gate', { image: gateInput(image, gh, gw) });
   if (!probability.every(Number.isFinite))
     throw new Error('Page detection failed. Try a different photo.');
-  const box = pageBox(probability, gh, gw, image);
+  const [ih, iw] = manifest.models.dewarp.input_size,
+    [rows, cols] = manifest.models.dewarp.grid_size;
+  const refined = options.quality === 'refined';
+  async function predict(view: Placement): Promise<Grid> {
+    const input = modelInput(image, view, ih, iw);
+    const out = await models.run('dewarp', { image: input });
+    let grid = fromCHW(out.grid, rows, cols);
+    if (refined && manifest.models.dewarp.tta === 'flip') {
+      const mirror = await models.run('dewarp', { image: mirroredInput(input, ih, iw) });
+      grid = blendFlip(grid, fromCHW(mirror.grid, rows, cols));
+    }
+    return compose(grid, view);
+  }
+
+  let box = pageBox(probability, gh, gw, image);
+  const components = pageComponents(probability, gh, gw);
+  if (gateSplit(components)) {
+    // Printed covers and dark bands split the gate's page into pieces; the page outline
+    // of a dewarp pass over the whole photo then decides the crop.
+    const whole0 = await predict(whole(image));
+    if (!checkGrid(whole0)) box = splitPageBox(whole0, components, gh, gw, image) ?? box;
+  }
   if (!box)
     throw new Error(
       'No clear page was found. Try a well-lit photo with the full document visible.',
@@ -62,19 +86,6 @@ export async function scan(
       rotation = result.k;
       placement = turnPlacement(placement, result.k);
     }
-  }
-  const [ih, iw] = manifest.models.dewarp.input_size,
-    [rows, cols] = manifest.models.dewarp.grid_size;
-  const refined = options.quality === 'refined';
-  async function predict(view: Placement): Promise<Grid> {
-    const input = modelInput(image, view, ih, iw);
-    const out = await models.run('dewarp', { image: input });
-    let grid = fromCHW(out.grid, rows, cols);
-    if (refined && manifest.models.dewarp.tta === 'flip') {
-      const mirror = await models.run('dewarp', { image: mirroredInput(input, ih, iw) });
-      grid = blendFlip(grid, fromCHW(mirror.grid, rows, cols));
-    }
-    return compose(grid, view);
   }
   status(
     'Flattening the page',

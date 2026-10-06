@@ -125,3 +125,32 @@ test('output size limits preserve a usable document aspect', () => {
     /too small/,
   );
 });
+
+test('a page the gate split into pieces is taken from the whole-photo outline', async () => {
+  const { gateSplit, pageComponents, splitPageBox } = await import('../src/geometry');
+  const [h, w] = [40, 30];
+  const probability = new Float32Array(h * w);
+  // The page spans x 8..22, y 6..34; a dark band at rows 16..18 splits it in two.
+  for (let y = 6; y < 34; y++)
+    for (let x = 8; x < 22; x++) if (y < 16 || y > 18) probability[y * w + x] = 0.9;
+  const image = { width: 300, height: 400, data: new Uint8ClampedArray(300 * 400 * 4) };
+  const components = pageComponents(probability, h, w);
+  assert.equal(components.length, 2);
+  assert.ok(gateSplit(components));
+  const grid = (x0: number, x1: number, y0: number, y1: number) => {
+    const rows = 5,
+      cols = 4,
+      data = new Float64Array(rows * cols * 2);
+    for (let r = 0; r < rows; r++)
+      for (let c = 0; c < cols; c++) {
+        data[(r * cols + c) * 2] = x0 + ((x1 - x0) * c) / (cols - 1);
+        data[(r * cols + c) * 2 + 1] = y0 + ((y1 - y0) * r) / (rows - 1);
+      }
+    return { rows, cols, data };
+  };
+  // The outline of the page in normalized values: x 80..220 px, y 60..340 px.
+  const box = splitPageBox(grid(-0.467, 0.467, -0.7, 0.7), components, h, w, image)!;
+  assert.ok(box[0] <= 80 && box[2] >= 220 && box[1] <= 60 && box[3] >= 340, String(box));
+  // An outline over the background holds no piece.
+  assert.equal(splitPageBox(grid(0.6, 0.95, 0.6, 0.95), components, h, w, image), null);
+});

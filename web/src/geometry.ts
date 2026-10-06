@@ -253,16 +253,11 @@ export function tightPlacement(grid: Grid, image: Pixels, angle: number, margin 
   };
 }
 
-/** Largest connected page component, used only as a crop hint. */
-export function pageBox(
-  probability: Float32Array,
-  height: number,
-  width: number,
-  image: Pixels,
-): number[] | null {
+/** 4-connected components of gate cells at or above 0.5, largest first (cell indices). */
+export function pageComponents(probability: Float32Array, height: number, width: number) {
   const visited = new Uint8Array(width * height),
     queue = new Int32Array(width * height);
-  let best: number[] = [];
+  const found: number[][] = [];
   for (let start = 0; start < probability.length; start++) {
     if (visited[start] || probability[start] < 0.5) continue;
     let read = 0,
@@ -285,14 +280,18 @@ export function pageBox(
         }
       }
     }
-    if (write > best.length) best = Array.from(queue.subarray(0, write));
+    found.push(Array.from(queue.subarray(0, write)));
   }
-  if (best.length < width * height * 0.03) return null;
+  return found.sort((a, b) => b.length - a.length);
+}
+
+/** Pixel box of gate cells, grown by 4% of its size per side. */
+function cellsBox(cells: number[], height: number, width: number, image: Pixels): number[] {
   let l = width,
     r = 0,
     t = height,
     b = 0;
-  for (const i of best) {
+  for (const i of cells) {
     const x = i % width,
       y = Math.floor(i / width);
     l = Math.min(l, x);
@@ -308,6 +307,104 @@ export function pageBox(
     Math.ceil((Math.min(width, r + mx) / width) * image.width),
     Math.ceil((Math.min(height, b + my) / height) * image.height),
   ];
+}
+
+/** Largest connected page component, used only as a crop hint. */
+export function pageBox(
+  probability: Float32Array,
+  height: number,
+  width: number,
+  image: Pixels,
+): number[] | null {
+  const [best] = pageComponents(probability, height, width);
+  if (!best || best.length < width * height * 0.03) return null;
+  return cellsBox(best, height, width, image);
+}
+
+/** The grid's boundary nodes in pixels, in order around the page. */
+export function outlinePolygon(grid: Grid, width: number, height: number): [number, number][] {
+  const point = (r: number, c: number): [number, number] => {
+    const i = (r * grid.cols + c) * 2;
+    return [((grid.data[i] + 1) * width) / 2, ((grid.data[i + 1] + 1) * height) / 2];
+  };
+  const points: [number, number][] = [];
+  for (let c = 0; c < grid.cols; c++) points.push(point(0, c));
+  for (let r = 1; r < grid.rows; r++) points.push(point(r, grid.cols - 1));
+  for (let c = grid.cols - 2; c >= 0; c--) points.push(point(grid.rows - 1, c));
+  for (let r = grid.rows - 2; r > 0; r--) points.push(point(r, 0));
+  return points;
+}
+
+function insidePolygon(polygon: [number, number][], x: number, y: number): boolean {
+  let inside = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const [xi, yi] = polygon[i],
+      [xj, yj] = polygon[j];
+    if (yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
+
+export const SPLIT_RULES = {
+  dominance: 0.85, // a largest piece below this share of the page cells: the gate split the page
+  minArea: 0.01, // pieces smaller than this share of the grid are ignored
+  minInside: 0.5, // a piece belongs to the page when this share of it lies in the outline
+  minPrecision: 0.5, // the outline is used when this share of it is page cells
+};
+
+/** Whether the gate split one page into several pieces (``SPLIT_RULES.dominance``). */
+export function gateSplit(components: number[][]): boolean {
+  const total = components.reduce((sum, cells) => sum + cells.length, 0);
+  return components.length > 1 && components[0].length / total < SPLIT_RULES.dominance;
+}
+
+/**
+ * A crop box from a whole-photo dewarp grid when the gate split the page: the outline must
+ * hold some gate pieces and be mostly page cells (the Python scanner's rule). Null otherwise.
+ */
+export function splitPageBox(
+  grid: Grid,
+  components: number[][],
+  height: number,
+  width: number,
+  image: Pixels,
+): number[] | null {
+  const polygon = outlinePolygon(grid, image.width, image.height);
+  if (polygon.some(([x, y]) => !Number.isFinite(x) || !Number.isFinite(y))) return null;
+  const inside = new Uint8Array(width * height);
+  let cells = 0;
+  for (let y = 0; y < height; y++)
+    for (let x = 0; x < width; x++)
+      if (
+        insidePolygon(
+          polygon,
+          ((x + 0.5) / width) * image.width,
+          ((y + 0.5) / height) * image.height,
+        )
+      ) {
+        inside[y * width + x] = 1;
+        cells++;
+      }
+  if (!cells) return null;
+  let held = 0;
+  for (const piece of components) {
+    if (piece.length < width * height * SPLIT_RULES.minArea) continue;
+    const share = piece.reduce((sum, i) => sum + inside[i], 0) / piece.length;
+    if (share >= SPLIT_RULES.minInside) held += piece.reduce((sum, i) => sum + inside[i], 0);
+  }
+  if (!held || held / cells < SPLIT_RULES.minPrecision) return null;
+  const xs = polygon.map(([x]) => x),
+    ys = polygon.map(([, y]) => y);
+  const [l, r, t, b] = [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)];
+  const mx = (r - l) * 0.04,
+    my = (b - t) * 0.04;
+  const box = [
+    Math.floor(Math.max(0, l - mx)),
+    Math.floor(Math.max(0, t - my)),
+    Math.ceil(Math.min(image.width, r + mx)),
+    Math.ceil(Math.min(image.height, b + my)),
+  ];
+  return box[2] - box[0] >= 2 && box[3] - box[1] >= 2 ? box : null;
 }
 
 export function quarterTurn(grid: Grid, k: number): Grid {
