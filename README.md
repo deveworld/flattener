@@ -52,6 +52,7 @@ The development environment includes CPU PyTorch for training and evaluation.
 ## Browser app
 
 Scan single pages locally with WebGPU or CPU/WASM, edit the result and save a PNG.
+Try it at https://deveworld.github.io/flattener/.
 See the [web app guide](https://github.com/deveworld/flattener/blob/main/web/README.md) for setup, capabilities and static hosting.
 
 ## Training

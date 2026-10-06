@@ -27,6 +27,10 @@ The same files for the default models are on Hugging Face; download them instead
 
 ## Build and host
 
+The app is deployed to https://deveworld.github.io/flattener/ by `.github/workflows/pages.yml` on each push to `main` that changes `web/`.
+The workflow downloads the ONNX models from Hugging Face, runs the tests and publishes `web/dist/`.
+GitHub Pages cannot set the cross-origin isolation headers below, so the hosted WASM fallback runs on one thread.
+
 ```sh
 npm run build
 npm run preview
