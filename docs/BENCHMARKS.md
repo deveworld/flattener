@@ -5,14 +5,32 @@ Python evaluation results for DocUNet, DIR300 and UVDoc.
 ## SOTA results
 
 Scores are **MS-SSIM ↑ / LD ↓ / AD ↓**.
+"SOTA" means the best scores among models with released code and weights.
+The one exception is UVDoc MS-SSIM, where the UVDoc model scores higher.
 
-| Benchmark | Flattener | Best published |
-|---|---|---|
-| DocUNet | **0.589 / 4.91 / 0.208** | 0.571 / 5.51 / 0.218 |
-| DIR300 | **0.718 / 3.78 / 0.126** | 0.702 / 4.26 / 0.131 |
-| UVDoc | 0.767 / **4.53 / 0.088** | 0.800 / 5.83 / 0.098 |
+| Benchmark | Flattener | Flattener without TTA | Best released model |
+|---|---|---|---|
+| DocUNet | **0.589 / 4.91 / 0.208** | 0.581 / 4.98 / 0.214 | 0.571 / 5.51 / 0.218 (SyntheticDoc HR) |
+| DIR300 | **0.718 / 3.78 / 0.126** | 0.714 / 3.95 / 0.133 | 0.65 / 5.73 / 0.186 (D2Dewarp) |
+| UVDoc | 0.767 / **4.53 / 0.088** | 0.753 / 4.80 / 0.109 | **0.785** / 6.81 / 0.119 (UVDoc) |
 
-Evaluation uses two tight crop refinement passes and flip test-time augmentation (TTA).
+Flattener runs two tight crop refinement passes and flip test-time augmentation (TTA).
+No published method uses flip TTA, so the table also lists scores without it.
+DocUNet uses 128 images, without the two views of document 64, as in the UVDoc and SyntheticDoc papers.
+
+Some papers report better scores but have not released code or weights:
+
+| Method | DocUNet | DIR300 | UVDoc |
+|---|---|---|---|
+| ForCenNet-DOC3D | 0.579 / 4.91 / 0.19 | 0.709 / 4.73 / 0.136 | – |
+| AADD | 0.543 / 6.25 / 0.278 | 0.702 / 4.26 / 0.131 | 0.800 / 5.83 / 0.098 |
+| TADoc | 0.530 / 7.11 / 0.334 | 0.692 / 4.33 / 0.170 | – |
+
+Flattener with TTA beats all of them on DIR300.
+On DocUNet, ForCenNet-DOC3D has a better AD and the same LD.
+On UVDoc, AADD has a better MS-SSIM.
+AADD also re-crops and predicts again at test time, with one extra pass on DocUNet and UVDoc and two on DIR300.
+The main ForCenNet model is left out because it trains on the flat scans of DocUNet and DIR300.
 
 ## Reproduce
 
@@ -66,3 +84,16 @@ uv run python -m tools.benchmark.renderer --height 1024 --width 1024
 ```
 
 This tool requires Linux and prints its results as JSON.
+
+## Sources
+
+| Method | Source | Scores taken from |
+|---|---|---|
+| SyntheticDoc HR | [Woortmann et al., ECCV 2026](https://arxiv.org/abs/2609.15503), [code and weights](https://github.com/tanguymagne/SyntheticDoc) | Our evaluator on the released high-resolution checkpoint; the paper reports 0.570 / 5.51 / 0.219 (Table 5) |
+| D2Dewarp | [CVPR 2026](https://arxiv.org/abs/2507.08492), [code and weights](https://github.com/xiaomore/D2Dewarp) | DIR300 table in the paper |
+| UVDoc | [Verhoeven et al., SIGGRAPH Asia 2023](https://arxiv.org/abs/2302.02887), [code and weights](https://github.com/tanguymagne/UVDoc) | MS-SSIM and AD from the corrected UVDoc benchmark results in the repository README; LD from AADD Table S1 |
+| ForCenNet | [ICCV 2025](https://arxiv.org/abs/2507.19804), [repository](https://github.com/caipeng328/ForCenNet) | Tables 1 and 2, ForCenNet-DOC3D rows |
+| AADD | [AAAI 2026](https://arxiv.org/abs/2507.15000), [repository](https://github.com/chaoyunwang/AADD) | DocUNet and DIR300 from Table 1, UVDoc from Table S1 |
+| TADoc | [arXiv 2025](https://arxiv.org/abs/2508.06988) | Table 1, average-method rows |
+
+DvD (SIGGRAPH Asia 2025) has released weights and scores 0.549 / 6.61 / 0.279 on DocUNet; its DIR300 scores are in a supplement we did not check.
