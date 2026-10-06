@@ -62,7 +62,7 @@ wheels = [
 
 [[package]]
 name = "flattener-scan"
-version = "1.0.0"
+version = "1.0.1"
 source = { editable = "." }
 dependencies = [
     { name = "huggingface-hub", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },

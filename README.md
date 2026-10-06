@@ -14,12 +14,18 @@ See [benchmark results and reproduction instructions](https://github.com/devewor
 Flattener needs Python 3.12 and is tested on Linux x86_64 with CPU PyTorch.
 
 ```bash
+uvx --torch-backend cpu flattener-scan photo.jpg --out scans
+```
+
+Or install it with pip:
+
+```bash
 pip install flattener-scan --extra-index-url https://download.pytorch.org/whl/cpu
 flattener photo.jpg --out scans
 ```
 
-The extra index installs the CPU build of PyTorch.
-Without it, pip on Linux installs the CUDA build, which is several gigabytes larger.
+`--torch-backend cpu` and the extra index install the CPU build of PyTorch.
+Without them, Linux gets the CUDA build, which is several gigabytes larger.
 
 To work from a clone of this repository, use `uv sync --python 3.12` and run `uv run flattener`.
 
