@@ -1,4 +1,5 @@
 import { cleanDocument, estimatePaper, rotatePixels } from './cleanup';
+import { cropPixels, FULL_CROP } from './crop';
 import { encode } from './previews';
 import type { EditReply, EditRequest } from './types';
 
@@ -19,12 +20,16 @@ self.onmessage = async ({ data }: MessageEvent<EditRequest>) => {
       ...data.settings.mask,
       data: data.settings.mask.data.map((v, i) => (v || data.suggestion.data[i] ? 1 : 0)),
     };
+    // Color and removal work on the whole page; the crop follows, then the quarter turns.
     const result = rotatePixels(
-      cleanDocument(
-        source,
-        data.settings.mask,
-        data.settings.cleanColor,
-        estimatePaper(source, excluded),
+      cropPixels(
+        cleanDocument(
+          source,
+          data.settings.mask,
+          data.settings.cleanColor,
+          estimatePaper(source, excluded),
+        ),
+        data.settings.crop ?? FULL_CROP,
       ),
       data.settings.rotation,
     );

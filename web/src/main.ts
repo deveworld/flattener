@@ -1,7 +1,10 @@
 import './style.css';
 import { Camera } from './camera';
 import { emptyMask, maskCount } from './cleanup';
+import { isFullCrop } from './crop';
+import { CropEditor } from './crop-editor';
 import { MaskEditor } from './mask-editor';
+import { pdfFromJpegs, type PdfPage } from './pdf';
 import type {
   EditReply,
   EditRequest,
@@ -31,7 +34,7 @@ let originalURL = '',
 let busy = false,
   editing = false,
   photoReady = false,
-  flattenOnLoad = false;
+  retryable = false;
 let focusAction = false;
 let refining = false;
 let activeOptions: Options | undefined, resultOptions: Options | undefined;
@@ -44,8 +47,9 @@ let pendingEdit: { settings: EditSettings; history: 'push' | 'pop' | 'reset' } |
 const editHistory: EditSettings[] = [];
 const steps = new Map<string, ProcessingStep & { url: string; button: HTMLButtonElement }>();
 const maskEditor = new MaskEditor();
+const cropEditor = new CropEditor();
 const camera = new Camera(
-  (file) => chooseFile(file, { flatten: true }),
+  (file) => chooseFile(file),
   () => fileInput.click(),
 );
 const cloneSettings = (s: EditSettings): EditSettings => ({
@@ -100,31 +104,43 @@ function busyState(value: boolean) {
   busy = value;
   const locked = value || editing || editorOpen;
   scanButton.disabled = locked || !selected || !photoReady;
-  scanButton.hidden = value || !!resultBlob;
+  // Photos flatten as soon as they open; the button only offers a retry.
+  scanButton.hidden = value || !!resultBlob || !retryable;
   $('cancel').hidden = !value && !editing;
-  $('cancel').textContent = editing ? 'Cancel edit' : refining ? 'Cancel refinement' : 'Cancel scan';
+  $('cancel').textContent = editing
+    ? 'Cancel edit'
+    : refining
+      ? 'Cancel refinement'
+      : 'Cancel scan';
   $<HTMLFieldSetElement>('settings-fields').disabled = locked;
-  for (const id of ['choose', 'camera-new', 'rescan', 'refine', 'rotate', 'zoom', 'remove-fingers'])
-    $<HTMLButtonElement>(id).disabled = locked;
+  for (const id of ['rescan', 'refine', 'crop', 'rotate', 'zoom', 'remove-fingers', 'add-page'])
+    $<HTMLButtonElement>(id).disabled = locked || (id === 'add-page' && pageAdded);
   $<HTMLSelectElement>('color-mode').disabled = locked;
   $<HTMLButtonElement>('undo-edit').disabled = locked || !editHistory.length;
-  $<HTMLButtonElement>('reset-edits').disabled =
-    locked || !settings || (settings.cleanColor && !settings.rotation && !maskCount(settings.mask));
+  $<HTMLButtonElement>('reset-edits').disabled = locked || !edited();
   $('undo-edit').hidden = !editHistory.length;
-  $('reset-edits').hidden =
-    !settings || (settings.cleanColor && !settings.rotation && !maskCount(settings.mask));
+  $('reset-edits').hidden = !edited();
   $('progress').hidden = !value && !editing;
   $('work-controls').hidden = !selected || editorOpen;
   $('result-actions').hidden = !resultBlob || editing || editorOpen;
   $('refine-controls').hidden = !resultBlob || resultOptions?.quality !== 'fast' || locked;
   $('refine-help').textContent = editHistory.length
-    ? 'Takes longer and replaces your color, rotation and removal edits.'
+    ? 'Takes longer and replaces your edits.'
     : 'Take more time to refine the page shape.';
   $('edit-controls').hidden = !resultBlob || busy || editorOpen;
   $('adjustments').hidden = !resultBlob || busy || editorOpen;
   $('view-controls').hidden = !resultBlob || locked || !$('process-view').hidden;
   for (const step of steps.values()) step.button.disabled = locked;
   $('workspace').setAttribute('aria-busy', String(value || editing));
+}
+function edited() {
+  return (
+    !!settings &&
+    (!settings.cleanColor ||
+      !!settings.rotation ||
+      !!maskCount(settings.mask) ||
+      !isFullCrop(settings.crop))
+  );
 }
 function clearSteps() {
   for (const step of steps.values()) URL.revokeObjectURL(step.url);
@@ -187,7 +203,9 @@ function clearEdits() {
   editing = false;
   editorOpen = false;
   maskEditor.close();
+  cropEditor.close();
   $('finger-editor').hidden = true;
+  $('crop-editor').hidden = true;
   rawBlob = undefined;
   suggestion = undefined;
   settings = undefined;
@@ -204,6 +222,9 @@ function clearResult() {
   metadata = undefined;
   scanImage.hidden = true;
   scanImage.removeAttribute('src');
+  ++downloadVersion;
+  if (downloadURL) URL.revokeObjectURL(downloadURL);
+  downloadURL = '';
   $('result-actions').hidden = true;
   $('refine-controls').hidden = true;
   $('edit-controls').hidden = true;
@@ -224,10 +245,25 @@ function scrollTo(element: HTMLElement, block: ScrollLogicalPosition = 'start') 
     block,
   });
 }
-function rejectPhoto(detail: string) {
+/** The start screen; collected PDF pages stay. */
+function showStart() {
+  if (editorOpen) closeEditor();
+  if (editing) {
+    editWorker?.terminate();
+    editWorker = undefined;
+    ++editId;
+    pendingEdit = undefined;
+    editing = false;
+  }
+  if (busy) {
+    worker?.terminate();
+    worker = undefined;
+    preparationStatus('idle');
+  }
+  clearResult();
   selected = undefined;
   photoReady = false;
-  flattenOnLoad = false;
+  retryable = false;
   originalImage.hidden = true;
   originalImage.removeAttribute('src');
   URL.revokeObjectURL(originalURL);
@@ -238,11 +274,15 @@ function rejectPhoto(detail: string) {
   $('work-controls').hidden = true;
   $('settings-container').hidden = true;
   $('view-controls').hidden = true;
-  $('filename').textContent = 'Your workspace';
-  $('sample-label').hidden = true;
+  $('error').hidden = true;
+  $('filename').textContent = '';
+  message('');
   busyState(false);
+  prepareScanner();
+}
+function rejectPhoto(detail: string) {
+  showStart();
   showError(detail);
-  message('Choose another photo.', 'Open a JPEG, PNG, or WebP with the full page visible.');
 }
 function scanFailed(detail: string) {
   worker?.terminate();
@@ -250,6 +290,8 @@ function scanFailed(detail: string) {
   preparationStatus('idle');
   const keepResult = refining && !!resultBlob;
   refining = false;
+  busyState(false);
+  retryable = !keepResult;
   busyState(false);
   view(keepResult ? 'scan' : 'original');
   showError(detail);
@@ -273,7 +315,7 @@ function view(mode: 'original' | 'scan' | 'compare') {
   for (const name of ['original', 'scan', 'compare'])
     $(`show-${name}`).setAttribute('aria-pressed', String(name === mode));
 }
-function chooseFile(file: File, { sample = false, flatten = false } = {}) {
+function chooseFile(file: File) {
   if (busy || editing || editorOpen || camera.isOpen) return;
   if (file.size > 40 * 1024 * 1024) {
     showError('This photo is larger than 40 MB. Choose a smaller image.');
@@ -286,7 +328,7 @@ function chooseFile(file: File, { sample = false, flatten = false } = {}) {
   prepareScanner();
   selected = file;
   photoReady = false;
-  flattenOnLoad = flatten;
+  retryable = false;
   $('error').hidden = true;
   clearResult();
   if (originalURL) URL.revokeObjectURL(originalURL);
@@ -301,7 +343,6 @@ function chooseFile(file: File, { sample = false, flatten = false } = {}) {
   $<HTMLDetailsElement>('scan-settings').open = false;
   $('filename').textContent = file.name;
   $('filename').title = file.name;
-  $('sample-label').hidden = !sample;
   $('source-size').textContent = '';
   view('original');
   busyState(false);
@@ -322,24 +363,21 @@ originalImage.onload = () => {
   photoReady = true;
   originalImage.hidden = false;
   $('source-size').textContent = `${width} × ${height}`;
-  busyState(false);
-  message('Ready to flatten.');
-  if (matchMedia('(max-width: 700px)').matches) scrollTo($('work-controls'), 'end');
-  if (flattenOnLoad) {
-    flattenOnLoad = false;
-    scanButton.click();
-  }
+  startScan();
 };
 originalImage.onerror = () =>
   rejectPhoto('This image could not be opened. Save it as JPEG or PNG and try again.');
-$('choose').onclick = $('drop-choose').onclick = () => fileInput.click();
-for (const id of ['open-camera', 'camera-new']) {
-  $(id).onclick = () => {
-    if (busy || editing || editorOpen) return;
-    prepareScanner();
-    camera.open($(id));
-  };
-}
+$('drop-choose').onclick = () => fileInput.click();
+$('open-camera').onclick = () => {
+  if (busy || editing || editorOpen) return;
+  prepareScanner();
+  camera.open($('open-camera'));
+};
+$('back').onclick = () => {
+  showStart();
+  $('open-camera').focus({ preventScroll: true });
+  scrollTo($('workspace'));
+};
 fileInput.onchange = () => {
   if (fileInput.files?.[0]) chooseFile(fileInput.files[0]);
   fileInput.value = '';
@@ -380,32 +418,158 @@ document.addEventListener('paste', (e) => {
   }
 });
 
-$('sample').onclick = async () => {
-  const button = $<HTMLButtonElement>('sample');
-  button.disabled = true;
-  try {
-    const response = await fetch(new URL('sample.png', document.baseURI));
-    if (!response.ok)
-      throw new Error('The sample could not be loaded. Choose your own photo or try again.');
-    const blob = await response.blob();
-    chooseFile(new File([blob], 'sample-document.png', { type: 'image/png' }), { sample: true });
-  } catch (error) {
-    showError(String(error instanceof Error ? error.message : error));
-  } finally {
-    button.disabled = false;
-  }
-};
-
 function installResult(blob: Blob) {
   if (resultURL) URL.revokeObjectURL(resultURL);
   resultBlob = blob;
   resultURL = URL.createObjectURL(blob);
   scanImage.src = resultURL;
   scanImage.hidden = false;
-  const download = $<HTMLAnchorElement>('download');
-  download.href = resultURL;
-  download.download = `${(selected?.name ?? 'document').replace(/\.[^.]*$/, '')}-scan.png`;
+  pageAdded = false;
+  $('add-page-label').textContent = 'Add to PDF';
+  void prepareDownload();
 }
+
+// Saving: the link is prepared ahead for the chosen format, so a tap saves without waiting.
+type SaveFormat = 'png' | 'jpg' | 'pdf';
+const formatSelect = $<HTMLSelectElement>('save-format');
+let downloadURL = '',
+  downloadVersion = 0;
+try {
+  const stored = localStorage.getItem('flattener-format');
+  if (stored === 'png' || stored === 'jpg' || stored === 'pdf') formatSelect.value = stored;
+} catch {
+  /* Storage can be unavailable; PNG stays the default. */
+}
+function saveFormat(): SaveFormat {
+  return formatSelect.value as SaveFormat;
+}
+async function jpegPage(blob: Blob): Promise<PdfPage & { blob: Blob }> {
+  const bitmap = await createImageBitmap(blob);
+  try {
+    const canvas = document.createElement('canvas');
+    canvas.width = bitmap.width;
+    canvas.height = bitmap.height;
+    const ctx = canvas.getContext('2d')!;
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(bitmap, 0, 0);
+    const jpeg = await new Promise<Blob>((resolve, reject) =>
+      canvas.toBlob((b) => (b ? resolve(b) : reject(new Error('encode'))), 'image/jpeg', 0.92),
+    );
+    return {
+      blob: jpeg,
+      jpeg: new Uint8Array(await jpeg.arrayBuffer()),
+      width: bitmap.width,
+      height: bitmap.height,
+    };
+  } finally {
+    bitmap.close();
+  }
+}
+async function prepareDownload() {
+  const version = ++downloadVersion;
+  const link = $<HTMLAnchorElement>('download');
+  const format = saveFormat();
+  if (!resultBlob) return;
+  link.removeAttribute('href');
+  link.setAttribute('aria-disabled', 'true');
+  const source = resultBlob;
+  let blob: Blob;
+  try {
+    blob =
+      format === 'png'
+        ? source
+        : format === 'jpg'
+          ? (await jpegPage(source)).blob
+          : pdfFromJpegs([await jpegPage(source)]);
+  } catch {
+    if (version === downloadVersion) showError('The file could not be prepared. Try again.');
+    return;
+  }
+  if (version !== downloadVersion) return;
+  if (downloadURL) URL.revokeObjectURL(downloadURL);
+  downloadURL = URL.createObjectURL(blob);
+  link.href = downloadURL;
+  link.download = `${(selected?.name ?? 'document').replace(/\.[^.]*$/, '')}-scan.${format}`;
+  link.removeAttribute('aria-disabled');
+}
+formatSelect.onchange = () => {
+  try {
+    localStorage.setItem('flattener-format', saveFormat());
+  } catch {
+    /* The choice still applies to this visit. */
+  }
+  void prepareDownload();
+};
+$('download').addEventListener('click', (event) => {
+  if ($('download').getAttribute('aria-disabled') === 'true') event.preventDefault();
+});
+
+// Pages collected for one PDF; they stay while new photos are scanned.
+type CollectedPage = PdfPage & { url: string };
+const pages: CollectedPage[] = [];
+let pageAdded = false,
+  pagesURL = '';
+function renderPages() {
+  const list = $('pages-list');
+  list.replaceChildren(
+    ...pages.map((page, index) => {
+      const item = document.createElement('li');
+      const image = document.createElement('img');
+      image.src = page.url;
+      image.alt = '';
+      const number = document.createElement('span');
+      number.className = 'page-number';
+      number.textContent = String(index + 1);
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'page-remove';
+      remove.setAttribute('aria-label', `Remove page ${index + 1}`);
+      remove.innerHTML =
+        '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7l10 10M17 7 7 17" /></svg>';
+      remove.onclick = () => {
+        URL.revokeObjectURL(page.url);
+        pages.splice(index, 1);
+        renderPages();
+      };
+      item.append(image, number, remove);
+      return item;
+    }),
+  );
+  $('pages').hidden = !pages.length;
+  $('pages-count').textContent = pages.length === 1 ? '1 page' : `${pages.length} pages`;
+  if (pagesURL) URL.revokeObjectURL(pagesURL);
+  pagesURL = pages.length ? URL.createObjectURL(pdfFromJpegs(pages)) : '';
+  const save = $<HTMLAnchorElement>('pages-save');
+  if (pagesURL) save.href = pagesURL;
+  else save.removeAttribute('href');
+  save.download = `scans-${pages.length}p.pdf`;
+}
+$('add-page').onclick = async () => {
+  if (!resultBlob || pageAdded || busy || editing || editorOpen) return;
+  const button = $<HTMLButtonElement>('add-page');
+  button.disabled = true;
+  try {
+    const page = await jpegPage(resultBlob);
+    pages.push({ ...page, url: URL.createObjectURL(page.blob) });
+    pageAdded = true;
+    renderPages();
+    $('add-page-label').textContent = 'Added to PDF';
+    message(`Added as page ${pages.length}.`, 'Go back to scan the next page.');
+  } catch {
+    showError('The page could not be added. Try again.');
+  } finally {
+    busyState(busy);
+  }
+};
+$('pages-clear').onclick = () => {
+  for (const page of pages) URL.revokeObjectURL(page.url);
+  pages.length = 0;
+  pageAdded = false;
+  $('add-page-label').textContent = 'Add to PDF';
+  renderPages();
+  busyState(busy);
+};
 
 function scannerWorker(): Worker {
   if (!worker) {
@@ -463,7 +627,9 @@ function scannerWorker(): Worker {
         scanButton.textContent = 'Scan again';
         view('scan');
         message(
-          resultOptions?.quality === 'refined' ? 'Your refined scan is ready.' : 'Your scan is ready.',
+          resultOptions?.quality === 'refined'
+            ? 'Your refined scan is ready.'
+            : 'Your scan is ready.',
           maskCount(suggestion)
             ? 'Possible fingers found. Open Remove fingers to review.'
             : 'Paper lighting and color corrected.',
@@ -565,6 +731,7 @@ $('cancel').onclick = () => {
   preparationStatus('idle');
   const keepResult = refining && !!resultBlob;
   refining = false;
+  retryable = !keepResult;
   busyState(false);
   view(keepResult ? 'scan' : 'original');
   message(
@@ -679,7 +846,9 @@ $('reset-edits').onclick = () => {
 function closeEditor() {
   editorOpen = false;
   maskEditor.close();
+  cropEditor.close();
   $('finger-editor').hidden = true;
+  $('crop-editor').hidden = true;
   $('settings-container').hidden = false;
   $('process-history').hidden = !steps.size;
   view('scan');
@@ -724,6 +893,43 @@ $('mask-apply').onclick = () => {
   if (keyboard) $('remove-fingers').focus({ preventScroll: true });
   applyEdit({ ...cloneSettings(settings), mask, reviewedMask: true });
 };
+$('crop').onclick = async () => {
+  if (!rawBlob || !settings || busy || editing || editorOpen) return;
+  const keyboard = $('crop').matches(':focus-visible');
+  editorOpen = true;
+  busyState(false);
+  $('error').hidden = true;
+  try {
+    await cropEditor.open(rawBlob, settings.rotation, settings.crop);
+    if (!editorOpen) return;
+    $('images').hidden = true;
+    $('process-view').hidden = true;
+    $('crop-editor').hidden = false;
+    $('settings-container').hidden = true;
+    $('process-history').hidden = true;
+    if (keyboard) document.querySelector<HTMLElement>('.crop-handle')?.focus();
+    scrollTo($('crop-editor'));
+  } catch {
+    closeEditor();
+    showError('The crop editor could not open. Try again.');
+  }
+};
+$('crop-reset').onclick = () => cropEditor.reset();
+$('crop-cancel').onclick = () => {
+  const keyboard = $('crop-cancel').matches(':focus-visible');
+  closeEditor();
+  if (keyboard) $('crop').focus({ preventScroll: true });
+};
+$('crop-apply').onclick = () => {
+  if (!settings || !editorOpen) return;
+  const keyboard = $('crop-apply').matches(':focus-visible');
+  const crop = cropEditor.selection();
+  closeEditor();
+  if (keyboard) $('crop').focus({ preventScroll: true });
+  const next = cloneSettings(settings);
+  next.crop = isFullCrop(crop) ? undefined : crop;
+  applyEdit(next);
+};
 window.addEventListener('pagehide', () => {
   worker?.terminate();
   worker = undefined;
@@ -751,4 +957,7 @@ window.addEventListener('beforeunload', () => {
   URL.revokeObjectURL(originalURL);
   URL.revokeObjectURL(resultURL);
   for (const step of steps.values()) URL.revokeObjectURL(step.url);
+  for (const page of pages) URL.revokeObjectURL(page.url);
+  URL.revokeObjectURL(downloadURL);
+  URL.revokeObjectURL(pagesURL);
 });

@@ -43,27 +43,10 @@
           hidden
         />
         <div id="file-toolbar" class="file-toolbar" hidden>
-          <div class="document-label">
-            <span id="filename" translate="no"></span>
-            <span id="sample-label" hidden>Synthetic sample</span>
-          </div>
-          <div class="source-actions">
-            <button
-              id="camera-new"
-              class="button secondary"
-              type="button"
-              aria-label="Take a new photo"
-            >
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path
-                  d="M8 5l1-2h6l1 2h4a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2Z"
-                />
-                <circle cx="12" cy="12" r="4" />
-              </svg>
-              <span>Camera</span>
-            </button>
-            <button id="choose" class="button secondary" type="button">Change photo</button>
-          </div>
+          <button id="back" class="icon-button" type="button" aria-label="Back to start">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7" /></svg>
+          </button>
+          <span id="filename" translate="no"></span>
         </div>
 
         <div id="drop-area" class="stage">
@@ -79,9 +62,8 @@
               <path class="diagram-lines" d="M159 42h32M159 60h32M159 78h32M159 96h22" />
             </svg>
             <h1>From photo to flat scan.</h1>
-            <p class="intro">Straighten curved or tilted document photos.</p>
             <div class="source-picker">
-              <button id="open-camera" type="button" class="button camera-choice">
+              <button id="open-camera" type="button" class="button primary camera-choice">
                 <svg viewBox="0 0 24 24" aria-hidden="true">
                   <path
                     d="M8 5l1-2h6l1 2h4a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2Z"
@@ -90,19 +72,15 @@
                 </svg>
                 Open camera
               </button>
-              <button id="drop-choose" type="button" class="button photo-choice">
-                Choose a photo
-              </button>
+              <p class="photo-choice">
+                <button id="drop-choose" type="button" class="text-button">Choose a photo</button>
+                <span class="drop-hint">or drop</span>
+              </p>
             </div>
             <div class="scanner-preparation" data-state="loading">
               <span data-scanner-status role="status">Preparing scanner…</span>
               <button type="button" data-prepare-retry hidden>Retry</button>
             </div>
-            <p class="file-hint">Or drop or paste a JPEG, PNG or WebP.<br />Up to 40 MB.</p>
-            <button id="sample" class="text-button" type="button">
-              Try a sample document
-              <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 10h10M11 6l4 4-4 4" /></svg>
-            </button>
           </div>
 
           <div
@@ -186,6 +164,73 @@
               <button id="mask-apply" class="button primary" type="button">Apply removal</button>
             </div>
           </div>
+          <div id="crop-editor" class="crop-editor" hidden>
+            <div class="editor-heading">
+              <h2>Crop</h2>
+              <p>Drag the corners or edges. Drag inside the frame to move it.</p>
+            </div>
+            <div class="crop-mount">
+              <div id="crop-surface" class="crop-surface">
+                <canvas id="crop-canvas"></canvas>
+                <div class="crop-shade" aria-hidden="true"><div id="crop-window"></div></div>
+                <div id="crop-box" class="crop-box">
+                  <button
+                    type="button"
+                    class="crop-handle"
+                    data-handle="nw"
+                    aria-label="Top-left corner"
+                  ></button>
+                  <button
+                    type="button"
+                    class="crop-handle"
+                    data-handle="n"
+                    aria-label="Top edge"
+                  ></button>
+                  <button
+                    type="button"
+                    class="crop-handle"
+                    data-handle="ne"
+                    aria-label="Top-right corner"
+                  ></button>
+                  <button
+                    type="button"
+                    class="crop-handle"
+                    data-handle="e"
+                    aria-label="Right edge"
+                  ></button>
+                  <button
+                    type="button"
+                    class="crop-handle"
+                    data-handle="se"
+                    aria-label="Bottom-right corner"
+                  ></button>
+                  <button
+                    type="button"
+                    class="crop-handle"
+                    data-handle="s"
+                    aria-label="Bottom edge"
+                  ></button>
+                  <button
+                    type="button"
+                    class="crop-handle"
+                    data-handle="sw"
+                    aria-label="Bottom-left corner"
+                  ></button>
+                  <button
+                    type="button"
+                    class="crop-handle"
+                    data-handle="w"
+                    aria-label="Left edge"
+                  ></button>
+                </div>
+              </div>
+            </div>
+            <div class="editor-actions">
+              <button id="crop-reset" class="text-button" type="button">Reset</button>
+              <button id="crop-cancel" class="button secondary" type="button">Cancel</button>
+              <button id="crop-apply" class="button primary" type="button">Apply crop</button>
+            </div>
+          </div>
           <div class="drop-overlay" aria-hidden="true">Drop your photo here</div>
         </div>
 
@@ -213,20 +258,42 @@
             </div>
             <div class="action-group">
               <div id="edit-controls" class="edit-controls" hidden>
-                <button id="rotate" class="button secondary" type="button">Rotate</button>
+                <button id="crop" class="button secondary" type="button">
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M7 2v15h15M2 7h15v15" />
+                  </svg>
+                  Crop
+                </button>
+                <button id="rotate" class="button secondary" type="button">
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7" />
+                  </svg>
+                  Rotate
+                </button>
                 <button id="zoom" class="button secondary" type="button" aria-pressed="false">
                   100% view
                 </button>
               </div>
               <button id="scan" class="button primary" type="button" disabled>Flatten photo</button>
               <button id="cancel" class="button secondary" type="button" hidden>Cancel scan</button>
-              <div id="result-actions" hidden>
-                <a id="download" class="button primary" download="scan.png"
-                  >Save PNG
-                  <svg viewBox="0 0 20 20" aria-hidden="true">
-                    <path d="M10 3v10M6 9l4 4 4-4M4 14v3h12v-3" />
-                  </svg>
-                </a>
+              <div id="result-actions" class="result-actions" hidden>
+                <button id="add-page" class="button secondary" type="button">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
+                  <span id="add-page-label">Add to PDF</span>
+                </button>
+                <div class="save-group">
+                  <a id="download" class="button primary" download aria-disabled="true">
+                    <svg viewBox="0 0 20 20" aria-hidden="true">
+                      <path d="M10 3v10M6 9l4 4 4-4M4 14v3h12v-3" />
+                    </svg>
+                    <span id="download-label">Save</span>
+                  </a>
+                  <select id="save-format" aria-label="File format">
+                    <option value="png">PNG</option>
+                    <option value="jpg">JPG</option>
+                    <option value="pdf">PDF</option>
+                  </select>
+                </div>
               </div>
             </div>
           </div>
@@ -234,6 +301,23 @@
         </div>
         <p id="error" class="error" role="alert" hidden></p>
         <p id="warnings" class="warnings" hidden></p>
+
+        <section id="pages" class="pages" aria-labelledby="pages-title" hidden>
+          <div class="pages-head">
+            <h2 id="pages-title">PDF</h2>
+            <span id="pages-count" class="pages-count"></span>
+            <div class="pages-actions">
+              <button id="pages-clear" class="text-button" type="button">Clear</button>
+              <a id="pages-save" class="button primary" download="scans.pdf">
+                <svg viewBox="0 0 20 20" aria-hidden="true">
+                  <path d="M10 3v10M6 9l4 4 4-4M4 14v3h12v-3" />
+                </svg>
+                Save PDF
+              </a>
+            </div>
+          </div>
+          <ol id="pages-list" class="pages-list"></ol>
+        </section>
 
         <details id="process-history" class="process-history" hidden>
           <summary>See processing steps</summary>
@@ -283,23 +367,6 @@
         </div>
 
         <footer class="workspace-footer">
-          <details class="about">
-            <summary>About Flattener</summary>
-            <div class="about-content">
-              <p>
-                Flattener corrects the perspective and curvature of a single document page. Photos
-                stay in your browser.
-              </p>
-              <p>
-                The first scan downloads about 36 MB of models, plus the browser runtime. Processing
-                uses WebGPU when available, or your CPU.
-              </p>
-              <p>
-                Book splitting and PDF export are not available yet. Browser results have not been
-                benchmarked against the Python release.
-              </p>
-            </div>
-          </details>
           <a href="./LICENSE">Licenses</a>
         </footer>
       </main>

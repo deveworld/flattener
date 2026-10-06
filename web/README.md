@@ -70,7 +70,7 @@ Browsers without cross-origin isolation or WASM thread support use one thread.
   If the live camera cannot open, **Use the camera app** takes the photo with the device's camera app, which needs no site permission.
   After the camera is allowed in the site settings, the live camera reopens by itself.
   The camera closes after capture, on leaving the page, or when the tab is hidden.
-- Open a JPEG, PNG or WebP by file picker, drop or paste.
+- Open a JPEG, PNG or WebP by file picker, drop or paste. Flattening starts as soon as the photo opens.
 - Scans start with Quick processing and automatic orientation.
   Choose **Refine scan** on the result to run flip averaging and two crop refinement passes.
   The current scan stays visible and can be saved while refinement runs.
@@ -78,10 +78,11 @@ Browsers without cross-origin isolation or WASM thread support use one thread.
 - Follow page detection, geometry and color correction under **See processing steps**.
 - Use **Clean color** to balance paper color and smooth lighting variation.
 - Review suggested fingers near page edges, then adjust the selection with the brush.
-- Undo edits, rotate the result, compare it with the source, inspect at 100% and save a PNG.
+- Crop by dragging the frame's corners, edges or inside; rotate, undo edits, compare with the source and inspect at 100%.
+- Save the scan as PNG, JPG or PDF. **Add to PDF** collects scans as pages, kept while you go back (**<**) to scan the next one, and **Save PDF** writes them into one file.
 - Use **Scan settings** to change options and scan again.
 
-The browser processes one page at a time.
+The browser flattens one photo at a time.
 Inputs are limited to 40 MB and 20 megapixels, with at least 64 pixels on each side.
 Output is capped at four megapixels and the selected long edge, subject to the source's sampling density.
 The browser handles EXIF orientation, color profiles and decoding.

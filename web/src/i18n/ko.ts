@@ -8,20 +8,11 @@ export const ko: Record<string, string> = {
   'Skip to workspace': '작업 영역으로 건너뛰기',
   'Flattener home': 'Flattener 홈',
   'No photo uploads': '사진 업로드 없음',
-  'Synthetic sample': '합성 샘플',
-  'Take a new photo': '새로 촬영',
-  Camera: '카메라',
-  'Change photo': '사진 바꾸기',
   'From photo to flat scan.': '사진을 반듯한 스캔으로.',
-  'Straighten curved or tilted document photos.': '휘거나 기울어진 문서 사진을 반듯하게 폅니다.',
   'Open camera': '카메라 열기',
   'Choose a photo': '사진 선택',
   'Preparing scanner…': '스캐너 준비 중…',
   Retry: '다시 시도',
-  'Or drop or paste a JPEG, PNG or WebP.':
-    'JPEG, PNG, WebP 파일을 끌어다 놓거나 붙여 넣어도 됩니다.',
-  'Up to 40 MB.': '최대 40MB.',
-  'Try a sample document': '샘플 문서로 해 보기',
   'Preview view': '미리보기 전환',
   Original: '원본',
   Scan: '스캔',
@@ -52,8 +43,7 @@ export const ko: Record<string, string> = {
   'Drop your photo here': '여기에 사진을 놓으세요',
   'Refine scan': '정밀 스캔',
   'Take more time to refine the page shape.': '시간을 더 들여 페이지 모양을 다듬습니다.',
-  'Takes longer and replaces your color, rotation and removal edits.':
-    '시간이 더 걸리고, 색·회전·지우기 편집이 초기화됩니다.',
+  'Takes longer and replaces your edits.': '시간이 더 걸리고, 편집한 내용이 초기화됩니다.',
   Color: '색',
   'Clean color': '색 보정',
   'Original color': '원래 색',
@@ -84,13 +74,6 @@ export const ko: Record<string, string> = {
   'This device': '이 기기',
   'WebGPU · on this device': 'WebGPU · 이 기기에서 처리',
   'CPU · on this device': 'CPU · 이 기기에서 처리',
-  'About Flattener': 'Flattener 소개',
-  'Flattener corrects the perspective and curvature of a single document page. Photos stay in your browser.':
-    'Flattener는 문서 한 쪽의 원근과 휘어짐을 바로잡습니다. 사진은 브라우저 밖으로 나가지 않습니다.',
-  'The first scan downloads about 36 MB of models, plus the browser runtime. Processing uses WebGPU when available, or your CPU.':
-    '첫 스캔 때 모델 약 36MB와 브라우저 런타임을 내려받습니다. WebGPU를 쓸 수 있으면 WebGPU로, 아니면 CPU로 처리합니다.',
-  'Book splitting and PDF export are not available yet. Browser results have not been benchmarked against the Python release.':
-    '책 펼침면 나누기와 PDF 내보내기는 아직 지원하지 않습니다. 브라우저 결과는 Python 배포판과 벤치마크로 비교하지 않았습니다.',
   Licenses: '라이선스',
   'Your workspace': '작업 공간',
 
@@ -152,8 +135,6 @@ export const ko: Record<string, string> = {
     '이 이미지를 열지 못했습니다. JPEG나 PNG로 저장한 뒤 다시 시도하세요.',
   'This image could not be opened. Try saving it as JPEG or PNG.':
     '이 이미지를 열지 못했습니다. JPEG나 PNG로 저장해 보세요.',
-  'The sample could not be loaded. Choose your own photo or try again.':
-    '샘플을 불러오지 못했습니다. 직접 사진을 고르거나 다시 시도하세요.',
   'This browser cannot read images. Try a current version of Chrome, Edge, Firefox, or Safari.':
     '이 브라우저는 이미지를 읽지 못합니다. 최신 Chrome, Edge, Firefox, Safari로 열어 보세요.',
   'The photo could not be opened by the scanner. Choose it again or reload this page.':
@@ -299,11 +280,43 @@ export const ko: Record<string, string> = {
   'The camera is in use. Close other camera apps and try again.':
     '다른 앱이 카메라를 쓰고 있습니다. 다른 카메라 앱을 닫고 다시 시도하세요.',
   'The camera could not open. Try again.': '카메라를 열지 못했습니다. 다시 시도하세요.',
+  // Start, saving and pages
+  'Back to start': '처음으로',
+  'or drop': '또는 끌어다 놓기',
+  'Add to PDF': 'PDF에 추가',
+  'Added to PDF': 'PDF에 추가됨',
+  Save: '저장',
+  'Save JPG': 'JPG 저장',
+  'Save PDF': 'PDF 저장',
+  'File format': '파일 형식',
+  Clear: '모두 지우기',
+  'Go back to scan the next page.': '다음 쪽을 찍으려면 뒤로 가세요.',
+  'The file could not be prepared. Try again.': '파일을 만들지 못했습니다. 다시 시도하세요.',
+  'The page could not be added. Try again.': '페이지를 추가하지 못했습니다. 다시 시도하세요.',
+
+  // Crop
+  Crop: '자르기',
+  'Drag the corners or edges. Drag inside the frame to move it.':
+    '모서리나 변을 끌어 크기를 맞추고, 안쪽을 끌어 옮기세요.',
+  'Top-left corner': '왼쪽 위 모서리',
+  'Top edge': '위쪽 변',
+  'Top-right corner': '오른쪽 위 모서리',
+  'Right edge': '오른쪽 변',
+  'Bottom-right corner': '오른쪽 아래 모서리',
+  'Bottom edge': '아래쪽 변',
+  'Bottom-left corner': '왼쪽 아래 모서리',
+  'Left edge': '왼쪽 변',
+  Reset: '원래대로',
+  'Apply crop': '자르기 적용',
+  'The crop editor could not open. Try again.': '자르기 편집기를 열지 못했습니다. 다시 시도하세요.',
 };
 
 /** Text with numbers in it: a pattern over the whole English text and its replacement. */
 export const koPatterns: [RegExp, string][] = [
   [/^([\d.]+) seconds$/, '$1초'],
+  [/^(\d+) pages?$/, '$1쪽'],
+  [/^Remove page (\d+)$/, '$1쪽 빼기'],
+  [/^Added as page (\d+)\.$/, '$1쪽으로 추가했습니다.'],
   [/^Edges refined · (\d+)$/, '가장자리 보정 · $1'],
   [
     /^Crop refinement (\d+) of (\d+)\. Sampling from your original photo\.$/,

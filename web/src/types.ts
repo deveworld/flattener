@@ -6,6 +6,8 @@ export type EditSettings = {
   mask: Mask;
   rotation: number;
   reviewedMask?: boolean;
+  /** Fractions of the unrotated scan to keep; absent keeps the whole page. */
+  crop?: { left: number; top: number; right: number; bottom: number };
 };
 export type ProcessingStep = { id: string; title: string; detail: string; blob: Blob };
 export type Grid = { rows: number; cols: number; data: Float64Array };
