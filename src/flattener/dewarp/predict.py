@@ -74,16 +74,17 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-import torch
 from numpy.typing import NDArray
 from PIL import Image, ImageOps
-from torch.nn import functional as F
 
+from .. import ops
 from ..contracts import FlattenerError, RenderConfig, RenderResult, Status
 from ..evidence import evidence
 from ..renderer import _handle_failure, _new_metadata, render
+from ..runtime import OnnxModel
 from ..validation import validate_config, validate_size
 from .checkpoint import CHECKPOINT_SCHEMA, atomic_write, read_checkpoint, utc_now, write_json
+from .config import UVDOC_CONFIG, DewarpModelConfig
 from .coords import (
     _apply,
     _grid,
@@ -93,12 +94,6 @@ from .coords import (
     grid_to_map,
     interpolation_matrix,
     uvdoc_dense_map,
-)
-from .model import (
-    UVDOC_CONFIG,
-    DewarpModelConfig,
-    UVDocNet,
-    count_parameters,
 )
 
 DOCUNET_INPUT = re.compile(r"^(\d+)_(\d+) copy\.png$")
@@ -150,9 +145,12 @@ TTA_MAX_GAP = 0.03
 
 @dataclass(slots=True)
 class Dewarper:
-    model: UVDocNet
+    """A dewarp network with its config: a PyTorch ``UVDocNet`` on ``device`` (a
+    ``torch.device``), or an ``OnnxModel`` on the CPU (``device`` "cpu")."""
+
+    model: Any
     config: DewarpModelConfig
-    device: torch.device
+    device: Any
     info: dict[str, Any] = field(default_factory=dict)
     tta: str = "none"  # TTA_MODES; see predict_input
 
@@ -167,7 +165,11 @@ def with_tta(dewarper: Dewarper, tta: str) -> Dewarper:
 
 
 def load_dewarper(path: str | Path, *, device: str = "cpu") -> Dewarper:
-    """Load a dewarp checkpoint or weights in the upstream UVDoc format."""
+    """Load a dewarp checkpoint or weights in the upstream UVDoc format (PyTorch)."""
+    import torch
+
+    from .model import UVDocNet, count_parameters
+
     path = Path(path)
     payload = read_checkpoint(path)
     if isinstance(payload, dict) and payload.get("schema") == CHECKPOINT_SCHEMA:
@@ -190,6 +192,16 @@ def load_dewarper(path: str | Path, *, device: str = "cpu") -> Dewarper:
     return Dewarper(model.to(target).eval(), config, target, info)
 
 
+def load_onnx_dewarper(
+    path: str | Path, config: DewarpModelConfig, info: dict[str, Any] | None = None
+) -> Dewarper:
+    """A dewarper running an exported ONNX model (input ``image``, output ``grid``)."""
+    model = OnnxModel(path)
+    record = {"kind": "onnx", **(info or {})}
+    record.update(path=str(Path(path).resolve()), model_config=config.to_dict())
+    return Dewarper(model, config, "cpu", record)
+
+
 def _check_image(image: NDArray[np.uint8]) -> None:
     if (
         not isinstance(image, np.ndarray)
@@ -201,6 +213,8 @@ def _check_image(image: NDArray[np.uint8]) -> None:
 
 
 def _legacy_matmul_precision() -> str | None:
+    import torch
+
     try:
         return torch.get_float32_matmul_precision()
     except RuntimeError:  # legacy and new TF32 settings were mixed; keep the new value only
@@ -213,6 +227,8 @@ def ieee_float32() -> Iterator[None]:
 
     Also selects cuDNN algorithms by heuristic (no benchmark) and deterministically.
     """
+    import torch
+
     cudnn, matmul = torch.backends.cudnn, torch.backends.cuda.matmul
     saved_algorithms = cudnn.benchmark, cudnn.deterministic
     new_api = hasattr(cudnn, "conv")  # torch >= 2.9 has per-op fp32_precision flags
@@ -239,43 +255,52 @@ def ieee_float32() -> Iterator[None]:
             cudnn.allow_tf32, matmul.allow_tf32 = saved
 
 
-def model_input(dewarper: Dewarper, image: NDArray[np.uint8]) -> torch.Tensor:
-    """``image`` as the (1, 3, H, W) float model input: resized to the input size
+def _batch(image: NDArray[np.float32]) -> NDArray[np.float32]:
+    """(H, W, 3) float32 -> contiguous (1, 3, H, W)."""
+    return np.ascontiguousarray(image.transpose(2, 0, 1)[None])
+
+
+def model_input(dewarper: Dewarper, image: NDArray[np.uint8]) -> NDArray[np.float32]:
+    """``image`` as the (1, 3, H, W) float32 model input: resized to the input size
     (bilinear, align_corners=False, no antialias)."""
     _check_image(image)
-    tensor = torch.tensor(image).to(dewarper.device)
-    tensor = tensor.permute(2, 0, 1).unsqueeze(0).float().div_(255)
-    return F.interpolate(
-        tensor,
-        size=dewarper.config.input_size,
-        mode="bilinear",
-        align_corners=False,
-        antialias=False,
-    )
+    return _batch(ops.resize(image, dewarper.config.input_size))
 
 
 # ``ieee_float32`` sets process-wide flags, so model calls from batch threads take turns.
 _MODEL_LOCK = threading.Lock()
 
 
-def predict_input(dewarper: Dewarper, tensor: torch.Tensor) -> NDArray[np.float32]:
-    """Raw 2-D model output for a model input, as (Gh, Gw, 2). With ``tta="flip"`` the
-    input and its mirror image run as one batch; the mirror's grid, turned back (columns
-    reversed, x negated: both grid conventions are symmetric about the image centre), is
-    averaged with the input's when their median node distance is at most ``TTA_MAX_GAP``
-    of the image side, else the input's grid stands alone."""
-    flip = dewarper.tta == "flip"
-    batch = torch.cat([tensor, tensor.flip(-1)]) if flip else tensor
+def _run_model(dewarper: Dewarper, batch: NDArray[np.float32]) -> NDArray[np.float32]:
+    """2-D model outputs (N, 2, Gh, Gw) for model inputs (N, 3, H, W)."""
+    model = dewarper.model
+    if isinstance(model, OnnxModel):
+        return np.concatenate([model.output("grid", item[None]) for item in batch])
+    import torch
+
     with _MODEL_LOCK, torch.inference_mode(), ieee_float32():
-        grid2d, _ = dewarper.model(batch)
-    grid = grid2d.float()
+        grid2d, _ = model(torch.from_numpy(batch).to(dewarper.device))
+    return grid2d.float().cpu().numpy()
+
+
+def predict_input(dewarper: Dewarper, batch: NDArray[np.float32]) -> NDArray[np.float32]:
+    """Raw 2-D model output for a (1, 3, H, W) model input, as (Gh, Gw, 2). With
+    ``tta="flip"`` the input and its mirror image both run; the mirror's grid, turned
+    back (columns reversed, x negated: both grid conventions are symmetric about the
+    image centre), is averaged with the input's when their median node distance is at
+    most ``TTA_MAX_GAP`` of the image side, else the input's grid stands alone."""
+    flip = dewarper.tta == "flip"
     if flip:
-        mirror = grid[1].flip(-1)
+        batch = np.concatenate([batch, batch[..., ::-1]])
+    grid = _run_model(dewarper, np.ascontiguousarray(batch, dtype=np.float32))
+    if flip:
+        mirror = grid[1][..., ::-1].copy()
         mirror[0] = -mirror[0]
-        gap = float((grid[0] - mirror).norm(dim=0).median()) / 2.0
+        distance = np.sort(np.linalg.norm(grid[0] - mirror, axis=0).ravel())
+        gap = float(distance[(distance.size - 1) // 2]) / 2.0  # the lower median
         if gap <= TTA_MAX_GAP:
-            return ((grid[0] + mirror) / 2).permute(1, 2, 0).cpu().numpy()
-    return grid[0].permute(1, 2, 0).cpu().numpy()
+            return ((grid[0] + mirror) / np.float32(2)).transpose(1, 2, 0).copy()
+    return grid[0].transpose(1, 2, 0).copy()
 
 
 def predict_grid(dewarper: Dewarper, image: NDArray[np.uint8]) -> NDArray[np.float32]:
@@ -574,7 +599,7 @@ def canvas_to_source(
 
 def canvas_input(
     dewarper: Dewarper, crop: NDArray[np.uint8], angle_deg: float, canvas: tuple[float, float]
-) -> torch.Tensor:
+) -> NDArray[np.float32]:
     """Model input of ``crop`` turned by ``-angle_deg`` on its ``canvas``, sampled once at
     the input's pixel centers (bilinear, align_corners=False); canvas pixels outside the
     crop repeat its border pixels."""
@@ -583,16 +608,8 @@ def canvas_input(
     matrix, offset = canvas_to_source((0, 0, width, height), angle_deg, canvas, (height, width))
     in_height, in_width = dewarper.config.input_size
     positions = np.stack(np.meshgrid(center_positions(in_width), center_positions(in_height)), -1)
-    grid = torch.from_numpy((positions @ matrix.T + offset).astype(np.float32))[None]
-    source = torch.tensor(crop).to(dewarper.device)
-    source = source.permute(2, 0, 1).unsqueeze(0).float().div_(255)
-    return F.grid_sample(
-        source,
-        grid.to(dewarper.device),
-        mode="bilinear",
-        padding_mode="border",
-        align_corners=False,
-    )
+    grid = (positions @ matrix.T + offset).astype(np.float32)
+    return _batch(ops.grid_sample(crop, grid))
 
 
 def rerun_box(
@@ -762,10 +779,9 @@ def refine_pass(
 
     view_h, view_w = dewarper.config.input_size
     array = np.asarray(grid, dtype=np.float64)
-    dense = torch.from_numpy(grid_to_map(array, (view_h, view_w)).astype(np.float32))[None]
-    source = torch.from_numpy(np.ascontiguousarray(image)).permute(2, 0, 1)[None].float()
-    flat = F.grid_sample(source, dense, mode="bilinear", padding_mode="border", align_corners=False)
-    view = flat[0].permute(1, 2, 0).clamp(0, 255).round().to(torch.uint8).numpy()
+    dense = grid_to_map(array, (view_h, view_w)).astype(np.float32)
+    flat = ops.grid_sample(image, dense, scale_uint8=False)
+    view = np.round(np.clip(flat, 0, 255)).astype(np.uint8)
     raw = predict_grid(dewarper, np.ascontiguousarray(view))
     local = np.asarray(
         _flattener_values(raw, dewarper.config.grid_convention, (view_h, view_w)), np.float64
@@ -775,13 +791,11 @@ def refine_pass(
     identity = np.stack([xs, ys], axis=-1)
     residual = local - identity
     residual -= coons(residual[0], residual[-1], residual[:, 0], residual[:, -1])
-    positions = torch.from_numpy((identity + residual).astype(np.float32))[None]
-    nodes = torch.from_numpy(array.astype(np.float32)).permute(2, 0, 1)[None]
-    refined = F.grid_sample(nodes, positions, mode="bilinear", padding_mode="border",
-                            align_corners=True)  # fmt: skip
+    positions = (identity + residual).astype(np.float32)
+    refined = ops.grid_sample(array.astype(np.float32), positions, align_corners=True)
     scale = np.array([view_w, view_h]) / 2.0
     record = {"interior_px": round(float(np.abs(residual * scale).mean()), 3)}
-    return refined[0].permute(1, 2, 0).numpy().astype(np.float64), record
+    return refined.astype(np.float64), record
 
 
 RECT_MARGINS = (0.01, 0.03)  # per pass, AADD's DIR300 expansion ratios; the last repeats
@@ -914,13 +928,8 @@ def sample_rgb(
     """``flattener.render``'s sampling (bilinear, border padding, align_corners=False,
     positions outside ``valid`` read at 0 and filled with ``fill_rgb``), quantized by
     ``quantize``. With ``round`` and the renderer's valid mask it equals its image."""
-    grid = torch.from_numpy(np.where(valid[..., None], backward_map, 0).astype(np.float32))
-    source = torch.tensor(image).permute(2, 0, 1).unsqueeze(0).float() / 255
-    with torch.inference_mode():
-        sampled = F.grid_sample(
-            source, grid.unsqueeze(0), mode="bilinear", padding_mode="border", align_corners=False
-        )
-    output = quantize_rgb(sampled[0].permute(1, 2, 0).numpy(), quantize)
+    grid = np.where(valid[..., None], backward_map, 0).astype(np.float32)
+    output = quantize_rgb(ops.grid_sample(image, grid), quantize)
     output[~valid] = fill_rgb
     return output
 

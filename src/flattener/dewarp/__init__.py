@@ -8,23 +8,37 @@ Independent of ``flattener.learning``. Modules: ``model`` (UVDocnet, MIT-derived
 ``python -m flattener.dewarp.probe``).
 """
 
-from .coords import (
-    align_corners_to_flattener,
-    grid_to_map,
-    map_to_grid,
-    syntheticdoc_to_flattener,
-    uvdoc_dense_map,
-)
-from .data import TRACKS, AugmentConfig, DataSpec, SourceSpec, build_dataset, require_track
-from .model import (
-    UVDOC_CONFIG,
-    DewarpModelConfig,
-    UVDocNet,
-    count_parameters,
-    load_uvdoc_weights,
-    natural_grid_size,
-    uvdoc_model,
-)
+import importlib
+
+# Submodules load on first use, so inference without PyTorch never imports training code.
+_EXPORTS = {
+    "align_corners_to_flattener": "coords",
+    "grid_to_map": "coords",
+    "map_to_grid": "coords",
+    "syntheticdoc_to_flattener": "coords",
+    "uvdoc_dense_map": "coords",
+    "TRACKS": "data",
+    "AugmentConfig": "data",
+    "DataSpec": "data",
+    "SourceSpec": "data",
+    "build_dataset": "data",
+    "require_track": "data",
+    "UVDOC_CONFIG": "config",
+    "DewarpModelConfig": "config",
+    "natural_grid_size": "config",
+    "UVDocNet": "model",
+    "count_parameters": "model",
+    "load_uvdoc_weights": "model",
+    "uvdoc_model": "model",
+}
+
+
+def __getattr__(name: str):
+    module = _EXPORTS.get(name)
+    if module is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    return getattr(importlib.import_module(f".{module}", __name__), name)
+
 
 __all__ = [
     "TRACKS",

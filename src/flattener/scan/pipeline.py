@@ -25,7 +25,9 @@ import numpy as np
 from numpy.typing import NDArray
 from PIL import Image
 
+from .. import runtime
 from ..contracts import FlattenerError, RenderConfig, RenderResult, Status
+from ..dewarp.config import DewarpModelConfig
 from ..dewarp.predict import (
     DESKEW_MIN_AGREEMENT,
     RERUN_MARGIN,
@@ -35,6 +37,7 @@ from ..dewarp.predict import (
     estimate_page_angle,
     inset_record,
     load_dewarper,
+    load_onnx_dewarper,
     outline_points,
     render_unchecked,
     rerun_box,
@@ -43,7 +46,13 @@ from ..dewarp.predict import (
     source_inside,
     with_tta,
 )
-from ..regions.context import GateConfig, LoadedContextSegmenter, load_context_segmenter
+from ..regions.context import (
+    ContextSegmenterConfig,
+    GateConfig,
+    LoadedContextSegmenter,
+    load_context_segmenter,
+    load_onnx_segmenter,
+)
 from ..renderer import render as flattener_render
 from ..validation import validate_image
 from . import locate as locating
@@ -52,7 +61,7 @@ from . import sharpen as sharpening
 from .download import download_bundle
 from .fast_check import FastCheck, fast_check
 from .io import SourceImage, read_source
-from .orient import Orienter, OrientResult, ViewGeometry
+from .orient import DEFAULT_TEMPERATURE, OrientConfig, Orienter, OrientResult, ViewGeometry
 from .output_policy import (
     MAX_PIXELS,
     MAX_SIDE,
@@ -77,7 +86,8 @@ from .records import (
 from .timing import StageClock
 from .views import VIEW_SOURCES, crop_placement, run_view
 
-BUNDLE_SCHEMA = "flattener-scan-bundle-1"
+BUNDLE_SCHEMA = "flattener-scan-bundle-1"  # PyTorch checkpoints
+ONNX_SCHEMA = "flattener-web-bundle-1"  # ONNX models, shared with the browser app
 BUNDLE_KEYS = {
     "dewarp": {"path", "tta"},
     "gate": {"path"},
@@ -91,7 +101,7 @@ ORIENT_MODES = ("model", "none", "oracle")
 VIEW_EXTENTS = ("canvas", "tight")
 FALLBACKS = ("original", "perspective")
 ON_ERROR = ("original", "return", "raise")
-BACKENDS = ("torch",)
+BACKENDS = runtime.BACKENDS
 QUANTIZE_MODES = ("round", "truncate")
 VERIFY: dict[str, Any] = {
     "min_coverage": 0.95,  # below this the gate mask reaches past the page: a warning
@@ -820,6 +830,15 @@ class Scanner:
         if orienter is not None:
             self.models.append(_orient_record(orienter))
 
+    @property
+    def _cuda(self) -> bool:
+        return runtime.device_type(self.dewarper.device) == "cuda"
+
+    @property
+    def backend(self) -> str:
+        """``onnx`` or ``torch``: where the dewarp network runs."""
+        return "onnx" if isinstance(self.dewarper.model, runtime.OnnxModel) else "torch"
+
     # -- loading
 
     @classmethod
@@ -827,26 +846,33 @@ class Scanner:
         cls,
         bundle: str | os.PathLike[str] | dict[str, Any] | None = None,
         *,
-        device: str = "cpu",
-        backend: str = "torch",
+        device: str = "auto",
+        backend: str = "auto",
         cache_size: int = CACHE_SIZE,
         orient_threshold: float | None = None,
     ) -> Scanner:
         """Load a local bundle or download the default models from Hugging Face.
 
-        A bundle file or dict names ``dewarp`` and optional ``gate`` and ``orient``
-        weights. File paths are relative to the bundle. The ``dewarp`` entry can set
-        ``tta``; ``orient`` can set ``threshold``, replaced by ``orient_threshold``.
-        Downloaded models are cached for later use, including offline scans.
+        ``backend`` ``auto`` runs PyTorch on a CUDA GPU when PyTorch is installed and sees
+        one, and ONNX Runtime on the CPU otherwise (``runtime.resolve``). Without a
+        ``bundle`` the models of that backend are downloaded and cached for later use,
+        including offline scans.
+
+        A PyTorch bundle (``flattener-scan-bundle-1``) names ``dewarp`` and optional
+        ``gate`` and ``orient`` checkpoints; the ``dewarp`` entry can set ``tta`` and
+        ``orient`` a ``threshold``, replaced by ``orient_threshold``. An ONNX bundle
+        (``flattener-web-bundle-1``, ``tools/models/export_onnx.py``) holds the exported
+        models and their configs. File paths are relative to the bundle.
         """
         if backend not in BACKENDS:
             raise FlattenerError(
                 Status.INPUT_ERROR,
                 "unsupported_backend",
-                f"backend must be one of {BACKENDS}; the scanner runs on torch",
+                f"backend must be one of {BACKENDS}",
             )
         if bundle is None:
-            bundle = download_bundle()
+            backend, device = runtime.resolve(backend, device)
+            bundle = download_bundle(backend)
         if isinstance(bundle, dict):
             data, base = bundle, Path.cwd()
         else:
@@ -858,10 +884,36 @@ class Scanner:
                     Status.IO_ERROR, "unreadable_bundle", f"{path}: {error}"
                 ) from error
             base = path.parent
-        if not isinstance(data, dict) or data.get("schema") != BUNDLE_SCHEMA:
-            raise FlattenerError(
-                Status.INPUT_ERROR, "invalid_bundle", f"bundle schema must be {BUNDLE_SCHEMA}"
+        info = {"bundle": None if isinstance(bundle, dict) else str(bundle)}
+        schema = data.get("schema") if isinstance(data, dict) else None
+        if schema == ONNX_SCHEMA:
+            if backend == "torch":
+                raise FlattenerError(
+                    Status.INPUT_ERROR,
+                    "unsupported_backend",
+                    "an ONNX bundle runs on the onnx backend; use a PyTorch bundle for torch",
+                )
+            runtime.resolve("onnx", device)
+            return cls.from_onnx(
+                data,
+                base,
+                cache_size=cache_size,
+                orient_threshold=orient_threshold,
+                info=info,
             )
+        if schema != BUNDLE_SCHEMA:
+            raise FlattenerError(
+                Status.INPUT_ERROR,
+                "invalid_bundle",
+                f"bundle schema must be {BUNDLE_SCHEMA} or {ONNX_SCHEMA}",
+            )
+        if backend == "onnx":
+            raise FlattenerError(
+                Status.INPUT_ERROR,
+                "unsupported_backend",
+                "a PyTorch bundle needs the torch backend; use an ONNX bundle for onnx",
+            )
+        backend, device = runtime.resolve("torch", device)
         unknown = sorted(set(data) - {"schema", *BUNDLE_KEYS})
         if unknown:
             raise FlattenerError(
@@ -905,8 +957,85 @@ class Scanner:
             orient_threshold=orient_threshold,
             device=device,
             cache_size=cache_size,
-            info={"bundle": None if isinstance(bundle, dict) else str(bundle)},
+            info=info,
             tta=tta,
+        )
+
+    @classmethod
+    def from_onnx(
+        cls,
+        manifest: dict[str, Any],
+        base: str | os.PathLike[str],
+        *,
+        cache_size: int = CACHE_SIZE,
+        orient_threshold: float | None = None,
+        info: dict[str, Any] | None = None,
+    ) -> Scanner:
+        """Load the ONNX models of an ``ONNX_SCHEMA`` manifest whose files lie in ``base``."""
+        started = time.perf_counter()
+        models = manifest.get("models")
+        if not isinstance(models, dict) or not isinstance(models.get("dewarp"), dict):
+            raise FlattenerError(Status.INPUT_ERROR, "invalid_bundle", "bundle needs dewarp")
+        unknown = sorted(set(models) - set(BUNDLE_KEYS))
+        if unknown:
+            raise FlattenerError(
+                Status.INPUT_ERROR, "invalid_bundle", f"unknown models: {', '.join(unknown)}"
+            )
+
+        def path(role: str) -> Path:
+            name = models[role].get("file")
+            if not isinstance(name, str) or Path(name).name != name:
+                raise FlattenerError(
+                    Status.INPUT_ERROR, "invalid_bundle", f"{role} needs a file name"
+                )
+            return Path(base) / name
+
+        try:
+            entry = models["dewarp"]
+            config = DewarpModelConfig.from_dict(
+                entry.get("model_config")
+                or {
+                    "input_size": entry["input_size"],
+                    "grid_size": entry["grid_size"],
+                    "grid_convention": entry["grid_convention"],
+                }
+            )
+            tta = entry.get("tta", "none")
+            if tta not in TTA_MODES:
+                raise ValueError(f"dewarp tta must be one of {TTA_MODES}")
+            dewarper = with_tta(load_onnx_dewarper(path("dewarp"), config), tta)
+            segmenter = None
+            if "gate" in models:
+                entry = models["gate"]
+                raw = entry.get("model_config") or {"input_size": entry["input_size"]}
+                gate_config = ContextSegmenterConfig(
+                    **{
+                        key: tuple(value) if isinstance(value, list) else value
+                        for key, value in raw.items()
+                    }
+                )
+                segmenter = load_onnx_segmenter(path("gate"), gate_config)
+            orienter = None
+            if "orient" in models:
+                entry = models["orient"]
+                threshold = entry["threshold"] if orient_threshold is None else orient_threshold
+                orienter = Orienter.load_onnx(
+                    path("orient"),
+                    OrientConfig.from_dict(entry["config"]),
+                    temperature=entry.get("temperature") or DEFAULT_TEMPERATURE,
+                    threshold=threshold,
+                )
+        except (KeyError, TypeError, ValueError) as error:
+            raise FlattenerError(
+                Status.INPUT_ERROR, "invalid_bundle", f"ONNX bundle: {error}"
+            ) from error
+        load = {"seconds": time.perf_counter() - started, "device": "cpu", "backend": "onnx"}
+        return cls(
+            dewarper,
+            gate=segmenter,
+            orienter=orienter,
+            cache_size=cache_size,
+            info={**(info or {}), "version": manifest.get("version"), "load": load},
         )
 
     @classmethod
@@ -922,11 +1051,13 @@ class Scanner:
         info: dict[str, Any] | None = None,
         tta: str = "none",
     ) -> Scanner:
-        """Validate and load the dewarper, page detector and orientation model.
+        """Validate and load the dewarper, page detector and orientation model from
+        PyTorch checkpoints.
 
         ``tta`` selects test-time augmentation; ``orient_threshold`` sets the minimum
         confidence for orientation correction.
         """
+        _, device = runtime.resolve("torch", device)
         started = time.perf_counter()
         dewarper = with_tta(load_dewarper(weights, device=device), tta)
         segmenter = None
@@ -947,7 +1078,7 @@ class Scanner:
                     Status.INPUT_ERROR, "invalid_bundle", "the orient threshold must be a number"
                 )
             orienter = Orienter.load(orient, device=device, threshold=orient_threshold)
-        load = {"seconds": time.perf_counter() - started, "device": device}
+        load = {"seconds": time.perf_counter() - started, "device": device, "backend": "torch"}
         return cls(
             dewarper,
             gate=segmenter,
@@ -1021,7 +1152,7 @@ class Scanner:
         """Run the stages up to the checked plan (see the module docstring)."""
         options = options or ScanOptions()
         overrides = overrides or ScanOverrides()
-        clock = StageClock(cuda_sync=self.dewarper.device.type == "cuda")
+        clock = StageClock(cuda_sync=self._cuda)
         with clock.stage("read"):
             src = as_source(source)
         return self._plan(src, options, overrides, clock)
@@ -1038,7 +1169,7 @@ class Scanner:
         and the result carries the plan's model records, ship verdict and evidence."""
         if isinstance(planned, ScanPlan):
             options = options or ScanOptions()
-            clock = StageClock(cuda_sync=self.dewarper.device.type == "cuda")
+            clock = StageClock(cuda_sync=self._cuda)
             with clock.stage("read"):
                 src = as_source(source)
             planned = self._planned_from_plan(src, planned, options, clock)

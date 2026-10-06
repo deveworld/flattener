@@ -11,7 +11,7 @@ made so that the passes of ``dewarp.predict`` come out bit for bit:
 * any other view (quarter turns, tight views, boxes past the image edge) samples the
   source once through ``Placement.view_map`` at the model input size (bilinear,
   ``align_corners=False``, border padding). Only the part of the source the view covers
-  is converted to a tensor.
+  is read.
 
 ``view_source="pyramid"`` samples every view from a box-reduced level of the source
 (``scan.io.SourceImage.level``) whose pixel is at most the view's input pixel, so large
@@ -26,12 +26,18 @@ from collections.abc import Callable
 from typing import Any
 
 import numpy as np
-import torch
 from numpy.typing import NDArray
-from torch.nn import functional as F
 
+from .. import ops
 from ..contracts import FlattenerError, Status
-from ..dewarp.predict import Dewarper, _check_image, crop_pass_box, model_input, predict_input
+from ..dewarp.predict import (
+    Dewarper,
+    _batch,
+    _check_image,
+    crop_pass_box,
+    model_input,
+    predict_input,
+)
 from .placement import Placement, compose, view_values
 
 VIEW_SOURCES = ("original", "pyramid")
@@ -115,14 +121,10 @@ def level_factor(placement: Placement, input_size: tuple[int, int]) -> int:
 
 
 def sample_view(
-    image: NDArray[np.uint8],
-    placement: Placement,
-    size: tuple[int, int],
-    *,
-    device: torch.device | str = "cpu",
-) -> torch.Tensor:
+    image: NDArray[np.uint8], placement: Placement, size: tuple[int, int]
+) -> NDArray[np.float32]:
     """The view of ``placement`` sampled from ``image`` at ``size`` pixels, as a
-    (1, 3, height, width) float tensor in [0, 1].
+    (1, 3, height, width) float32 array in [0, 1].
 
     ``image`` covers the whole source extent at any resolution (the source or a level of
     it). Only the footprint of the view is converted."""
@@ -134,10 +136,8 @@ def sample_view(
     # Source values -> values of the footprint crop (same pixel-edge convention).
     pixels = (view + 1.0) / 2.0 * np.array([width, height])
     local = (pixels - np.array([left, top])) / np.array([right - left, bottom - top]) * 2.0 - 1.0
-    crop = np.ascontiguousarray(image[top:bottom, left:right])
-    tensor = torch.from_numpy(crop).to(device).permute(2, 0, 1).unsqueeze(0).float().div_(255)
-    grid = torch.from_numpy(local.astype(np.float32))[None].to(device)
-    return F.grid_sample(tensor, grid, mode="bilinear", padding_mode="border", align_corners=False)
+    crop = image[top:bottom, left:right]
+    return _batch(ops.grid_sample(crop, local.astype(np.float32)))
 
 
 def view_input(
@@ -147,7 +147,7 @@ def view_input(
     *,
     view_source: str = "original",
     levels: Levels | None = None,
-) -> torch.Tensor:
+) -> NDArray[np.float32]:
     """The model input of ``placement``'s view of ``image`` (see the module docstring)."""
     if view_source not in VIEW_SOURCES:
         raise _error(f"view_source must be one of {VIEW_SOURCES}, got {view_source!r}")
@@ -155,10 +155,10 @@ def view_input(
     if view_source == "pyramid":
         factor = level_factor(placement, size)
         level = image if factor == 1 or levels is None else levels(factor)
-        return sample_view(level, placement, size, device=dewarper.device)
+        return sample_view(level, placement, size)
     if placement.kind == "whole" and placement.quarter == 0:
         return model_input(dewarper, image)
-    return sample_view(image, placement, size, device=dewarper.device)
+    return sample_view(image, placement, size)
 
 
 def run_view(
@@ -186,8 +186,8 @@ def run_view(
         grid, _ = crop_pass_box(dewarper, image, crop_box, placement.theta_deg)
         source = "crop_pass_box"
     else:
-        tensor = view_input(dewarper, image, placement, view_source=view_source, levels=levels)
-        raw = predict_input(dewarper, tensor)
+        batch = view_input(dewarper, image, placement, view_source=view_source, levels=levels)
+        raw = predict_input(dewarper, batch)
         grid = compose(view_values(raw, convention, placement), placement)
         if placement.kind == "whole" and placement.quarter == 0 and view_source == "original":
             source = "model_input"

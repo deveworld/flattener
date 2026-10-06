@@ -1,6 +1,8 @@
-"""Export a scanner bundle to static, single-file ONNX models for the web.
+"""Export a scanner bundle to static, single-file ONNX models.
 
-Run with ``uv run --group web-export python tools/models/export_onnx.py``.
+The browser app and the Python scanner's default ONNX Runtime backend load the result.
+
+Run with ``uv run python tools/models/export_onnx.py``.
 Models use batch size 1; flip TTA runs sequentially to limit browser memory.
 Every export is checked against PyTorch on spatially varying inputs before the
 manifest is written.
@@ -10,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from dataclasses import asdict
 from pathlib import Path
 
 import numpy as np
@@ -82,7 +85,7 @@ def main():
     parser.add_argument("--output", type=Path, default=Path("web/public/models"))
     args = parser.parse_args()
     torch.set_num_threads(min(torch.get_num_threads(), 4))
-    scanner = Scanner.load(args.bundle)
+    scanner = Scanner.load(args.bundle, backend="torch", device="cpu")
     if scanner.gate is None or scanner.orienter is None:
         parser.error("the browser bundle requires dewarp, gate, and orient models")
     if scanner.dewarper.config.grid_convention != "flattener":
@@ -126,9 +129,14 @@ def main():
         grid_size=list(scanner.dewarper.config.grid_size),
         grid_convention=scanner.dewarper.config.grid_convention,
         tta=scanner.dewarper.tta,
+        model_config=scanner.dewarper.config.to_dict(),
     )
     gate.update(
         input_size=list(scanner.gate.config.input_size),
+        model_config={
+            key: list(value) if isinstance(value, tuple) else value
+            for key, value in asdict(scanner.gate.config).items()
+        },
     )
     orient.update(
         config=config.to_dict(),
@@ -145,7 +153,7 @@ def main():
     temporary = manifest_path.with_suffix(".tmp")
     temporary.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     temporary.replace(manifest_path)
-    print(f"Exported browser models to {args.output}")
+    print(f"Exported ONNX models to {args.output}")
 
 
 if __name__ == "__main__":

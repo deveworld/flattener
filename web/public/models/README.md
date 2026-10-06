@@ -3,7 +3,7 @@
 Generate the ONNX bundle from the repository root:
 
 ```sh
-uv run --group web-export python tools/models/export_onnx.py
+uv run python tools/models/export_onnx.py
 ```
 
 The exporter downloads the default models from [Hugging Face](https://huggingface.co/DevWorld/flattener) on first use.

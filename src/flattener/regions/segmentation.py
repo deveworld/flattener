@@ -6,10 +6,15 @@ All sizes are (height, width).
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
-import torch
-from torch.nn import functional as F
+from numpy.typing import NDArray
+
+from .. import ops
+
+if TYPE_CHECKING:
+    import torch
 
 PREPROCESS_VERSION = "rgb-full-extent-bilinear-antialias-1.0"
 
@@ -35,29 +40,31 @@ def _config(config: SegmenterConfig | None) -> SegmenterConfig:
     return config
 
 
-def preprocess_image(image: np.ndarray, config: SegmenterConfig | None = None) -> torch.Tensor:
-    """Return an independent float32 CPU CHW preview, without crop or padding."""
+def preprocess_array(image: np.ndarray, config: SegmenterConfig | None = None) -> NDArray:
+    """Return an independent float32 CHW preview, without crop or padding: bilinear
+    with antialiasing over the full image extent, in [0, 1]."""
     config = _config(config)
     if not isinstance(image, np.ndarray) or image.dtype != np.uint8:
         raise TypeError("image must be a uint8 NumPy RGB array")
     if image.ndim != 3 or image.shape[2] != 3 or min(image.shape[:2]) < 1:
         raise ValueError("image must have a nonempty (height, width, 3) shape")
-    tensor = torch.from_numpy(image.copy(order="C")).permute(2, 0, 1).float().div_(255)
-    return (
-        F.interpolate(
-            tensor[None],
-            size=config.input_size,
-            mode="bilinear",
-            align_corners=False,
-            antialias=True,
-        )[0]
-        .clamp_(0, 1)
-        .contiguous()
-    )
+    values = ops.resize(image, config.input_size, antialias=True)
+    np.clip(values, 0, 1, out=values)
+    return np.ascontiguousarray(values.transpose(2, 0, 1))
+
+
+def preprocess_image(image: np.ndarray, config: SegmenterConfig | None = None) -> torch.Tensor:
+    """``preprocess_array`` as a CPU tensor."""
+    import torch
+
+    return torch.from_numpy(preprocess_array(image, config))
 
 
 def preprocess_mask(mask: np.ndarray, config: SegmenterConfig | None = None) -> torch.Tensor:
     """Return a binary 1HW target using nearest-exact center sampling."""
+    import torch
+    from torch.nn import functional as F
+
     config = _config(config)
     if not isinstance(mask, np.ndarray) or mask.dtype != np.bool_:
         raise TypeError("mask must be a boolean NumPy array")

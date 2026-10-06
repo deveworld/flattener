@@ -35,13 +35,14 @@ from collections import Counter, OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass, fields
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
-import torch
-import torch.nn.functional as F
 from numpy.typing import NDArray
 from PIL import Image, ImageDraw, ImageFilter
+
+if TYPE_CHECKING:
+    import torch
 
 BACKGROUND_SCHEMA = "flattener-backgrounds-1"
 # Tested placements per sample before the perspective is dropped.
@@ -552,6 +553,9 @@ def _quarter(out_hw: tuple[int, int]) -> tuple[int, int]:
 def smooth_field(values: NDArray, out_hw: tuple[int, int]) -> NDArray[np.float32]:
     """A coarse (h, w) grid of values as a smooth (H, W) float32 field: bicubic to a
     quarter of ``out_hw``, then bilinear to full size."""
+    import torch
+    import torch.nn.functional as F
+
     coarse = torch.from_numpy(values.astype(np.float32))[None, None]
     quarter = F.interpolate(coarse, size=_quarter(out_hw), mode="bicubic", align_corners=False)
     image = Image.fromarray(quarter[0, 0].numpy(), mode="F")
@@ -561,6 +565,9 @@ def smooth_field(values: NDArray, out_hw: tuple[int, int]) -> NDArray[np.float32
 def procedural_background(rng: np.random.Generator, out_hw: tuple[int, int]) -> NDArray:
     """A surface without assets: a base colour with smooth, medium and fine variation,
     built at a quarter of the size and enlarged bilinearly."""
+    import torch
+    import torch.nn.functional as F
+
     quarter = _quarter(out_hw)
     values = torch.from_numpy(rng.random(3 + 12 + 64 + 1024).astype(np.float32))
 
@@ -749,6 +756,8 @@ def compose(
     Returns None when the sample cannot be placed exactly: an invalid node, or a page
     outline that leaves the source image (its pixels would be missing).
     """
+    import torch
+
     if not valid.all():
         return None
     if not isinstance(image, Image.Image):

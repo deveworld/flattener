@@ -12,8 +12,8 @@ The exporter downloads the default [scanner models](https://huggingface.co/DevWo
 From the repository root:
 
 ```sh
-uv sync --group web-export
-uv run --group web-export python tools/models/export_onnx.py
+uv sync
+uv run python tools/models/export_onnx.py
 cd web
 npm ci
 npm run dev

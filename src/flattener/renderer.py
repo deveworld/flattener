@@ -2,6 +2,7 @@
 
 import math
 import platform
+import sys
 from dataclasses import fields
 from numbers import Integral, Real
 from time import perf_counter
@@ -9,9 +10,8 @@ from typing import Any
 
 import numpy as np
 import PIL
-import torch
-import torch.nn.functional as functional
 
+from . import ops
 from ._version import __version__
 from .contracts import SPEC_VERSION, FlattenerError, RenderConfig, RenderResult, Status
 from .validation import (
@@ -44,6 +44,20 @@ def _json_value(value: Any) -> Any:
     return f"<{type(value).__name__}>"
 
 
+def _versions() -> dict[str, str]:
+    versions = {
+        "flattener": __version__,
+        "python": platform.python_version(),
+        "numpy": np.__version__,
+        "pillow": PIL.__version__,
+    }
+    for name in ("onnxruntime", "torch"):
+        module = sys.modules.get(name)
+        if module is not None:
+            versions[name] = str(module.__version__)
+    return versions
+
+
 def _new_metadata(config: RenderConfig, *, timing_scope: str = "render") -> dict[str, Any]:
     return {
         "spec_version": SPEC_VERSION,
@@ -55,14 +69,8 @@ def _new_metadata(config: RenderConfig, *, timing_scope: str = "render") -> dict
         "actual_output_size": None,
         "coarse_grid_size": None,
         "model_id": None,
-        "versions": {
-            "flattener": __version__,
-            "python": platform.python_version(),
-            "numpy": np.__version__,
-            "pillow": PIL.__version__,
-            "torch": str(torch.__version__),
-        },
-        "cpu_threads": torch.get_num_threads(),
+        "versions": _versions(),
+        "cpu_threads": ops.threads(),
         "validation": {},
         "failure_stage": None,
         "timing_scope": timing_scope,
@@ -163,10 +171,8 @@ def render(
 
         stage = "render"
         stage_started = perf_counter()
-        # Own a contiguous buffer for read-only and unusual-stride inputs.
-        source = np.array(image, order="C", copy=True)
         all_valid = bool(valid_mask.all())
-        # grid_sample reads its grid. A fully valid contiguous writable grid
+        # The sampler reads its grid. A fully valid contiguous writable grid
         # can also be borrowed; sanitizing discarded positions needs a copy.
         grid = (
             backward_map
@@ -174,29 +180,14 @@ def render(
             else np.array(backward_map, order="C", copy=True)
         )
         if not all_valid:
-            # Never send inactive NaN, Inf, or huge coordinates to the backend.
+            # Never sample inactive NaN, Inf, or huge coordinates.
             grid[~valid_mask] = 0
-        with torch.inference_mode():
-            tensor = torch.from_numpy(source).permute(2, 0, 1).unsqueeze(0).float().div_(255)
-            try:
-                sampled = functional.grid_sample(
-                    tensor,
-                    torch.from_numpy(grid).unsqueeze(0),
-                    mode="bilinear",
-                    padding_mode="border",
-                    align_corners=False,
-                )
-            except RuntimeError as error:
-                # Allocator failures must not be disguised as a normal fallback.
-                if "out of memory" in str(error).lower() or "can't allocate memory" in str(error):
-                    raise MemoryError(str(error)) from error
-                raise FlattenerError(Status.RENDER_ERROR, "sampling_failed", str(error)) from error
-            values = sampled.squeeze(0).permute(1, 2, 0).numpy()
-            np.clip(values, 0, 1, out=values)
-            values *= 255
-            values += 0.5
-            np.floor(values, out=values)
-            output = values.astype(np.uint8)
+        values = ops.grid_sample(image, grid)
+        np.clip(values, 0, 1, out=values)
+        values *= 255
+        values += 0.5
+        np.floor(values, out=values)
+        output = values.astype(np.uint8)
         if not all_valid:
             output[~valid_mask] = candidate.fill_rgb
         metadata["actual_output_size"] = list(output.shape[:2])

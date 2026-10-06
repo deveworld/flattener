@@ -11,45 +11,43 @@ See [benchmark results and reproduction instructions](https://github.com/devewor
 
 ## Scan
 
-Flattener needs Python 3.12 and is tested on Linux x86_64 with CPU PyTorch.
-
 ```bash
-uvx --torch-backend cpu flattener-scan photo.jpg --out scans
+uvx flattener-scan -i photo.jpg scan.jpg
 ```
 
-Or install it with pip:
+Or install it with `pip install flattener-scan` and run `flattener-scan -i photo.jpg scan.jpg`.
+Flattener needs Python 3.12 or newer and is tested on Linux x86_64.
 
-```bash
-pip install flattener-scan --extra-index-url https://download.pytorch.org/whl/cpu
-flattener photo.jpg --out scans
-```
+The models run on the CPU with ONNX Runtime, so the install stays small.
+To use an NVIDIA GPU, add PyTorch: `uvx --with torch flattener-scan -i photo.jpg scan.jpg`, or `pip install "flattener-scan[torch]"`.
+With PyTorch installed, a CUDA GPU is used automatically; `--device cpu` or `--backend onnx` keeps the CPU.
 
-`--torch-backend cpu` and the extra index install the CPU build of PyTorch.
-Without them, Linux gets the CUDA build, which is several gigabytes larger.
-
-To work from a clone of this repository, use `uv sync --python 3.12` and run `uv run flattener`.
-
-The first scan downloads the Apache-2.0 models from [Hugging Face](https://huggingface.co/DevWorld/flattener), version `1.0.0`.
+The first scan downloads the Apache-2.0 models from [Hugging Face](https://huggingface.co/DevWorld/flattener), version `1.1.0`.
 Later scans reuse the local Hugging Face cache and work offline.
 Set `HF_HOME` to choose a different cache directory.
 
-Pass multiple photos for a batch.
-Results include an image and a `.scan.json` record with outcomes and timings.
-Book spreads produce separate page files.
-Use `--region`, `--quad`, `--quarter` or `--output-size` for manual control; run `flattener --help` for all options.
+Without an output name, the scan is saved as `photo-scan.jpg` in the current directory.
+Repeat `-i` for a batch and give an output directory: `flattener-scan -i a.jpg -i b.jpg scans/`.
+Book spreads produce separate page files, such as `scan-p1.jpg` and `scan-p2.jpg`.
+Existing files are kept unless you pass `-y`.
+Use `--record` to save a JSON record of each scan, or `--json` to print one.
+Use `--region`, `--quad`, `--quarter` or `--output-size` for manual control; run `flattener-scan --help` for all options.
 
 From Python:
 
 ```python
-from flattener.scan.io import save_scan
+from flattener.scan.io import save_scan_files
 from flattener.scan.pipeline import Scanner
 
 scanner = Scanner.load()
 result = scanner.scan("photo.jpg")
-save_scan(result, "scans", "photo")
+save_scan_files(result, "scan.jpg")
 ```
 
 Use `scanner.scan_pages("book.jpg")` for automatic spread splitting.
+
+To work from a clone of this repository, run `uv sync` and `uv run flattener-scan`.
+The development environment includes CPU PyTorch for training and evaluation.
 
 ## Browser app
 

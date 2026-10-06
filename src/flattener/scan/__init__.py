@@ -17,5 +17,5 @@ Modules:
 - ``fast_check``: the renderer's decisions for a grid's dense map from the grid, a 2 MP
   proxy render and full-resolution sampling (opt-in).
 - ``pipeline``: ``Scanner`` (load, plan, render, scan), the candidate chain and fallbacks.
-- ``__main__``: ``python -m flattener.scan IMG... --out DIR``.
+- ``__main__``: ``flattener-scan -i PHOTO [OUTPUT]`` (also ``python -m flattener.scan``).
 """

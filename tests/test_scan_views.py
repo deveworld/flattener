@@ -38,7 +38,7 @@ def test_a_quarter_turned_view_shows_a_turned_page_upright():
         align_corners=False,
     )
     sampled = sample_view(image, placement, (64, 48))
-    torch.testing.assert_close(sampled, whole, rtol=0, atol=5e-5)  # float32 coordinates
+    np.testing.assert_allclose(sampled, whole.numpy(), rtol=0, atol=5e-5)  # float32 coordinates
     left, top, right, bottom = source_footprint(placement)
     assert 0 <= left < right <= size[1] and 0 <= top < bottom <= size[0]
     # Without the quarter turn the page lies turned in its view and the nodes follow the view.
@@ -59,4 +59,4 @@ def test_a_box_view_keeps_its_place_on_a_reduced_level():
     source = SourceImage(image, SourceInfo(size=(200, 200)))
     full = sample_view(image, box, (20, 20))
     reduced = sample_view(source.level(2), box, (20, 20))
-    assert float((full - reduced)[0, :2].abs().max()) < 2 / 255  # the same place
+    assert float(np.abs(full - reduced)[0, :2].max()) < 2 / 255  # the same place

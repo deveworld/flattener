@@ -14,7 +14,6 @@ from pathlib import Path
 from typing import Any, BinaryIO
 
 import numpy as np
-import torch
 
 from .._version import __version__
 from ..contracts import FlattenerError, Status
@@ -31,6 +30,8 @@ def code_version() -> dict[str, str]:
 
 
 def environment() -> dict[str, str]:
+    import torch
+
     return {
         "python": platform.python_version(),
         "platform": platform.platform(),
@@ -87,6 +88,8 @@ def write_json(path: Path, value: Any) -> None:
 
 def save_checkpoint(path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
     """Atomically save the model and training state."""
+    import torch
+
     path = Path(path)
     if payload.get("schema") != CHECKPOINT_SCHEMA:
         raise _error("invalid_checkpoint", f"payload schema must be {CHECKPOINT_SCHEMA}")
@@ -96,6 +99,8 @@ def save_checkpoint(path: str | Path, payload: dict[str, Any]) -> dict[str, Any]
 
 def read_checkpoint(path: str | Path) -> dict[str, Any]:
     """Read tensors and plain data from a checkpoint."""
+    import torch
+
     path = Path(path)
     if not path.is_file():
         raise _error("missing_checkpoint", f"{path} does not exist")

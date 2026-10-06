@@ -516,41 +516,76 @@ def save_scan(
     On success ``result.artifacts`` holds the written paths and ``result.timings["save"]``
     the seconds spent encoding and staging the image (the record is excluded).
     """
+    paths = output_paths(output_dir, stem, fmt)
+    return save_scan_files(
+        result,
+        paths["image"],
+        paths["record"],
+        fmt=fmt,
+        quality=quality,
+        icc_profile=icc_profile,
+        dpi=dpi,
+        overwrite=overwrite,
+    )
+
+
+def save_scan_files(
+    result: ScanResult,
+    image_path: str | os.PathLike[str],
+    record_path: str | os.PathLike[str] | None = None,
+    *,
+    fmt: str | None = None,
+    quality: int = JPEG_QUALITY,
+    icc_profile: bytes | None = None,
+    dpi: float | tuple[float, float] | None = None,
+    overwrite: bool = False,
+) -> dict[str, str]:
+    """``save_scan`` to named files: the image (format ``fmt`` or the suffix) and, when
+    ``record_path`` is given, the scan record in the same directory."""
     if not isinstance(result, ScanResult):
         raise _input_error("invalid_result", "Expected a ScanResult.")
     if not isinstance(overwrite, bool):
         raise _input_error("invalid_overwrite", "overwrite must be a bool.")
-    paths = output_paths(output_dir, stem, fmt)
-    options = _save_options(image_format(fmt), quality, icc_profile, dpi)
+    image_target = _path(image_path, output=True)
+    record_target = None if record_path is None else _path(record_path, output=True)
+    directory = image_target.parent
+    if record_target is not None and record_target.parent != directory:
+        raise _input_error("invalid_path", "The record must be next to the image.")
+    fmt = image_format(fmt if fmt is not None else image_target.suffix)
+    options = _save_options(fmt, quality, icc_profile, dpi)
     pixels = None if result.image is None else _check_image(result.image)
-    directory = paths["image"].parent
     started = time.perf_counter()
     transaction = _Transaction(directory, overwrite)
-    staged: list[Path] = []
+    staged: dict[str, Path] = {}
     try:
         directory.mkdir(parents=True, exist_ok=True)
-        _check_target(paths["image"], overwrite)
-        _check_target(paths["record"], overwrite)
-        artifacts = {"record": str(paths["record"])}
+        _check_target(image_target, overwrite)
+        if record_target is not None:
+            _check_target(record_target, overwrite)
+        artifacts = {}
         if pixels is not None:
-            staged.append(_stage(directory, paths["image"].name, _encoder(pixels, options)))
-            artifacts = {"image": str(paths["image"]), **artifacts}
+            staged["image"] = _stage(directory, image_target.name, _encoder(pixels, options))
+            artifacts["image"] = str(image_target)
+        if record_target is not None:
+            artifacts["record"] = str(record_target)
         timings = {**result.timings, "save": time.perf_counter() - started}
-        record = {**result.to_dict(), "timings": timings, "artifacts": artifacts}
-        try:
-            text = json.dumps(record, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
-        except (TypeError, ValueError) as exc:
-            raise _io_error(
-                "record_serialization_failed", f"Scan record is not JSON: {exc}"
-            ) from exc
-        staged.append(
-            _stage(directory, paths["record"].name, lambda s: s.write(text.encode("utf-8")))
-        )
+        if record_target is not None:
+            record = {**result.to_dict(), "timings": timings, "artifacts": artifacts}
+            try:
+                text = json.dumps(record, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
+            except (TypeError, ValueError) as exc:
+                raise _io_error(
+                    "record_serialization_failed", f"Scan record is not JSON: {exc}"
+                ) from exc
+            staged["record"] = _stage(
+                directory, record_target.name, lambda s: s.write(text.encode("utf-8"))
+            )
         if pixels is not None:
-            transaction.place(staged[0], paths["image"])
-        else:
-            transaction.remove(paths["image"])
-        transaction.place(staged[-1], paths["record"])
+            transaction.place(staged["image"], image_target)
+        elif record_target is not None:
+            transaction.remove(image_target)
+        if record_target is not None:
+            transaction.place(staged["record"], record_target)
     except BaseException as exc:
         errors = transaction.rollback()
         if errors:
@@ -565,7 +600,7 @@ def save_scan(
         raise
     finally:
         transaction.cleanup()
-        for path in staged:
+        for path in staged.values():
             path.unlink(missing_ok=True)
     result.timings = timings
     result.artifacts = artifacts

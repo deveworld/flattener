@@ -38,29 +38,19 @@ from __future__ import annotations
 import argparse
 import json
 import math
-import os
 import sys
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import Any, Protocol
 
 import numpy as np
-import torch
 from numpy.typing import NDArray
 from PIL import Image
-from torch import nn
-from torch.nn import functional as F
 
+from .. import ops
 from ..contracts import FlattenerError, Status
-from ..dewarp.checkpoint import (
-    atomic_write,
-    code_version,
-    environment,
-    read_checkpoint,
-    utc_now,
-    write_json,
-)
-from ..dewarp.data import DataSpec, release_license_ok, require_track
+from ..dewarp.checkpoint import atomic_write, code_version, read_checkpoint
+from ..runtime import OnnxModel
 
 MODEL_ID = "orientnet-1"
 CHECKPOINT_SCHEMA = "flattener-orient-checkpoint-1"
@@ -147,128 +137,6 @@ class OrientConfig:
 
 
 # ----------------------------------------------------------------------------- network
-
-
-class _ConvBN(nn.Sequential):
-    def __init__(self, cin: int, cout: int, kernel: int, stride: int, groups: int = 1) -> None:
-        super().__init__(
-            nn.Conv2d(cin, cout, kernel, stride, kernel // 2, groups=groups, bias=False),
-            nn.BatchNorm2d(cout),
-            nn.Hardswish(),
-        )
-
-
-class _SqueezeExcite(nn.Module):
-    def __init__(self, channels: int) -> None:
-        super().__init__()
-        hidden = max(8, channels // 4)
-        self.reduce = nn.Conv2d(channels, hidden, 1)
-        self.expand = nn.Conv2d(hidden, channels, 1)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        scale = self.expand(F.relu(self.reduce(x.mean((2, 3), keepdim=True))))
-        return x * F.hardsigmoid(scale)
-
-
-class _Block(nn.Module):
-    """Depthwise k x k (with the stride), optional squeeze-excitation, pointwise 1 x 1."""
-
-    def __init__(self, cin: int, cout: int, stride: int, kernel: int, se: bool) -> None:
-        super().__init__()
-        self.depthwise = _ConvBN(cin, cin, kernel, stride, groups=cin)
-        self.se = _SqueezeExcite(cin) if se else nn.Identity()
-        self.pointwise = _ConvBN(cin, cout, 1, 1)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.pointwise(self.se(self.depthwise(x)))
-
-
-class OrientNet(nn.Module):
-    """Shared trunk over the global view and the patches, saliency-weighted pooling, 4 logits.
-
-    Inputs are float gray values in [0, 255]: ``global_view`` (N, 1, S, S) and
-    ``patches`` (N, P, 1, s, s) or ``None`` (global view only).
-    """
-
-    def __init__(self, config: OrientConfig | None = None) -> None:
-        super().__init__()
-        self.config = config or OrientConfig()
-        layers: list[nn.Module] = [_ConvBN(1, self.config.stem, 3, 2)]
-        channels = self.config.stem
-        for out, stride, kernel, se in self.config.blocks:
-            layers.append(_Block(channels, out, stride, kernel, se))
-            channels = out
-        self.trunk = nn.Sequential(*layers)
-        self.saliency = nn.Conv2d(channels, 1, 1)
-        self.head = nn.Sequential(
-            nn.Linear(channels, self.config.hidden),
-            nn.Hardswish(),
-            nn.Dropout(self.config.dropout),
-            nn.Linear(self.config.hidden, CLASSES),
-        )
-
-    def _tokens(self, images: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """(M, 1, H, W) -> features (M, L, C) and saliency logits (M, L)."""
-        features = self.trunk(images / 127.5 - 1.0)
-        scores = self.saliency(features)
-        return features.flatten(2).transpose(1, 2), scores.flatten(1)
-
-    def _pool(self, tokens: torch.Tensor, scores: torch.Tensor) -> torch.Tensor:
-        weights = torch.softmax(scores.float(), dim=1).to(tokens.dtype)
-        return self.head((weights.unsqueeze(-1) * tokens).sum(1))
-
-    def forward_views(
-        self, global_view: torch.Tensor, patches: torch.Tensor | None
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
-        """Logits pooled over all views, over the global view alone and over the patches."""
-        global_tokens, global_scores = self._tokens(global_view)
-        alone = self._pool(global_tokens, global_scores)
-        if patches is None or patches.shape[1] == 0:
-            return alone, alone, None
-        batch, channels = global_view.shape[0], global_tokens.shape[-1]
-        patch_tokens, patch_scores = self._tokens(patches.flatten(0, 1))
-        patch_tokens = patch_tokens.reshape(batch, -1, channels)
-        patch_scores = patch_scores.reshape(batch, -1)
-        both = self._pool(
-            torch.cat([global_tokens, patch_tokens], 1), torch.cat([global_scores, patch_scores], 1)
-        )
-        return both, alone, self._pool(patch_tokens, patch_scores)
-
-    def forward(self, global_view: torch.Tensor, patches: torch.Tensor | None = None):
-        return self.forward_views(global_view, patches)[0]
-
-
-def count_parameters(model: nn.Module) -> int:
-    return sum(p.numel() for p in model.parameters())
-
-
-def model_cost(config: OrientConfig | None = None) -> dict[str, Any]:
-    """Parameters and forward FLOPs for one page (global view plus patches)."""
-    from torch.utils.flop_counter import FlopCounterMode
-
-    config = config or OrientConfig()
-    model = OrientNet(config).eval()
-    views = example_inputs(config, 1)
-    counter = FlopCounterMode(display=False)
-    with torch.no_grad(), counter:
-        model(*views)
-    return {
-        "parameters": count_parameters(model),
-        "flops": int(counter.get_total_flops()),
-        "inputs": {
-            "global_view": list(views[0].shape),
-            "patches": list(views[1].shape),
-        },
-    }
-
-
-def example_inputs(config: OrientConfig, batch: int = 1) -> tuple[torch.Tensor, torch.Tensor]:
-    """Mid-grey inputs of the model's shapes."""
-    size, patch = config.global_size, config.patch_size
-    return (
-        torch.full((batch, 1, size, size), float(config.pad_value)),
-        torch.full((batch, config.patches, 1, patch, patch), float(config.pad_value)),
-    )
 
 
 # ----------------------------------------------------------------------------- views
@@ -358,16 +226,16 @@ class SourceSampler:
             raise _error(Status.INPUT_ERROR, "invalid_image", "source must be (H >= 2, W >= 2)")
         self.height, self.width = gray.shape
         self.geometry = geometry
-        self._levels = {1: torch.from_numpy(np.array(gray, dtype=np.float32))[None, None]}
+        self._levels = {1: np.array(gray, dtype=np.float32)}
         self._warp = None
-        if geometry.warp is not None:
-            self._warp = torch.from_numpy(np.asarray(geometry.warp, np.float32))[None]
+        if geometry.warp is not None:  # (2, h, w) shifts, channels last for sampling
+            warp = np.asarray(geometry.warp, np.float32)
+            self._warp = np.ascontiguousarray(warp.transpose(1, 2, 0))
 
-    def level(self, factor: int) -> tuple[torch.Tensor, int]:
+    def level(self, factor: int) -> tuple[NDArray[np.float32], int]:
         factor = max(1, min(int(factor), self.height // 2, self.width // 2))
         if factor not in self._levels:
-            rows, cols = self.height // factor * factor, self.width // factor * factor
-            self._levels[factor] = F.avg_pool2d(self._levels[1][..., :rows, :cols], factor)
+            self._levels[factor] = ops.avg_pool(self._levels[1], factor)
         return self._levels[factor], factor
 
     def normalized(self, points: NDArray[np.float64]) -> NDArray[np.float64]:
@@ -382,24 +250,18 @@ class SourceSampler:
             axis=-1,
         )
         if self._warp is not None:
-            grid = torch.from_numpy(normalized.astype(np.float32)).reshape(1, -1, 1, 2)
-            shift = F.grid_sample(
-                self._warp, grid, mode="bilinear", padding_mode="border", align_corners=True
-            )
-            normalized = normalized + shift[0, :, :, 0].T.numpy().reshape(normalized.shape)
+            grid = normalized.astype(np.float32).reshape(-1, 1, 2)
+            shift = ops.grid_sample(self._warp, grid, align_corners=True)
+            normalized = normalized + shift.reshape(normalized.shape)
         return normalized
 
     def lookup(self, normalized: NDArray[np.float64], density: float) -> NDArray[np.float32]:
         """Gray values at normalized source points (h, w, 2); border values outside."""
         image, factor = self.level(max(1, int(density / 1.5)))
-        rows, cols = image.shape[-2:]
+        rows, cols = image.shape
         extent = np.array([cols * factor / self.width, rows * factor / self.height])
         grid = (normalized + 1.0) / extent - 1.0
-        tensor = torch.from_numpy(grid.astype(np.float32))[None]
-        values = F.grid_sample(
-            image, tensor, mode="bilinear", padding_mode="border", align_corners=False
-        )
-        return values[0, 0].numpy()
+        return ops.grid_sample(image[..., None], grid.astype(np.float32))[..., 0]
 
     def __call__(self, points: NDArray[np.float64], density: float) -> NDArray[np.float32]:
         return self.lookup(self.normalized(points), density * self.geometry.scale)
@@ -532,10 +394,10 @@ def prepare_views(
     return page_views(SourceSampler(gray, geometry), geometry.size, config)
 
 
-def views_to_tensors(views: list[PageViews]) -> tuple[torch.Tensor, torch.Tensor]:
-    """Float (N, 1, S, S) and (N, P, 1, s, s) batches from ``PageViews``."""
-    global_view = torch.from_numpy(np.stack([v.global_view for v in views]))[:, None].float()
-    patches = torch.from_numpy(np.stack([v.patches for v in views]))[:, :, None].float()
+def views_to_arrays(views: list[PageViews]) -> tuple[NDArray[np.float32], NDArray[np.float32]]:
+    """Float32 (N, 1, S, S) and (N, P, 1, s, s) batches from ``PageViews``."""
+    global_view = np.stack([v.global_view for v in views])[:, None].astype(np.float32)
+    patches = np.stack([v.patches for v in views])[:, :, None].astype(np.float32)
     return global_view, patches
 
 
@@ -742,6 +604,8 @@ def data_spec_problems(spec: Any) -> list[str]:
     """Why a ``data_spec`` is not release data. OrientNet records carry a dewarp-schema
     spec (``flattener-dewarp-data-1``) naming every source that fed the build, so the
     same ``require_track(spec, "release")`` rule applies as for dewarp weights."""
+    from ..dewarp.data import DataSpec, require_track
+
     try:
         require_track(DataSpec.from_dict(spec), "release")
     except FlattenerError as error:
@@ -754,6 +618,8 @@ def data_spec_problems(spec: Any) -> list[str]:
 def data_sources_problems(sources: Any) -> list[str]:
     """Why a license manifest (``{split: [source, ...]}``) is not release data: every
     source needs track ``release`` and license classes on ``RELEASE_LICENSE_KEYS``."""
+    from ..dewarp.data import release_license_ok
+
     if not isinstance(sources, dict) or not sources:
         return ["license manifest missing"]
     problems = []
@@ -779,6 +645,8 @@ def code_record() -> dict[str, Any]:
 
 def save_checkpoint(path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
     """Save model and training state atomically."""
+    import torch
+
     path = Path(path)
     if payload.get("schema") != CHECKPOINT_SCHEMA:
         raise _error(Status.IO_ERROR, "invalid_checkpoint", f"schema must be {CHECKPOINT_SCHEMA}")
@@ -807,24 +675,33 @@ def operating_threshold(calibration: dict[str, Any] | None) -> float:
 
 
 class Orienter:
-    """A loaded OrientNet with its calibration (temperature and threshold)."""
+    """A loaded OrientNet with its calibration (temperature and threshold): a PyTorch
+    ``OrientNet`` on ``device``, or an ``OnnxModel`` (output ``logits``) with ``config``."""
 
     def __init__(
         self,
-        model: OrientNet,
+        model: Any,
         *,
         temperature: float = DEFAULT_TEMPERATURE,
         threshold: float = DEFAULT_THRESHOLD,
-        device: str | torch.device = "cpu",
+        device: Any = "cpu",
         info: dict[str, Any] | None = None,
+        config: OrientConfig | None = None,
     ) -> None:
         if not temperature > 0 or not 0 <= threshold <= 1:
             raise _error(
                 Status.INPUT_ERROR, "invalid_calibration", "temperature > 0, threshold in [0, 1]"
             )
-        self.device = torch.device(device)
-        self.model = model.to(self.device).eval()
-        self.config = model.config
+        if isinstance(model, OnnxModel):
+            if config is None:
+                raise _error(Status.INPUT_ERROR, "invalid_config", "an ONNX model needs a config")
+            self.device, self.model, self.config = "cpu", model, config
+        else:
+            import torch
+
+            self.device = torch.device(device)
+            self.model = model.to(self.device).eval()
+            self.config = model.config
         self.temperature, self.threshold = float(temperature), float(threshold)
         self.info = dict(info or {})
         self.info.update(temperature=self.temperature, threshold=self.threshold)
@@ -834,11 +711,13 @@ class Orienter:
         cls,
         path: str | Path,
         *,
-        device: str | torch.device = "cpu",
+        device: Any = "cpu",
         temperature: float | None = None,
         threshold: float | None = None,
     ) -> Orienter:
-        """Load weights and calibration from a checkpoint."""
+        """Load weights and calibration from a checkpoint (PyTorch)."""
+        from .orient_net import OrientNet
+
         path = Path(path)
         payload = load_checkpoint(path)
         info = model_record(payload)
@@ -858,10 +737,38 @@ class Orienter:
             info=info,
         )
 
-    @torch.no_grad()
+    @classmethod
+    def load_onnx(
+        cls,
+        path: str | Path,
+        config: OrientConfig,
+        *,
+        temperature: float,
+        threshold: float,
+        info: dict[str, Any] | None = None,
+    ) -> Orienter:
+        """An exported ONNX model (inputs ``global_view``, ``patches``; output ``logits``)."""
+        model = OnnxModel(path)
+        record = {"model_id": MODEL_ID, "kind": "onnx", **(info or {})}
+        record["path"] = str(Path(path).resolve())
+        return cls(model, temperature=temperature, threshold=threshold, info=record, config=config)
+
     def logits(self, views: list[PageViews]) -> NDArray[np.float32]:
-        global_view, patches = views_to_tensors(views)
-        out = self.model(global_view.to(self.device), patches.to(self.device))
+        global_view, patches = views_to_arrays(views)
+        if isinstance(self.model, OnnxModel):
+            return np.concatenate(
+                [
+                    self.model.output("logits", one[None], many[None])
+                    for one, many in zip(global_view, patches, strict=True)
+                ]
+            ).astype(np.float32)
+        import torch
+
+        with torch.no_grad():
+            out = self.model(
+                torch.from_numpy(global_view).to(self.device),
+                torch.from_numpy(patches).to(self.device),
+            )
         return out.float().cpu().numpy()
 
     def predict(
@@ -872,132 +779,24 @@ class Orienter:
         return decide(self.logits([views])[0], self.temperature, self.threshold)
 
 
-# ----------------------------------------------------------------------------- export
+# The PyTorch network and its export load on first use (``orient_net``).
+_NET_EXPORTS = (
+    "OrientNet",
+    "count_parameters",
+    "example_inputs",
+    "exportable",
+    "export_onnx",
+    "model_cost",
+    "views_to_tensors",
+)
 
 
-class _Exported(nn.Module):
-    def __init__(self, model: OrientNet, temperature: float) -> None:
-        super().__init__()
-        self.model = model
-        self.register_buffer("inverse_temperature", torch.tensor(1.0 / temperature))
+def __getattr__(name: str):
+    if name in _NET_EXPORTS:
+        from . import orient_net
 
-    def forward(self, global_view: torch.Tensor, patches: torch.Tensor):
-        logits = self.model(global_view, patches)
-        return logits, torch.softmax(logits * self.inverse_temperature, dim=1)
-
-
-def exportable(orienter: Orienter) -> nn.Module:
-    """The module an export traces: (global_view, patches) -> (logits, probabilities)."""
-    return _Exported(orienter.model.cpu().eval(), orienter.temperature).eval()
-
-
-def export_onnx(
-    checkpoint: str | Path,
-    output: str | Path,
-    *,
-    opset: int = 18,
-    temperature: float | None = None,
-    threshold: float | None = None,
-) -> dict[str, Any]:
-    """Write ``output`` (ONNX, dynamic batch) and ``output.json`` describing inputs,
-    preprocessing and calibration. Needs the ``onnx`` and
-    ``onnxscript`` packages; with ``onnxruntime`` installed the export is checked
-    against the torch model."""
-    orienter = Orienter.load(checkpoint, temperature=temperature, threshold=threshold)
-    module = exportable(orienter)
-    config = orienter.config
-    inputs = example_inputs(config, 2)
-    output = Path(output)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    batch = torch.export.Dim("batch", min=1, max=1024)
-    try:
-        program = torch.onnx.export(
-            module,
-            inputs,
-            dynamo=True,
-            input_names=["global_view", "patches"],
-            output_names=["logits", "probabilities"],
-            dynamic_shapes={"global_view": {0: batch}, "patches": {0: batch}},
-            opset_version=opset,
-            external_data=False,
-        )
-    except (ImportError, ModuleNotFoundError) as error:
-        raise _error(
-            Status.INPUT_ERROR,
-            "missing_dependency",
-            f"ONNX export needs the onnx and onnxscript packages ({error})",
-        ) from error
-    temporary = output.with_name(output.name + ".tmp")
-    try:
-        program.save(temporary, external_data=False)
-        os.replace(temporary, output)
-    finally:
-        temporary.unlink(missing_ok=True)
-    # Random gray views: a constant input would hide a spatial layout error in the export.
-    generator = torch.Generator().manual_seed(0)
-    probe = tuple(torch.randint(0, 256, x.shape, generator=generator).float() for x in inputs)
-    parity = _onnx_parity(output, module, probe)
-    payload = load_checkpoint(checkpoint)
-    record = {
-        "schema": EXPORT_SCHEMA,
-        "model_id": MODEL_ID,
-        "file": output.name,
-        "bytes": output.stat().st_size,
-        "opset": opset,
-        "checkpoint": {**orienter.info, "path": str(checkpoint)},
-        "temperature": orienter.temperature,
-        "threshold": orienter.threshold,
-        "calibration": payload.get("calibration"),
-        "model_config": config.to_dict(),
-        "cost": model_cost(config),
-        "inputs": {
-            "global_view": {
-                "shape": ["batch", 1, config.global_size, config.global_size],
-                "dtype": "float32",
-                "range": "gray values 0-255",
-            },
-            "patches": {
-                "shape": ["batch", config.patches, 1, config.patch_size, config.patch_size],
-                "dtype": "float32",
-                "range": "gray values 0-255",
-            },
-        },
-        "outputs": {
-            "logits": "raw logits (batch, 4)",
-            "probabilities": "softmax(logits / temperature) (batch, 4)",
-        },
-        "labels": "k = clockwise quarter turns of the text-up direction; rot90(view, k) is upright",
-        "preprocessing": {
-            "version": VIEWS_VERSION,
-            "gray": "ITU-R 601 luma (PIL L)",
-            "global_view": "page view letterboxed to global_size, centred, pad_value outside",
-            "patches": "view scaled to page_long_side; centres of the energy_grid cells with the "
-            "highest std of gradient magnitude on the global view, outer ring excluded",
-            "sampling": "bilinear, align_corners=False, integer box reduction by "
-            "max(1, int(density / 1.5)); quantize floor(clip(v, 0, 255) + 0.5)",
-        },
-        "parity": parity,
-        "environment": environment(),
-        "created_utc": utc_now(),
-    }
-    write_json(output.with_name(output.name + ".json"), record)
-    return record
-
-
-def _onnx_parity(path: Path, module: nn.Module, inputs) -> dict[str, Any] | None:
-    try:
-        import onnxruntime
-    except ImportError:
-        return None
-    session = onnxruntime.InferenceSession(str(path), providers=["CPUExecutionProvider"])
-    feed = {"global_view": inputs[0].numpy(), "patches": inputs[1].numpy()}
-    got = session.run(["logits"], feed)[0]
-    with torch.no_grad():
-        want = module(*inputs)[0].numpy()
-    return {
-        "max_abs_logit_difference": float(np.abs(got - want).max()),
-        "inputs": "uniform random gray values 0-255, seed 0",
-    }
+        return getattr(orient_net, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 # ----------------------------------------------------------------------------- CLI
@@ -1023,6 +822,8 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     """Exit codes: 0 every image processed, 1 some failed, 2 usage or loading error."""
     args = _parser().parse_args(argv)
+    from .orient_net import export_onnx, model_cost
+
     if args.command == "cost":
         print(json.dumps(model_cost()))
         return 0

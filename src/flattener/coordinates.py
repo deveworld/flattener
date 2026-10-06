@@ -1,10 +1,9 @@
 """Pixel-center coordinates and residual expansion for backward maps."""
 
 import numpy as np
-import torch
 from numpy.typing import NDArray
-from torch.nn import functional as F
 
+from . import ops
 from .contracts import FlattenerError, RenderConfig, Status
 from .validation import validate_config, validate_size
 
@@ -159,13 +158,8 @@ def resize_backward_map(
         return coarse_map.copy()
 
     residual = coarse_map - identity_map(coarse_size, config=config)
-    tensor = torch.from_numpy(residual).permute(2, 0, 1).unsqueeze(0)
-    with torch.inference_mode():
-        expanded = F.interpolate(
-            tensor, size=dense_size, mode="bilinear", align_corners=False, antialias=False
-        )
     result = identity_map(dense_size, config=config)
-    result += expanded.squeeze(0).permute(1, 2, 0).numpy()
+    result += ops.resize(residual, dense_size)
     if not np.isfinite(result).all():
         raise FlattenerError(
             Status.INVALID_TRANSFORM,

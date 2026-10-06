@@ -26,13 +26,11 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-import torch
-from torch import nn
-from torch.nn import functional as F
 
 from ..contracts import FlattenerError, Status
+from ..runtime import OnnxModel
 from .geometry import PageRegion, RegionConfig, RegionEstimate, detect_region
-from .segmentation import PREPROCESS_VERSION, SegmenterConfig
+from .segmentation import PREPROCESS_VERSION, SegmenterConfig, preprocess_array
 from .segmentation import preprocess_image as _preprocess_image
 from .segmentation import preprocess_mask as _preprocess_mask
 
@@ -98,100 +96,16 @@ def parameter_count(config: ContextSegmenterConfig | None = None) -> int:
     return _parameter_count(_config(config).channels)
 
 
-def preprocess_image(
-    image: np.ndarray, config: ContextSegmenterConfig | None = None
-) -> torch.Tensor:
+def preprocess_image(image: np.ndarray, config: ContextSegmenterConfig | None = None):
     """RGB preprocessing at ``config.input_size`` (float32 CHW, CPU)."""
     config = _config(config)
     return _preprocess_image(image, SegmenterConfig(input_size=config.input_size))
 
 
-def preprocess_mask(mask: np.ndarray, config: ContextSegmenterConfig | None = None) -> torch.Tensor:
+def preprocess_mask(mask: np.ndarray, config: ContextSegmenterConfig | None = None):
     """Binary target preprocessing (nearest-exact) at ``config.input_size``."""
     config = _config(config)
     return _preprocess_mask(mask, SegmenterConfig(input_size=config.input_size))
-
-
-def _block(in_channels, out_channels):
-    # Built on CPU in float32 whatever the caller's default dtype or device is.
-    return nn.Sequential(
-        nn.Conv2d(in_channels, out_channels, 3, padding=1, device="cpu", dtype=torch.float32),
-        nn.ReLU(),
-        nn.Conv2d(out_channels, out_channels, 3, padding=1, device="cpu", dtype=torch.float32),
-        nn.ReLU(),
-    )
-
-
-class ContextPageSegmenter(nn.Module):
-    """Three-level U-Net whose first decoder also sees an image-wide context vector.
-
-    The bottleneck is average-pooled to N×D×1×1 and broadcast over the first decoder
-    grid, so every output position depends on the whole bottleneck. Skip connections
-    keep boundary detail. The output is one N×1×H×W logit map.
-
-    The model is built on CPU in float32; ``model.to(device)`` moves it to CUDA or XPU.
-    Inputs must be float32 on the model's device.
-    """
-
-    def __init__(self, config: ContextSegmenterConfig | None = None):
-        super().__init__()
-        self.config = _config(config)
-        a, b, c, d = self.config.channels
-        self.encoder1 = _block(3, a)
-        self.encoder2 = _block(a, b)
-        self.encoder3 = _block(b, c)
-        self.bottom = _block(c, d)
-        self.scene_pool = nn.AdaptiveAvgPool2d(1)
-        self.decoder3 = _block(2 * d + c, c)
-        self.decoder2 = _block(c + b, b)
-        self.decoder1 = _block(b + a, a)
-        self.head = nn.Conv2d(a, 1, 1, device="cpu", dtype=torch.float32)
-
-    def _validate_input_metadata(self, images: torch.Tensor) -> None:
-        if not isinstance(images, torch.Tensor):
-            raise TypeError("images must be a tensor")
-        device = self.head.weight.device
-        if device.type not in {"cpu", "cuda", "xpu"}:
-            raise TypeError("model device must be CPU, CUDA, or XPU")
-        if images.dtype != torch.float32 or images.device != device:
-            raise TypeError("images must be float32 on the model device")
-        if any(
-            parameter.device != device or parameter.dtype != torch.float32
-            for parameter in self.parameters()
-        ):
-            raise TypeError("all model parameters must be float32 on the same device")
-        if (
-            images.ndim != 4
-            or images.shape[0] < 1
-            or tuple(images.shape[1:]) != (3, *self.config.input_size)
-        ):
-            raise ValueError("images must have shape (N, 3, *config.input_size), N >= 1")
-
-    def forward(self, images: torch.Tensor) -> torch.Tensor:
-        """Check shape, device, dtype, finiteness and the [0, 1] range, then run."""
-        self._validate_input_metadata(images)
-        if not bool(torch.isfinite(images).all()) or bool(((images < 0) | (images > 1)).any()):
-            raise ValueError("images must be finite and in [0, 1]")
-        return self._forward_trusted(images)
-
-    def _forward_trusted(self, images: torch.Tensor) -> torch.Tensor:
-        """Training path: checks tensor metadata only and reads no values on the host.
-
-        The caller checks values before a batch comes here. The operations and
-        outputs are the same as ``forward``.
-        """
-        self._validate_input_metadata(images)
-        first = self.encoder1(images)
-        second = self.encoder2(F.avg_pool2d(first, 2))
-        third = self.encoder3(F.avg_pool2d(second, 2))
-        bottom = self.bottom(F.avg_pool2d(third, 2))
-        up = F.interpolate(bottom, size=third.shape[-2:], mode="bilinear", align_corners=False)
-        context = self.scene_pool(bottom).expand(-1, -1, *third.shape[-2:])
-        up = self.decoder3(torch.cat((up, third, context), dim=1))
-        up = F.interpolate(up, size=second.shape[-2:], mode="bilinear", align_corners=False)
-        up = self.decoder2(torch.cat((up, second), dim=1))
-        up = F.interpolate(up, size=first.shape[-2:], mode="bilinear", align_corners=False)
-        return self.head(self.decoder1(torch.cat((up, first), dim=1)))
 
 
 # Checkpoints
@@ -231,6 +145,8 @@ def read_context_checkpoint(path: str | os.PathLike[str]) -> dict:
             raise _error("missing_checkpoint", f"{path} does not exist")
         if path.stat().st_size > MAX_CHECKPOINT_BYTES:
             raise _error("checkpoint_size_limit", "context checkpoint exceeds 64 MiB")
+        import torch
+
         checkpoint = torch.load(path, map_location="cpu", weights_only=True)
         if not isinstance(checkpoint, dict) or checkpoint.get("schema") != CHECKPOINT_SCHEMA:
             raise _error("invalid_checkpoint", f"schema must be {CHECKPOINT_SCHEMA}")
@@ -261,7 +177,7 @@ def read_context_checkpoint(path: str | os.PathLike[str]) -> dict:
 
 def save_context_checkpoint(
     path: str | os.PathLike[str],
-    model_state: dict[str, torch.Tensor],
+    model_state: dict[str, Any],
     config: ContextSegmenterConfig,
     provenance: dict[str, Any],
 ) -> None:
@@ -270,6 +186,10 @@ def save_context_checkpoint(
     ``provenance`` is a JSON-like record: where the weights came from, how they were
     trained (``lineage``, ``initialization``, ``track``) and on which data.
     """
+    import torch
+
+    from .context_net import ContextPageSegmenter
+
     config = _config(config)
     if not isinstance(provenance, dict) or not _json_like(provenance):
         raise ValueError("provenance must be a JSON-like dict")
@@ -305,29 +225,45 @@ def save_context_checkpoint(
 
 @dataclass(slots=True)
 class LoadedContextSegmenter:
-    """A loaded page detector with training metadata."""
+    """A loaded page detector with training metadata: a PyTorch ``ContextPageSegmenter``
+    on ``device``, or an ``OnnxModel`` (output ``probability``) on the CPU."""
 
-    model: ContextPageSegmenter
+    model: Any
     config: ContextSegmenterConfig
     metadata: dict
     load_seconds: float
-    device: torch.device = field(default_factory=lambda: torch.device("cpu"))
+    device: Any = "cpu"
 
     @property
     def model_id(self) -> str:
         return self.metadata.get("path", MODEL_VERSION)
 
-    def _logits(self, image: np.ndarray) -> torch.Tensor:
+    def _input(self, image: np.ndarray) -> np.ndarray:
+        return preprocess_array(image, SegmenterConfig(input_size=self.config.input_size))[None]
+
+    def _logits(self, image: np.ndarray):
+        import torch
+
         self.model.eval()
         with torch.inference_mode():
-            tensor = preprocess_image(image, self.config)[None].to(self.device)
+            tensor = torch.from_numpy(self._input(image)).to(self.device)
             logits = self.model(tensor)[0, 0].to("cpu")
         if not bool(torch.isfinite(logits).all()):
             raise _error("nonfinite_prediction", "page gate produced nonfinite logits")
         return logits
 
+    def _onnx_probability(self, image: np.ndarray) -> np.ndarray:
+        probability = self.model.output("probability", self._input(image))[0, 0]
+        if not np.isfinite(probability).all():
+            raise _error("nonfinite_prediction", "page gate produced nonfinite probabilities")
+        return probability.astype(np.float32)
+
     def predict_logits(self, image: np.ndarray) -> np.ndarray:
         """float32 H×W page logits at ``config.input_size`` over the whole image."""
+        if isinstance(self.model, OnnxModel):
+            probability = self._onnx_probability(image).astype(np.float64)
+            with np.errstate(divide="ignore"):
+                return (np.log(probability) - np.log1p(-probability)).astype(np.float32)
         return self._logits(image).numpy().copy()
 
     def predict_probability(self, image: np.ndarray) -> np.ndarray:
@@ -336,10 +272,14 @@ class LoadedContextSegmenter:
         No threshold, component choice or crop is applied here; ``gate_page_region``
         does that.
         """
+        if isinstance(self.model, OnnxModel):
+            return self._onnx_probability(image)
         return self._logits(image).sigmoid().numpy().copy()
 
 
-def _device(device) -> torch.device:
+def _device(device):
+    import torch
+
     try:
         device = torch.device(device)
     except (TypeError, RuntimeError) as exc:
@@ -355,9 +295,13 @@ def _device(device) -> torch.device:
 
 
 def load_context_segmenter(
-    path: str | os.PathLike[str], *, device: str | torch.device = "cpu"
+    path: str | os.PathLike[str], *, device: Any = "cpu"
 ) -> LoadedContextSegmenter:
-    """Load a page detector onto ``device``."""
+    """Load a page detector checkpoint onto ``device`` (PyTorch)."""
+    import torch
+
+    from .context_net import ContextPageSegmenter
+
     started = time.perf_counter()
     device = _device(device)
     checkpoint = read_context_checkpoint(path)
@@ -387,6 +331,26 @@ def load_context_segmenter(
         "probability_grid": "whole original image extent at model_config.input_size",
     }
     return LoadedContextSegmenter(model, config, metadata, time.perf_counter() - started, device)
+
+
+def load_onnx_segmenter(
+    path: str | os.PathLike[str], config: ContextSegmenterConfig, info: dict | None = None
+) -> LoadedContextSegmenter:
+    """A page detector running an exported ONNX model (output ``probability``)."""
+    started = time.perf_counter()
+    model = OnnxModel(path)
+    metadata = {
+        **(info or {}),
+        "path": str(Path(path).resolve()),
+        "format": "onnx",
+        "model_version": MODEL_VERSION,
+        "model_config": asdict(config),
+        "parameter_count": parameter_count(config),
+        "preprocess_version": PREPROCESS_VERSION,
+        "device": "cpu",
+        "probability_grid": "whole original image extent at model_config.input_size",
+    }
+    return LoadedContextSegmenter(model, config, metadata, time.perf_counter() - started)
 
 
 # Page gate decision
@@ -515,10 +479,17 @@ def gate_page(image: np.ndarray, segmenter, *, config: GateConfig | None = None)
     return _decide(estimate, image.shape[:2], config)
 
 
+def __getattr__(name: str):
+    if name == "ContextPageSegmenter":  # the PyTorch network loads on first use
+        from .context_net import ContextPageSegmenter
+
+        return ContextPageSegmenter
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 __all__ = [
     "BORDERS",
     "CHECKPOINT_SCHEMA",
-    "ContextPageSegmenter",
     "ContextSegmenterConfig",
     "GATE_VERSION",
     "GateConfig",
@@ -530,6 +501,7 @@ __all__ = [
     "gate_page",
     "gate_page_region",
     "load_context_segmenter",
+    "load_onnx_segmenter",
     "parameter_count",
     "preprocess_image",
     "preprocess_mask",

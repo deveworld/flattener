@@ -1,18 +1,30 @@
-"""``python -m flattener.scan IMG... --out DIR``: scan photos of single pages.
+"""``flattener-scan -i PHOTO [OUTPUT]``: scan photos of pages into flat page images.
 
-Each photo gives ``DIR/<stem>.jpg`` (JPEG quality 95, 4:4:4, the source's ICC profile; or
-``--format png``) and ``DIR/<stem>.scan.json``, the scan record with its plan, reasons,
-guidance, timings and model records. A photo that falls back keeps its failure status in
-the record; with the default ``--on-error original`` the saved image is the original.
-One JSON line per photo goes to stdout. An open-book spread is split at its fold into
-``DIR/<stem>-p1`` and ``<stem>-p2`` in reading order, one line each (``--pages auto``, the
-default; ``--pages 1`` keeps one image, ``--page-order rtl`` numbers the right page
-first). An output name that is one of the input photos is a usage error, so a scan never
-replaces a photo it reads.
+Like ffmpeg, inputs follow ``-i`` and the output comes last. ``OUTPUT`` is
 
-The default models are downloaded from Hugging Face on first use and cached locally.
-Use ``--bundle B`` for a local bundle or ``--weights W`` with optional ``--gate G``
-and ``--orient-weights O`` for individual checkpoints.
+* an image file (``.jpg`` or ``.png``) for one input;
+* a directory (an existing one, or a path ending in ``/``), which gets ``<stem>.jpg``
+  per input; with several inputs the output must be a directory;
+* left out: ``<stem>-scan.jpg`` per input in the current directory.
+
+``--format`` sets the format of directory and default outputs (JPEG quality 95, 4:4:4,
+the source's ICC profile; or PNG). An open-book spread is split at its fold into
+``<name>-p1`` and ``<name>-p2`` in reading order (``--pages auto``, the default;
+``--pages 1`` keeps one image, ``--page-order rtl`` numbers the right page first). A
+photo that falls back saves the original with the default ``--on-error original``.
+Existing files are kept unless ``-y`` is given, and an output that is one of the input
+photos is a usage error, so a scan never replaces a photo it reads.
+
+One line per saved page goes to stderr (``-q`` turns it off). ``--json`` prints one JSON
+line per page to stdout instead, and ``--record`` writes the scan record (plan, reasons,
+guidance, timings, models) next to each image as ``<name>.json``.
+
+The models run on ONNX Runtime on the CPU. With PyTorch installed (for example
+``uvx --with torch flattener-scan ...``) and a CUDA GPU present, they run on the GPU
+(``--backend``, ``--device``). The default models are downloaded from Hugging Face on
+first use and cached. Use ``--bundle B`` for a local bundle (ONNX or PyTorch), or
+``--weights W`` with optional ``--gate G`` and ``--orient-weights O`` for PyTorch
+checkpoints.
 
 ``--long-side``, ``--output-size`` and ``--aspect`` are manual corrections
 (``ScanOverrides``), recorded as ``manual`` provenance.
@@ -23,14 +35,14 @@ included), ``end_to_end`` (the scan plus saving), the stage cache hits and misse
 cache off for repeated timing runs) and, on the first row, the model load. The file is
 opened before the first photo; a row that cannot be written is reported on stderr.
 
-``--debug`` writes ``<stem>.debug.jpg`` after the scan; if that fails, the line gets
-``debug_error`` and the scan keeps its outcome.
+``--debug`` writes ``<name>.debug.jpg`` with the page outline after the scan; if that
+fails, the scan keeps its outcome.
 
 Exit status: 0 when every photo was scanned (rectified, with or without warnings; a
 ``--no-dewarp`` perspective result counts as scanned), 1 when any photo fell back or
 failed, 2 on a usage error (bad options, an unavailable device, unreadable weights, an
-output that would replace an input). A photo that raises an unexpected error gets a
-``failed`` line and the batch goes on.
+output that would replace an input). A photo that raises an unexpected error is reported
+and the batch goes on.
 """
 
 from __future__ import annotations
@@ -44,12 +56,12 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-import torch
 from PIL import Image, ImageDraw
 
+from .. import ops, runtime
 from ..contracts import FlattenerError, Status
 from ..dewarp.predict import parse_inset
-from .io import FORMATS, image_format, output_paths, save_image, save_scan
+from .io import FORMATS, image_format, save_image, save_scan_files
 from .locate import outline_polygon
 from .output_policy import PAPER_NAMES
 from .pipeline import (
@@ -63,6 +75,8 @@ from .records import EXIT_FALLBACK, EXIT_SCANNED, EXIT_USAGE, SCANNED_OUTCOMES, 
 from .sharpen import DEFAULT_AMOUNT
 from .timing import append_jsonl, megapixel_bucket
 
+PROG = "flattener-scan"
+DEFAULT_SUFFIX = "-scan"
 DEBUG_LONG_SIDE = 1024
 DEBUG_QUALITY = 90
 
@@ -129,27 +143,53 @@ def _aspect(text: str) -> str | float:
 
 def parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="flattener",
-        description="Scan photos of single pages into flat page images.",
+        prog=PROG,
+        usage=f"{PROG} -i PHOTO [-i PHOTO ...] [OUTPUT] [options]",
+        description="Scan photos of pages into flat page images.",
     )
-    parser.add_argument("images", nargs="+", type=Path, help="JPEG or PNG photos")
-    parser.add_argument("--out", required=True, type=Path, help="output directory")
-    weights = parser.add_argument_group("weights")
-    weights.add_argument(
+    parser.add_argument(
+        "-i",
+        "--input",
+        dest="inputs",
+        action="append",
+        required=True,
+        type=Path,
+        metavar="PHOTO",
+        help="JPEG or PNG photo; repeat for several",
+    )
+    parser.add_argument(
+        "output",
+        nargs="?",
+        metavar="OUTPUT",
+        help="image file (.jpg, .png) for one photo, or a directory; "
+        f"default: <stem>{DEFAULT_SUFFIX}.jpg in the current directory",
+    )
+    parser.add_argument("-y", "--overwrite", action="store_true", help="replace existing files")
+    parser.add_argument("-q", "--quiet", action="store_true", help="print nothing on stderr")
+    parser.add_argument("--json", action="store_true", help="print one JSON line per page")
+    parser.add_argument(
+        "--record", action="store_true", help="also write the scan record as <name>.json"
+    )
+    run = parser.add_argument_group("models")
+    run.add_argument(
+        "--backend",
+        choices=runtime.BACKENDS,
+        default="auto",
+        help="auto: PyTorch on a CUDA GPU when installed, else ONNX Runtime on the CPU",
+    )
+    run.add_argument("--device", default="auto", help="auto, cpu or cuda[:N]")
+    run.add_argument("--threads", type=int, help="CPU threads")
+    run.add_argument(
         "--bundle", type=Path, help="local bundle JSON; default: download models from Hugging Face"
     )
-    weights.add_argument("--weights", type=Path, help="dewarp checkpoint (without --bundle)")
-    weights.add_argument("--gate", type=Path, help="page gate checkpoint (with --weights)")
-    weights.add_argument(
-        "--orient-weights", type=Path, help="OrientNet checkpoint (with --weights)"
-    )
-    weights.add_argument(
+    run.add_argument("--weights", type=Path, help="dewarp checkpoint (without --bundle)")
+    run.add_argument("--gate", type=Path, help="page gate checkpoint (with --weights)")
+    run.add_argument("--orient-weights", type=Path, help="OrientNet checkpoint (with --weights)")
+    run.add_argument(
         "--orient-threshold",
         type=float,
         help="OrientNet threshold measured on real photos; replaces the bundle's and 0.9",
     )
-    weights.add_argument("--device", default="cpu")
-    weights.add_argument("--threads", type=int, help="torch CPU threads")
     manual = parser.add_argument_group(
         "manual corrections",
         "Coordinates use EXIF-oriented decoded image pixels. For a JPEG decoded at reduced "
@@ -209,7 +249,11 @@ def parser() -> argparse.ArgumentParser:
         default=DEFAULT_AMOUNT,
         help=f"sharpening amount on the flattened page, 0 for none (default {DEFAULT_AMOUNT:g})",
     )
-    output.add_argument("--format", default="jpg", choices=sorted({*FORMATS, "jpg"}))
+    output.add_argument(
+        "--format",
+        choices=sorted({*FORMATS, "jpg"}),
+        help="format of directory and default outputs (default jpg)",
+    )
     output.add_argument(
         "--fallback",
         choices=("original", "perspective"),
@@ -222,7 +266,6 @@ def parser() -> argparse.ArgumentParser:
         default="original",
         help="original: save the photo itself on failure; return: save no image",
     )
-    output.add_argument("--overwrite", action="store_true")
     records = parser.add_argument_group("records")
     records.add_argument("--timing", type=Path, help="append one JSON line of timings per photo")
     records.add_argument(
@@ -231,7 +274,7 @@ def parser() -> argparse.ArgumentParser:
         help="keep no model outputs between photos (repeated timing runs of one photo)",
     )
     records.add_argument(
-        "--debug", action="store_true", help="also write <stem>.debug.jpg with the page outline"
+        "--debug", action="store_true", help="also write <name>.debug.jpg with the page outline"
     )
     return parser
 
@@ -275,19 +318,107 @@ def _usage(message: str) -> FlattenerError:
     return FlattenerError(Status.INPUT_ERROR, "usage", message)
 
 
-def _check_device(name: str) -> None:
-    """Refuse an unknown device name, or a device type torch cannot reach here."""
+def _targets(args: argparse.Namespace) -> list[Path]:
+    """The image path of each input (before page numbers)."""
+    stems = _stems(args.inputs)
+    suffix = FORMATS[image_format(args.format or "jpg")]
+    if args.output is None:
+        return [Path(f"{stem}{DEFAULT_SUFFIX}{suffix}") for stem in stems]
+    output = Path(args.output)
+    directory = output.is_dir() or args.output.endswith(("/", os.sep))
+    if len(args.inputs) > 1 or directory:
+        if output.exists() and not output.is_dir():
+            raise _usage(f"{output} is a file; several photos need an output directory")
+        return [output / f"{stem}{suffix}" for stem in stems]
     try:
-        device = torch.device(name)
-    except RuntimeError as error:
-        raise _usage(f"--device: {error}") from None
-    available = getattr(getattr(torch, device.type, None), "is_available", None)
-    if device.type != "cpu" and callable(available) and not available():
-        raise _usage(f"--device {name}: no {device.type} device is available")
+        fmt = image_format(output.suffix)
+    except FlattenerError:
+        raise _usage(f"{output}: the output needs a .jpg, .jpeg or .png suffix") from None
+    if args.format is not None and image_format(args.format) != fmt:
+        raise _usage(f"--format {args.format} disagrees with {output}")
+    return [output]
 
 
-def _debug_path(out: Path, stem: str) -> Path:
-    return Path(out) / f"{stem}.debug.jpg"
+def _page_path(target: Path, number: int | None) -> Path:
+    if number is None:
+        return target
+    return target.with_name(f"{target.stem}-p{number}{target.suffix}")
+
+
+def _record_path(target: Path) -> Path:
+    return target.with_suffix(".json")
+
+
+def _debug_path(target: Path) -> Path:
+    return target.with_name(f"{target.stem}.debug.jpg")
+
+
+def _names(args: argparse.Namespace, target: Path) -> list[Path]:
+    """Every image path a photo may use: its own and, unless ``--pages 1``, its pages'."""
+    numbers = [None] if args.pages == 1 else [None, 1, 2]
+    return [_page_path(target, number) for number in numbers]
+
+
+def _check_inputs_kept(args: argparse.Namespace, targets: list[Path]) -> None:
+    """Refuse an output name that is an input photo: the scan would replace the photo,
+    or a later photo would be read after an earlier scan replaced it."""
+    inputs = []
+    for path in args.inputs:
+        try:
+            info = path.stat()
+        except OSError:
+            continue  # a photo that cannot be read fails on its own
+        key = (info.st_dev, info.st_ino) if info.st_ino else None
+        inputs.append((os.path.normcase(os.path.realpath(path)), key))
+    for name in (name for target in targets for name in _names(args, target)):
+        paths = [name]
+        if args.record:
+            paths.append(_record_path(name))
+        if args.debug:
+            paths.append(_debug_path(name))
+        for path in paths:
+            if _same_file(path, inputs):
+                raise _usage(f"{path} is an input photo; choose another output")
+
+
+def _load(args: argparse.Namespace) -> Scanner:
+    if args.bundle is not None and args.weights is not None:
+        raise _usage("use either --bundle or --weights")
+    if args.weights is None and (args.gate is not None or args.orient_weights is not None):
+        raise _usage("--gate and --orient-weights go with --weights")
+    cache_size = 0 if args.no_cache else CACHE_SIZE
+    if args.weights is None:
+        return Scanner.load(
+            args.bundle,
+            device=args.device,
+            backend=args.backend,
+            cache_size=cache_size,
+            orient_threshold=args.orient_threshold,
+        )
+    if args.backend == "onnx":
+        raise _usage("--weights are PyTorch checkpoints; use --bundle for ONNX models")
+    return Scanner.from_files(
+        args.weights,
+        gate=args.gate,
+        orient=args.orient_weights,
+        orient_threshold=args.orient_threshold,
+        device=args.device,
+        cache_size=cache_size,
+    )
+
+
+def _say(args: argparse.Namespace, text: str) -> None:
+    if not args.quiet:
+        print(text, file=sys.stderr, flush=True)
+
+
+def _summary(result) -> str:
+    outcome = result.outcome.value.replace("_", " ")
+    codes = [item.code for item in result.reasons if item.code != "source_downscaled"]
+    if result.outcome != Outcome.RECTIFIED and codes:
+        outcome += ": " + ", ".join(codes)
+    seconds = result.timings.get("total")
+    return outcome if seconds is None else f"{outcome} ({seconds:.1f} s)"
 
 
 def _same_file(path: Path, others: list[tuple[str, tuple[int, int] | None]]) -> bool:
@@ -298,59 +429,6 @@ def _same_file(path: Path, others: list[tuple[str, tuple[int, int] | None]]) -> 
     real = os.path.normcase(os.path.realpath(path))
     key = (info.st_dev, info.st_ino) if info.st_ino else None
     return any(real == other or (key is not None and key == ino) for other, ino in others)
-
-
-def _page_stems(args: argparse.Namespace, stem: str) -> list[str]:
-    """Every output stem a photo may use: its own and, unless ``--pages 1``, its pages'."""
-    return [stem] if args.pages == 1 else [stem, f"{stem}-p1", f"{stem}-p2"]
-
-
-def _check_inputs_kept(args: argparse.Namespace, stems: list[str], fmt: str) -> None:
-    """Refuse an output name that is an input photo: the scan would replace the photo,
-    or a later photo would be read after an earlier scan replaced it."""
-    inputs = []
-    for path in args.images:
-        try:
-            info = path.stat()
-        except OSError:
-            continue  # a photo that cannot be read fails on its own line
-        key = (info.st_dev, info.st_ino) if info.st_ino else None
-        inputs.append((os.path.normcase(os.path.realpath(path)), key))
-    for stem in (name for stem in stems for name in _page_stems(args, stem)):
-        try:
-            targets = list(output_paths(args.out, stem, fmt).values())
-        except FlattenerError:
-            continue  # an unusable stem fails when its photo is saved
-        if args.debug:
-            targets.append(_debug_path(args.out, stem))
-        for target in targets:
-            if _same_file(target, inputs):
-                raise _usage(f"{target} is an input photo; choose another --out")
-
-
-def _load(args: argparse.Namespace) -> Scanner:
-    if args.bundle is not None and args.weights is not None:
-        raise FlattenerError(Status.INPUT_ERROR, "usage", "use either --bundle or --weights")
-    if args.weights is None and (args.gate is not None or args.orient_weights is not None):
-        raise FlattenerError(
-            Status.INPUT_ERROR, "usage", "--gate and --orient-weights go with --weights"
-        )
-    cache_size = 0 if args.no_cache else CACHE_SIZE
-    if args.weights is None:
-        return Scanner.load(
-            args.bundle,
-            device=args.device,
-            cache_size=cache_size,
-            orient_threshold=args.orient_threshold,
-        )
-    return Scanner.from_files(
-        args.weights,
-        gate=args.gate,
-        orient=args.orient_weights,
-        orient_threshold=args.orient_threshold,
-        device=args.device,
-        cache_size=cache_size,
-    )
 
 
 def _stems(images: Sequence[Path]) -> list[str]:
@@ -406,19 +484,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         options = _options(args)
         overrides = _overrides(args)
-        fmt = image_format(args.format)
+        targets = _targets(args)
+        runtime.check_device(args.device)
         if args.threads is not None:
             if args.threads < 1:
                 raise _usage("--threads must be at least 1")
-            torch.set_num_threads(args.threads)
-        _check_device(args.device)
+            runtime.set_threads(args.threads)
         if args.timing is not None:
             try:
                 args.timing.open("a", encoding="utf-8").close()
             except OSError as error:
                 raise _usage(f"--timing: {error}") from None
-        stems = _stems(args.images)
-        _check_inputs_kept(args, stems, fmt)
+        _check_inputs_kept(args, targets)
         try:
             scanner = _load(args)
         except FlattenerError:
@@ -427,34 +504,34 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise FlattenerError(
                 Status.MODEL_ERROR,
                 "load_failed",
-                f"could not load the weights: {type(error).__name__}: {error}",
+                f"could not load the models: {type(error).__name__}: {error}",
             ) from error
+        if args.threads is not None:
+            runtime.set_threads(args.threads)  # PyTorch is loaded now
     except FlattenerError as error:
-        failure = {"status": str(error.status), "reason_code": error.reason_code}
-        print(json.dumps({**failure, "message": error.message}), file=sys.stderr)
+        print(f"{PROG}: error: {error.message}", file=sys.stderr)
         return EXIT_USAGE
     scanned = True
     load_written = False
-    for path, stem in zip(args.images, stems, strict=True):
-        saved: list[tuple[str, Any, dict[str, str]]] = []
+    for path, target in zip(args.inputs, targets, strict=True):
+        saved: list[tuple[Path, Any, dict[str, str]]] = []
         try:
             if args.debug and not args.overwrite:
-                for name in _page_stems(args, stem):
-                    debug = _debug_path(args.out, name)
+                for name in _names(args, target):
+                    debug = _debug_path(name)
                     if debug.exists() or debug.is_symlink():
                         raise FlattenerError(Status.IO_ERROR, "output_exists", f"{debug} exists")
             planned = scanner.plan(path, options, overrides)  # decoding is the read stage
             source = planned.source
             pages = scanner.split(planned)
             for number, page in enumerate(pages, start=1):
-                name = stem if len(pages) == 1 else f"{stem}-p{number}"
+                name = _page_path(target, None if len(pages) == 1 else number)
                 result = scanner.render(source, page)
                 result.input = str(path)
-                written = save_scan(
+                written = save_scan_files(
                     result,
-                    args.out,
                     name,
-                    fmt=fmt,
+                    _record_path(name) if args.record else None,
                     icc_profile=source.icc_profile,
                     overwrite=args.overwrite,
                 )
@@ -468,11 +545,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 status = Status.IO_ERROR if io else Status.MODEL_ERROR
                 code = "unexpected_io_error" if io else "unexpected_error"
                 message = f"{type(error).__name__}: {error}"
-            line = {"input": str(path), "status": str(status), "reason_code": code}
-            line.update(outcome=Outcome.FAILED.value, message=message)
-            if saved:
-                line["files"] = [written for _, _, written in saved]
-            print(json.dumps(line, ensure_ascii=False))
+            hint = " (use -y to replace it)" if code == "output_exists" else ""
+            _say(args, f"{path}: failed: {message}{hint}")
+            if args.json:
+                line = {"input": str(path), "status": str(status), "reason_code": code}
+                line.update(outcome=Outcome.FAILED.value, message=message)
+                if saved:
+                    line["files"] = [written for _, _, written in saved]
+                print(json.dumps(line, ensure_ascii=False), flush=True)
             continue
         for number, (name, result, written) in enumerate(saved, start=1):
             line: dict[str, Any] = {"input": str(path)}
@@ -482,7 +562,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 try:
                     picture = _debug_image(source.image, result)
                     written["debug"] = save_image(
-                        _debug_path(args.out, name),
+                        _debug_path(name),
                         picture,
                         quality=DEBUG_QUALITY,
                         overwrite=args.overwrite,
@@ -490,15 +570,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 except Exception as error:  # the scan itself is saved
                     line["debug_error"] = f"{type(error).__name__}: {error}"
             scanned = scanned and _scanned(result, args.no_dewarp)
-            line.update(
-                outcome=result.outcome.value,
-                status=result.status.value,
-                reason_code=result.reason_code,
-                reasons=[item.code for item in result.reasons],
-                files=written,
-                seconds=result.timings.get("total"),
-            )
-            print(json.dumps(line, ensure_ascii=False))
+            shown = written.get("image", "no image")
+            _say(args, f"{path} -> {shown}  {_summary(result)}")
+            if args.json:
+                line.update(
+                    outcome=result.outcome.value,
+                    status=result.status.value,
+                    reason_code=result.reason_code,
+                    reasons=[item.code for item in result.reasons],
+                    files=written,
+                    seconds=result.timings.get("total"),
+                )
+                print(json.dumps(line, ensure_ascii=False), flush=True)
         if args.timing is not None:
             result = saved[0][1]
             full = source.info.full_size
@@ -516,8 +599,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "cache": cache,
                 "cached": any(cache["hits"].values()),
                 "outcome": result.outcome.value,
-                "device": args.device,
-                "threads": torch.get_num_threads(),
+                "backend": scanner.backend,
+                "device": str(scanner.dewarper.device),
+                "threads": ops.threads(),
                 "fast_check": options.fast_check,
             }
             if not load_written:
@@ -526,7 +610,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             try:
                 append_jsonl(args.timing, row)
             except OSError as error:
-                print(json.dumps({"input": str(path), "timing_error": str(error)}), file=sys.stderr)
+                _say(args, f"{path}: could not write the timing row: {error}")
     return EXIT_SCANNED if scanned else EXIT_FALLBACK
 
 

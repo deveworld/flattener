@@ -31,9 +31,13 @@ All array helpers take (..., 2) arrays in (x, y) order and sizes as
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import numpy as np
-import torch
 from numpy.typing import NDArray
+
+if TYPE_CHECKING:
+    import torch
 
 Size = tuple[int, int]
 
@@ -203,6 +207,8 @@ def uvdoc_dense_map(grid: NDArray, output_size: Size, source_size: Size) -> NDAr
 
 
 def _torch_matrix(count: int, n: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+    import torch
+
     index = (center_positions(count) + 1) / 2 * (n - 1)
     matrix = interpolation_matrix(index, n, extrapolate=False)
     return torch.from_numpy(matrix).to(device=device, dtype=dtype)
@@ -220,6 +226,8 @@ def grid_to_map_torch(grid: torch.Tensor, output_size: Size) -> torch.Tensor:
 
 def unwarp_torch(image: torch.Tensor, grid: torch.Tensor, output_size: Size) -> torch.Tensor:
     """Sample (B, 3, H, W) images with flattener-convention grids (B, 2, Gh, Gw)."""
+    import torch
+
     dense = grid_to_map_torch(grid, output_size).permute(0, 2, 3, 1)
     return torch.nn.functional.grid_sample(
         image, dense.to(image.dtype), mode="bilinear", padding_mode="border", align_corners=False
