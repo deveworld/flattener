@@ -40,35 +40,174 @@ export function pageOutline(
   const confidence = largest.reduce((sum, i) => sum + probability[i], 0) / largest.length;
   if (confidence < 0.7) return null;
 
-  const mask = new Uint8Array(probability.length);
-  for (const i of largest) mask[i] = 1;
-  const stride = width + 1;
-  const boundary = new Set<number>();
+  let mask: Uint8Array = new Uint8Array(probability.length);
   let clipped = false;
   for (const i of largest) {
+    mask[i] = 1;
     const x = i % width,
-      y = Math.floor(i / width),
-      a = y * stride + x;
+      y = Math.floor(i / width);
     if (x === 0 || y === 0 || x === width - 1 || y === height - 1) clipped = true;
-    if (
-      y === 0 ||
-      !mask[i - width] ||
-      x === width - 1 ||
-      !mask[i + 1] ||
-      y === height - 1 ||
-      !mask[i + width] ||
-      x === 0 ||
-      !mask[i - 1]
-    ) {
-      for (const corner of [a, a + 1, a + stride, a + stride + 1]) boundary.add(corner);
-    }
   }
-  // Bridge mask gaps caused by text or fingers in the live framing guide.
-  const outer = convexHull(
-    Array.from(boundary, (i) => [(i % stride) / width, Math.floor(i / stride) / height]),
-  );
+  // Small gaps (text near the edge, a fingertip) are closed; thin strips joining the page to
+  // something beside it (a patterned cloth the gate half-takes for paper) are cut. The guide
+  // then follows the page's own outline, concave edges included.
+  mask = morph(morph(mask, width, height, 2, 'grow'), width, height, 2, 'shrink');
+  mask = morph(morph(mask, width, height, 2, 'shrink'), width, height, 2, 'grow');
+  // Trace cell corners: a corner is on the page when any of its four cells is, so the
+  // outline runs along the mask's outer cell edges.
+  const corners = new Uint8Array((width + 1) * (height + 1));
+  for (let y = 0; y <= height; y++)
+    for (let x = 0; x <= width; x++)
+      for (const [cx, cy] of [
+        [x - 1, y - 1],
+        [x, y - 1],
+        [x - 1, y],
+        [x, y],
+      ])
+        if (cx >= 0 && cy >= 0 && cx < width && cy < height && mask[cy * width + cx])
+          corners[y * (width + 1) + x] = 1;
+  const traced = outerBoundary(corners, width + 1, height + 1);
+  if (traced.length < 3) return null;
+  const outer = simplify(traced, 1.25).map(([x, y]): Point => [x / width, y / height]);
   if (outer.length < 3) return null;
   return { points: resample(outer, 64), area: largest.length / probability.length, clipped };
+}
+
+/** ``mask`` grown or shrunk by ``radius`` cells (a square neighbourhood), keeping only the
+ * largest connected part after a shrink. */
+function morph(
+  mask: Uint8Array,
+  width: number,
+  height: number,
+  radius: number,
+  mode: 'grow' | 'shrink',
+): Uint8Array {
+  const keep = mode === 'grow' ? 1 : 0;
+  const pass = (source: Uint8Array, horizontal: boolean) => {
+    const out = new Uint8Array(source.length);
+    for (let y = 0; y < height; y++)
+      for (let x = 0; x < width; x++) {
+        let hit = 1 - keep;
+        for (let d = -radius; d <= radius && hit !== keep; d++) {
+          const xx = horizontal ? x + d : x,
+            yy = horizontal ? y : y + d;
+          // Outside the frame counts as page when shrinking, so edge pages keep their edge.
+          const v =
+            xx < 0 || yy < 0 || xx >= width || yy >= height ? 1 - keep : source[yy * width + xx];
+          if (v === keep) hit = keep;
+        }
+        out[y * width + x] = hit;
+      }
+    return out;
+  };
+  const result = pass(pass(mask, true), false);
+  if (mode === 'grow') return result;
+  // The largest connected part: a strip cut off by the shrink does not come back.
+  const label = new Int32Array(result.length).fill(-1),
+    queue = new Int32Array(result.length);
+  let best = -1,
+    bestSize = 0;
+  for (let start = 0, n = 0; start < result.length; start++) {
+    if (!result[start] || label[start] >= 0) continue;
+    let head = 0,
+      tail = 1;
+    queue[0] = start;
+    label[start] = n;
+    while (head < tail) {
+      const i = queue[head++],
+        x = i % width;
+      for (const next of [x > 0 ? i - 1 : -1, x + 1 < width ? i + 1 : -1, i - width, i + width])
+        if (next >= 0 && next < result.length && result[next] && label[next] < 0) {
+          label[next] = n;
+          queue[tail++] = next;
+        }
+    }
+    if (tail > bestSize) [best, bestSize] = [n, tail];
+    n++;
+  }
+  return Uint8Array.from(label, (v) => (v === best && best >= 0 ? 1 : 0));
+}
+
+/** The outer boundary cells of a mask, in order (Moore neighbour tracing from the first cell
+ * in reading order). */
+function outerBoundary(mask: Uint8Array, width: number, height: number): Point[] {
+  const at = (x: number, y: number) =>
+    x >= 0 && y >= 0 && x < width && y < height && mask[y * width + x] === 1;
+  let start = -1;
+  for (let i = 0; i < mask.length && start < 0; i++) if (mask[i]) start = i;
+  if (start < 0) return [];
+  const sx = start % width,
+    sy = Math.floor(start / width);
+  // Clockwise neighbours, starting west.
+  const dirs = [
+    [-1, 0],
+    [-1, -1],
+    [0, -1],
+    [1, -1],
+    [1, 0],
+    [1, 1],
+    [0, 1],
+    [-1, 1],
+  ];
+  const points: Point[] = [[sx, sy]];
+  let [x, y] = [sx, sy],
+    from = 0; // the start was entered from the west (outside, as it is first in its row)
+  for (let steps = 0; steps < 4 * mask.length; steps++) {
+    let found = false;
+    for (let k = 1; k <= 8; k++) {
+      const d = (from + k) % 8,
+        nx = x + dirs[d][0],
+        ny = y + dirs[d][1];
+      if (at(nx, ny)) {
+        // Continue from the neighbour, searching from the direction we came from.
+        from = (d + 4) % 8;
+        [x, y] = [nx, ny];
+        found = true;
+        break;
+      }
+    }
+    if (!found || (x === sx && y === sy)) break;
+    points.push([x, y]);
+  }
+  return points;
+}
+
+/** Douglas–Peucker on a closed polygon with ``tolerance`` in the points' units: the ring is
+ * cut at its first point and the point farthest from it, and each half is simplified. */
+function simplify(points: Point[], tolerance: number): Point[] {
+  if (points.length < 4) return points;
+  const line = (chain: Point[]): Point[] => {
+    const keep = new Uint8Array(chain.length);
+    keep[0] = keep[chain.length - 1] = 1;
+    const split = (a: number, b: number) => {
+      const [ax, ay] = chain[a],
+        [bx, by] = chain[b],
+        span = Math.hypot(bx - ax, by - ay) || 1;
+      let worst = -1,
+        at = -1;
+      for (let i = a + 1; i < b; i++) {
+        const d = Math.abs((chain[i][0] - ax) * (by - ay) - (chain[i][1] - ay) * (bx - ax)) / span;
+        if (d > worst) [worst, at] = [d, i];
+      }
+      if (worst > tolerance) {
+        keep[at] = 1;
+        split(a, at);
+        split(at, b);
+      }
+    };
+    split(0, chain.length - 1);
+    return chain.filter((_, i) => keep[i]);
+  };
+  let far = 0;
+  for (let i = 1; i < points.length; i++)
+    if (
+      Math.hypot(points[i][0] - points[0][0], points[i][1] - points[0][1]) >
+      Math.hypot(points[far][0] - points[0][0], points[far][1] - points[0][1])
+    )
+      far = i;
+  const first = line(points.slice(0, far + 1)),
+    second = line([...points.slice(far), points[0]]);
+  return [...first.slice(0, -1), ...second.slice(0, -1)];
 }
 
 /** The largest piece joined with pieces of the same page that a dark band (a printed
@@ -110,25 +249,6 @@ function joinPieces(pieces: number[][], width: number, height: number): number[]
     }
   }
   return joined;
-}
-
-function convexHull(points: Point[]): Point[] {
-  points.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
-  const cross = (a: Point, b: Point, c: Point) =>
-    (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
-  const half = (ordered: Point[]) => {
-    const chain: Point[] = [];
-    for (const point of ordered) {
-      while (
-        chain.length >= 2 &&
-        cross(chain[chain.length - 2], chain[chain.length - 1], point) <= 0
-      )
-        chain.pop();
-      chain.push(point);
-    }
-    return chain.slice(0, -1);
-  };
-  return [...half(points), ...half(points.slice().reverse())];
 }
 
 function resample(points: Point[], count: number): Point[] {

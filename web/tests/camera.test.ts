@@ -49,11 +49,34 @@ test('small gaps in the mask do not indent the live framing guide', () => {
   const p = mask(
     40,
     40,
-    (x, y) => x >= 5 && x < 35 && y >= 5 && y < 35 && !(x >= 15 && x < 25 && y < 12),
+    (x, y) => x >= 5 && x < 35 && y >= 5 && y < 35 && !(x >= 18 && x < 21 && y < 7),
   );
   const outline = pageOutline(p, 40, 40)!;
   assert.equal(outline.clipped, false);
   for (const [x, y] of outline.points) assert.ok(Math.min(x, y, 1 - x, 1 - y) <= 0.125 + 1e-8);
+});
+
+test('the guide follows a concave page edge and leaves a cloth strip joined to the page out', () => {
+  const width = 60,
+    height = 80;
+  // A page whose top edge sags 12 cells in the middle (a curled sheet), and a thin strip of
+  // cloth the gate took for paper, joined to its right edge.
+  const sag = (x: number) => 10 + 12 * Math.sin((Math.PI * (x - 8)) / 44);
+  const p = mask(
+    width,
+    height,
+    (x, y) =>
+      (x >= 8 && x < 52 && y >= sag(x) && y < 70) || (x >= 52 && x < 58 && y >= 40 && y < 42),
+  );
+  const outline = pageOutline(p, width, height)!;
+  const top = outline.points.filter(
+    ([x, y]) => y * height < 40 && x * width > 20 && x * width < 40,
+  );
+  assert.ok(top.length > 0 && top.every(([, y]) => y * height > 18), 'the top edge sags');
+  assert.ok(
+    outline.points.every(([x]) => x * width <= 52.5),
+    'the strip is left out',
+  );
 });
 
 test('camera detection rejects empty, tiny, uncertain and invalid masks', () => {
