@@ -176,12 +176,13 @@ h1 {
 .privacy {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   color: var(--muted);
+  font-size: 14px;
 }
 .privacy svg {
-  width: 20px;
-  height: 20px;
+  width: 16px;
+  height: 16px;
 }
 .workspace {
   width: min(1040px, calc(100% - 80px));
@@ -360,6 +361,9 @@ body:not(.has-photo) .app-shell {
   min-height: 0;
   overflow: hidden;
 }
+body:not(.has-photo) .app-header {
+  width: 100%;
+}
 body:not(.has-photo) .workspace {
   display: flex;
   flex: 1;
@@ -378,7 +382,7 @@ body:not(.has-photo) .empty-state {
 }
 body:not(.has-photo) .workspace-footer {
   margin-top: 0;
-  padding: 0 0 max(4px, env(safe-area-inset-bottom));
+  padding: 8px 0 max(8px, env(safe-area-inset-bottom));
 }
 /* With PDF pages below, the start screen drops the drawing and the larger margins. */
 body:not(.has-photo):has(#pages:not([hidden])) .page-diagram {
@@ -1097,18 +1101,9 @@ select {
 }
 .workspace-footer {
   display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 24px;
-  border-top: 1px solid var(--line);
+  justify-content: flex-end;
   margin-top: 24px;
-  padding: 12px 0 24px;
-  color: var(--muted);
-}
-.workspace-footer > a {
-  padding: 10px 0;
-  min-height: 48px;
-  color: var(--muted);
+  padding: 8px 0 24px;
 }
 .scanner-preparation:not([data-state='error']) {
   display: none;
@@ -1500,7 +1495,6 @@ body.camera-open {
     gap: 16px;
   }
   .workspace-footer {
-    gap: 16px;
     margin-top: 16px;
     padding-bottom: max(24px, env(safe-area-inset-bottom));
   }

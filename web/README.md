@@ -146,5 +146,5 @@ Generate `public/sample.png` with `uv run python tools/web/generate_sample.py`.
 The sample is a synthetic document.
 Manrope comes from [Google Fonts](https://github.com/google/fonts/tree/main/ofl/manrope) under [SIL OFL 1.1](public/fonts/OFL.txt).
 
-The build copies [LICENSE](../LICENSE) to `dist/LICENSE` and links it from the footer.
+The build copies [LICENSE](../LICENSE) to `dist/LICENSE`.
 Update its component notices when upgrading ONNX Runtime.

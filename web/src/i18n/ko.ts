@@ -74,7 +74,6 @@ export const ko: Record<string, string> = {
   'This device': '이 기기',
   'WebGPU · on this device': 'WebGPU · 이 기기에서 처리',
   'CPU · on this device': 'CPU · 이 기기에서 처리',
-  Licenses: '라이선스',
   'Your workspace': '작업 공간',
 
   // Scanner status
