@@ -6,9 +6,9 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from flattener.benchmark import __main__ as cli
-from flattener.benchmark import docunet, metrics
-from flattener.benchmark.reporting import prediction_record, prediction_status, write_json_atomic
+from tools.benchmark import __main__ as cli
+from tools.benchmark import docunet, metrics
+from tools.benchmark.reporting import prediction_record, prediction_status, write_json_atomic
 
 
 def _row(k, m, rotated, value):
@@ -50,7 +50,7 @@ def test_cli_writes_the_report_without_siftflow(tiny_docunet, tmp_path, capsys):
     code = cli.main(
         [
             "docunet", str(predictions), "--output", str(output), "--ms-ssim-only",
-            "--references-dir", str(scans), "--no-verify-references", "--workers", "1",
+            "--references-dir", str(scans), "--workers", "1",
             "--convention", "130_rot64", "--convention", "128_excl64", "--quiet",
         ]
     )  # fmt: skip
@@ -62,11 +62,11 @@ def test_cli_writes_the_report_without_siftflow(tiny_docunet, tmp_path, capsys):
     assert report["config"]["conventions"] == ["130_rot64", "128_excl64"]
     assert len(report["rows"]) == 130
     assert [row["id"] for row in report["rows"] if row["rotated_180"]] == ["64_1", "64_2"]
-    assert set(report["inputs"]["references"]) == {str(k) for k in range(1, 66)}
+    assert report["inputs"]["references_dir"] == str(scans.resolve())
     assert report["summary"]["130_rot64"]["n"] == 130
     assert report["summary"]["128_excl64"]["n"] == 128
     assert report["summary"]["128_excl64"]["ld"] is None
-    assert {"prediction_sha256", "reference_sha256", "metric_shape_hw"} <= set(report["rows"][0])
+    assert {"metric_shape_hw"} <= set(report["rows"][0])
     assert "128_excl64" in json.loads(capsys.readouterr().out)
     with pytest.raises(SystemExit, match="exists"):
         cli.main(["docunet", str(predictions), "--output", str(output), "--ms-ssim-only"])
@@ -83,15 +83,17 @@ def _record(predictions, failed):
     for item in items:
         if item["output"] in failed:
             item.update(failed[item["output"]], reason="fold_or_degenerate")
-    record = {"schema": "flattener-dewarp-predictions-2", "model": {"sha256": "a"}, "items": items}
+    record = {
+        "schema": "flattener-dewarp-predictions-2",
+        "model": {"path": "model.pt"},
+        "items": items,
+    }
     (predictions / "predictions.json").write_text(json.dumps(record))
 
 
 def test_reports_count_recorded_failures_and_unrecorded_outputs(tiny_docunet):
     scans, predictions = tiny_docunet
-    arguments = dict(
-        pattern="{k}_{m}.png", build=None, references_dir=scans, verify_references=False, workers=1
-    )
+    arguments = dict(pattern="{k}_{m}.png", build=None, references_dir=scans, workers=1)
     report = docunet.evaluate_docunet(predictions, conventions=["128_excl64"], **arguments)
     assert report["predictions_record"] is None
     assert report["summary"]["128_excl64"]["prediction_failures"] is None

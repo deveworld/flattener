@@ -7,12 +7,12 @@ import pytest
 import torch
 from PIL import Image
 
-from flattener.benchmark import __main__ as cli
-from flattener.benchmark import stress
 from flattener.dewarp import predict
 from flattener.dewarp.checkpoint import CHECKPOINT_SCHEMA, save_checkpoint
 from flattener.dewarp.coords import edge_positions
 from flattener.dewarp.model import DewarpModelConfig, UVDocNet
+from tools.benchmark import __main__ as cli
+from tools.benchmark import stress
 
 TINY = DewarpModelConfig(input_size=(64, 48), grid_size=(5, 4), num_filter=4)
 CROP = (28, 20)
@@ -53,8 +53,6 @@ def stress_inputs(tiny_docunet, tmp_path):
             "track": "release",
             "model_config": TINY.to_dict(),
             "lineage": [{"kind": "scratch"}],
-            "data_spec_sha256": "0" * 64,
-            "code": {"sha256": "1" * 64},
             "model_state": UVDocNet(TINY).state_dict(),
         },
     )
@@ -92,7 +90,7 @@ def _argv(stress_inputs, output, *extra):
         "docunet-stress",
         "--weights", str(weights), "--output-dir", str(output),
         "--crop-dir", str(crops), "--photo-dir", str(photos),
-        "--references-dir", str(scans), "--no-verify-references",
+        "--references-dir", str(scans),
         "--ms-ssim-only", "--workers", "1", "--quiet", "--convention", "128_excl64",
         *extra,
     ]  # fmt: skip
@@ -104,7 +102,7 @@ def test_stress_run_scores_every_variant_and_labels_it(stress_inputs, tmp_path, 
     assert cli.main(_argv(stress_inputs, output)) == 0
     summary = json.loads((output / "stress.json").read_text())
     assert summary["evidence"]["measurement"] == "docunet_stress"
-    assert summary["evidence"]["evidence_kind"] == "smoke_training"  # a 3-step checkpoint
+    assert summary["evidence"]["checkpoint_step"] == 3
     assert set(summary["variants"]) == set(stress.VARIANTS)  # the JSON keys are sorted
     for name, entry in summary["variants"].items():
         assert entry["status"] == "scored" and entry["predictions"]["failed"] == 0, name
@@ -118,7 +116,5 @@ def test_stress_run_scores_every_variant_and_labels_it(stress_inputs, tmp_path, 
     scored = json.loads((output / "rot90" / "docunet.json").read_text())
     assert cli.main(_argv(stress_inputs, output, "--variant", "rot90")) == 0
     again = json.loads((output / "stress.json").read_text())["variants"]["rot90"]
-    assert again["predictions"]["kept"] == 130
-    reused = json.loads((output / "rot90" / "docunet.json").read_text())
-    assert reused["created_utc"] == scored["created_utc"] and "record_refreshed_utc" in reused
-    assert reused["rows"] == scored["rows"] and again["summary"] == scored["summary"]
+    assert again["predictions"]["written"] == 130
+    assert again["summary"] == scored["summary"]

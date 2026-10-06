@@ -30,7 +30,7 @@ def pytest_collection_modifyitems(config, items):
 @pytest.fixture
 def tiny_docunet(tmp_path, monkeypatch):
     """65 tiny scans and 130 predictions; the metric area is shrunk to keep it fast."""
-    from flattener.benchmark import metrics
+    from tools.benchmark import metrics
 
     monkeypatch.setattr(metrics, "METRIC_AREA", 300)
     rng = np.random.default_rng(7)

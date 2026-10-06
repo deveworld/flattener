@@ -353,18 +353,38 @@ export function cleanDocument(
   const hasMask = maskCount(mask) > 0;
   if (!cleanColor && !hasMask) return { width, height, data };
   field ??= estimatePaper(image, mask);
-  for (let y = 0; y < height; y++)
+  // Cache horizontal interpolation across the much smaller lighting grid.
+  const horizontal = new Float64Array(field.height * width * 3);
+  for (let x = 0; x < width; x++) {
+    const sx = clamp(((x + 0.5) * field.width) / width - 0.5, 0, field.width - 1);
+    const x0 = Math.floor(sx),
+      x1 = Math.min(x0 + 1, field.width - 1),
+      dx = sx - x0;
+    for (let y = 0; y < field.height; y++)
+      for (let c = 0; c < 3; c++)
+        horizontal[(y * width + x) * 3 + c] =
+          field.data[(y * field.width + x0) * 3 + c] * (1 - dx) +
+          field.data[(y * field.width + x1) * 3 + c] * dx;
+  }
+  for (let y = 0; y < height; y++) {
+    const sy = clamp(((y + 0.5) * field.height) / height - 0.5, 0, field.height - 1);
+    const y0 = Math.floor(sy),
+      y1 = Math.min(y0 + 1, field.height - 1),
+      dy = sy - y0;
     for (let x = 0; x < width; x++) {
       const i = (y * width + x) * 4,
         remove = hasMask && selected(mask, x, y, width, height);
       if (!cleanColor && !remove) continue;
       for (let c = 0; c < 3; c++) {
-        const paper = paperAt(field, x, y, width, height, c);
+        const paper =
+          horizontal[(y0 * width + x) * 3 + c] * (1 - dy) +
+          horizontal[(y1 * width + x) * 3 + c] * dy;
         // Mask-only fill leaves every unselected source pixel exactly unchanged.
         const value = remove ? paper : image.data[i + c];
         data[i + c] = cleanColor ? value * clamp(248 / Math.max(paper, 70), 0.85, 2.5) : value;
       }
     }
+  }
   return { width, height, data };
 }
 

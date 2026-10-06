@@ -6,6 +6,10 @@ import { resolve } from 'node:path';
 const runtime = resolve('node_modules/onnxruntime-web/dist');
 const files = ['ort-wasm-simd-threaded.asyncify.wasm', 'ort-wasm-simd-threaded.asyncify.mjs'];
 const license = resolve('../LICENSE');
+const isolationHeaders = {
+  'Cross-Origin-Opener-Policy': 'same-origin',
+  'Cross-Origin-Embedder-Policy': 'require-corp',
+};
 const runtimePackage = JSON.parse(readFileSync(resolve(runtime, '../package.json'), 'utf8'));
 if (runtimePackage.version !== '1.23.2') {
   throw new Error('Review LICENSE for the new ONNX Runtime version before building.');
@@ -13,6 +17,8 @@ if (runtimePackage.version !== '1.23.2') {
 
 export default defineConfig({
   base: './',
+  server: { headers: isolationHeaders },
+  preview: { headers: isolationHeaders },
   resolve: {
     conditions: ['onnxruntime-web-use-extern-wasm', 'module', 'browser', 'development|production'],
   },
@@ -21,6 +27,10 @@ export default defineConfig({
     {
       name: 'local-onnx-runtime',
       configureServer(server) {
+        server.middlewares.use((_req, res, next) => {
+          for (const [name, value] of Object.entries(isolationHeaders)) res.setHeader(name, value);
+          next();
+        });
         server.middlewares.use('/LICENSE', (_req, res) => {
           res.setHeader('Content-Type', 'text/plain; charset=utf-8');
           createReadStream(license).pipe(res);

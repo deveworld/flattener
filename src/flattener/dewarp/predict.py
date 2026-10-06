@@ -61,7 +61,6 @@ that holds predictions of another pipeline is refused, as one of other weights i
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import re
 import sys
@@ -97,12 +96,9 @@ from .coords import (
 )
 from .model import (
     UVDOC_CONFIG,
-    UVDOC_REVISION,
-    UVDOC_WEIGHTS_SHA256,
     DewarpModelConfig,
     UVDocNet,
     count_parameters,
-    sha256_file,
 )
 
 DOCUNET_INPUT = re.compile(r"^(\d+)_(\d+) copy\.png$")
@@ -148,7 +144,6 @@ MIN_CROP_PIXELS = 2  # a crop box narrower or lower than this skips the pass
 # image, turned back, unless the two grids disagree by more than TTA_MAX_GAP (median node
 # distance as a share of the image side). A larger gap means the page's extent is in doubt
 # (a facing page, a page cut by the frame), and the average would land between two answers
-# (KR-Real dev: clean calls at most 0.022, such photos 0.036 and up).
 TTA_MODES = ("none", "flip")
 TTA_MAX_GAP = 0.03
 
@@ -171,39 +166,24 @@ def with_tta(dewarper: Dewarper, tta: str) -> Dewarper:
     return replace(dewarper, tta=tta)
 
 
-def load_dewarper(path: str | Path, *, device: str = "cpu", verify: bool = True) -> Dewarper:
-    """Load a dewarp checkpoint (sidecar-verified) or an upstream ``best_model.pkl``."""
+def load_dewarper(path: str | Path, *, device: str = "cpu") -> Dewarper:
+    """Load a dewarp checkpoint or weights in the upstream UVDoc format."""
     path = Path(path)
-    payload = read_checkpoint(path, verify=verify)
-    digest = sha256_file(path)
+    payload = read_checkpoint(path)
     if isinstance(payload, dict) and payload.get("schema") == CHECKPOINT_SCHEMA:
         config = DewarpModelConfig.from_dict(payload["model_config"])
         state = payload["model_state"]
-        info = {
-            "kind": "checkpoint",
-            "step": payload["step"],
-            "track": payload["track"],
-            "lineage": payload["lineage"],
-            "data_spec_sha256": payload["data_spec_sha256"],
-            "code_sha256": payload["code"]["sha256"],
-        }
+        info = {"kind": "checkpoint", "step": payload.get("step")}
     elif isinstance(payload, dict) and set(payload) == {"model_state"}:
         config, state = UVDOC_CONFIG, payload["model_state"]
-        info = {
-            "kind": "uvdoc",
-            "track": "external",
-            "license": "MIT" if digest == UVDOC_WEIGHTS_SHA256 else "unverified",
-            "sha256_matches_upstream": digest == UVDOC_WEIGHTS_SHA256,
-            "source": f"https://github.com/tanguymagne/UVDoc@{UVDOC_REVISION}",
-        }
+        info = {"kind": "uvdoc"}
     else:
         raise FlattenerError(Status.MODEL_ERROR, "invalid_checkpoint", f"{path}: unknown format")
     model = UVDocNet(config)
     model.load_state_dict(state)
     target = torch.device(device)
     info.update(
-        path=str(path),
-        sha256=digest,
+        path=str(path.resolve()),
         parameters=count_parameters(model)["total"],
         model_config=config.to_dict(),
     )
@@ -1054,7 +1034,7 @@ def rectify(
     elif quantize != "round":  # the checked image's samples, quantized the other way
         result.image = sample_rgb(image, backward_map, result.valid_mask, config.fill_rgb, quantize)
     result.metadata["dewarp"] = {
-        "model_sha256": dewarper.info.get("sha256"),
+        "model": dewarper.info.get("path"),
         "grid_convention": dewarper.config.grid_convention,
         "grid_size": None if grid is None else list(grid.shape[:2]),
         "output_size": list(size),
@@ -1110,50 +1090,15 @@ def _plain(value: Any) -> Any:
     return json.loads(json.dumps(value))
 
 
-def _input_sha256(image: NDArray[np.uint8]) -> str:
-    return hashlib.sha256(np.ascontiguousarray(image).tobytes()).hexdigest()
-
-
-def _still_matches(
-    previous: dict[str, Any],
-    task: BatchInput,
-    image: NDArray[np.uint8],
-    digest: str,
-    force_render: bool,
-) -> bool:
-    """Whether an earlier item was made from this very input: same label, pixels, size
-    and output size. A forced image is kept only by a run that also forces."""
-    if previous.get("action") not in ("written", "kept"):
-        return False
-    size = list(image.shape[:2])
-    output_size = size if task.output_size is None else list(task.output_size)
-    return (
-        previous.get("input") == task.source
-        and previous.get("input_sha256") == digest
-        and previous.get("size") == size
-        and previous.get("output_size") == output_size
-        and (force_render or not previous.get("forced"))
-    )
-
-
 def _batch_item(
     task: BatchInput,
     target: Path,
-    previous: dict[str, Any] | None,
-    force_render: bool,
     rectify_one: Rectifier,
 ) -> dict[str, Any]:
-    """Keep, render or refuse one input; the file at ``target`` always matches the item.
-
-    ``previous`` comes only from a record of the same pipeline, render settings,
-    quantization, inset and rerun settings. ``rectify_one`` renders the image."""
+    """Render one input and record its result."""
     item: dict[str, Any] = {"input": task.source, "output": task.output}
     try:
         image = task.load()
-        digest = _input_sha256(image)
-        if previous is not None and target.is_file():
-            if _still_matches(previous, task, image, digest, force_render):
-                return {**previous, "action": "kept"}
         result = rectify_one(image, task.output_size)
     except (FlattenerError, OSError) as error:
         target.unlink(missing_ok=True)  # an older image no longer matches this input
@@ -1180,7 +1125,6 @@ def _batch_item(
         reason=result.reason_code,
         forced=bool(result.metadata.get("forced_render")),
         size=list(image.shape[:2]),
-        input_sha256=digest,
         output_size=list(output_size),
         validation=_validation_summary(result),
         crops=dewarp.get("crops", []),
@@ -1321,20 +1265,9 @@ def rectify_batch(
 ) -> dict[str, Any]:
     """Rectify ``inputs`` into ``output_dir`` and record every item in ``predictions.json``.
 
-    Each item records the check status and reason code and the sha256 of the decoded
-    input. An image that fails a check is written only with ``force_render``
-    (``forced: true``). Without ``overwrite``, an output that ``predictions.json`` lists
-    as written is kept with its recorded status when the weights, pipeline, render
-    settings, quantization, inset, rerun settings, input label, input pixels and sizes are
-    unchanged (a forced image only by a forced run); every other input is rendered again.
-    A record without ``quantize`` predates the option and holds rounded images; one
-    without ``inset`` holds images without inset; one without ``rerun`` holds whole-image
-    predictions; one without ``pipeline`` was made by ``rectify``. A directory holding
-    predictions of other weights, of another pipeline or of an older format, or outputs
-    without a ``predictions.json``, is refused. The report names the current weights,
-    pipeline, quantization, inset and rerun settings before any image is written, and says
-    ``complete: false`` until the last input is done; images are written atomically. Each
-    item records its crop passes (``crops``, see ``crop_pass``).
+    Each item records its status, output dimensions and refinement passes.
+    Existing output directories require the same model and rendering settings unless
+    ``overwrite`` is set. Images are rendered again from the current inputs.
 
     ``rectifier(image, output_size)`` replaces ``rectify`` for another pipeline and needs
     a ``pipeline`` record (``pipeline_record``); it returns a ``RenderResult`` that
@@ -1369,10 +1302,9 @@ def rectify_batch(
     report_path = output_dir / "predictions.json"
     config = RenderConfig() if render_config is None else render_config
     config = replace(config, on_error="return")
-    previous_items: dict[str, dict[str, Any]] = {}
     if not overwrite and report_path.is_file():
         previous = json.loads(report_path.read_text(encoding="utf-8"))
-        if previous.get("model", {}).get("sha256") != dewarper.info["sha256"]:
+        if previous.get("model") != _plain(dewarper.info):
             raise FlattenerError(
                 Status.IO_ERROR, "output_exists", f"{output_dir} holds predictions of other weights"
             )
@@ -1389,12 +1321,6 @@ def rectify_batch(
                 f"{output_dir} holds predictions of another pipeline "
                 f"({recorded_pipeline(previous).get('name')!r}); use --overwrite",
             )
-        same_quantize = previous.get("quantize", "round") == quantize
-        same_inset = recorded_inset(previous.get("inset")) == recorded_inset(inset_info)
-        same_rerun = recorded_rerun(previous.get("rerun")) == rerun_info
-        same_render = previous.get("render_config") == _plain(asdict(config))
-        if same_render and same_quantize and same_inset and same_rerun:
-            previous_items = {item["output"]: item for item in previous.get("items", [])}
     elif not overwrite and any((output_dir / item.output).is_file() for item in inputs):
         raise FlattenerError(
             Status.IO_ERROR,
@@ -1439,8 +1365,7 @@ def rectify_batch(
     write_json(report_path, report)
 
     def one(task: BatchInput) -> dict[str, Any]:
-        previous = previous_items.get(task.output)
-        return _batch_item(task, output_dir / task.output, previous, force_render, rectifier)
+        return _batch_item(task, output_dir / task.output, rectifier)
 
     with ThreadPoolExecutor(workers) if workers > 1 else _Serial() as pool:
         for item in pool.map(one, inputs):

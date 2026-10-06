@@ -43,27 +43,13 @@ def test_a_dewarper_predicts_once_on_the_region_box_and_stamps_its_weights():
     assert metadata["page_region"]["coverage_enforced"] is False  # the caller's rectangle
     assert 0.8 < metadata["page_region"]["final_estimated_page_coverage"] < 0.95
     assert metadata["quality_status"] == "not_evaluated"
-    # Weights the ship gate never checked count as research.
-    assert metadata["model_sha256"] == "fake-dewarp"
-    assert metadata["model_id"] == "dewarp-checkpoint-fake-dewarp"
-    assert metadata["research"] is True and metadata["ship_gate"] is None
+    assert metadata["model"] == "fake-dewarp"
     # The same pass placed by hand and rendered once gives the same image.
     box = tuple(metadata["dewarp"]["box"])
     again = oracle_dewarper(PAGE, SIZE)
     grid, _ = run_view(again, image, crop_placement(box, 0.0, SIZE), crop_box=box)
     expected = render(image, dense_map(grid, (190, 150)), config=RETURN)
     assert result.image.tobytes() == expected.image.tobytes()
-
-    # The result carries the ship gate verdict of the weights.
-    for verdict in (
-        {"shippable": False, "research": True, "reasons": ["external_init"]},
-        {"shippable": True, "research": False, "reasons": []},
-    ):
-        stamped = oracle_dewarper(PAGE, SIZE, {**RELEASE_INFO, "ship_gate": verdict})
-        metadata = unwarp_page(image, stamped, (190, 150), region=_region(), config=RETURN).metadata
-        assert metadata["ship_gate"] == verdict
-        assert metadata["research"] is verdict["research"]
-        assert metadata["shippable"] is verdict["shippable"]
 
 
 def test_uvdoc_weights_are_densified_with_their_own_nodes():

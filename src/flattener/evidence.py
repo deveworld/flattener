@@ -1,34 +1,6 @@
-"""Evidence labels for the reports of ``flattener.dewarp`` and ``flattener.benchmark``.
+"""Measurement and model metadata for training and evaluation reports.
 
-Every report carries ``evidence``: what its numbers measure, where the model came from
-and whether they count as a real-photo result of a new model.
-
-``measurement``:
-
-* ``gt_crop_validation``: training validation on held-out samples with ground truth,
-  in views cut around the true page box (page, docunet, quarter turns, small page).
-* ``gt_full_frame_validation``: the same samples, whole frame.
-* ``training_loss``: losses on augmented training samples (training log, run status).
-* ``docunet_standard``: DocUNet crops scored with ``flattener.benchmark``.
-* ``docunet_stress``: DocUNet stress variants (whole photos, quarter turns, small pages).
-* ``uvdoc_benchmark``: the 50 UVDoc benchmark photos scored with ``flattener.benchmark``.
-* ``dir300_standard``: the 300 DIR300 photos scored with ``flattener.benchmark``.
-* ``predictions``: rectified images without scores (``predictions.json``).
-* ``evaluator_calibration``: the evaluator checked against published outputs.
-
-``model_provenance`` is ``own_checkpoint`` (a ``flattener.dewarp`` checkpoint),
-``own_previous_model`` (a model from the first study, such as page gate v0),
-``external_pretrained`` (for example the UVDoc MIT weights or published outputs) or
-``unknown``. ``training`` is ``smoke_training`` for an own checkpoint trained fewer than
-``SMOKE_STEPS`` optimizer steps and ``training`` above that. ``initialization`` says
-where an own checkpoint's training started: ``scratch``, ``external_pretrained`` (the
-UVDoc weights, also through a parent checkpoint) or ``unknown``.
-
-``new_model_real_photo`` is true only for real-photo benchmark results (DocUNet standard
-or stress, UVDoc benchmark, DIR300) of an own checkpoint that is not a smoke run, whatever its
-initialization. ``evidence_kind`` is one label for the whole record:
-``external_pretrained``, then ``smoke_training``, then ``new_model_real_photo``, and
-otherwise the measurement.
+Records contain the measurement type, model origin, training step and initialization.
 """
 
 from __future__ import annotations
@@ -46,12 +18,8 @@ MEASUREMENTS = (
     "predictions",
     "evaluator_calibration",
 )
-REAL_PHOTO_MEASUREMENTS = frozenset(
-    {"docunet_standard", "docunet_stress", "uvdoc_benchmark", "dir300_standard"}
-)
 PROVENANCES = ("own_checkpoint", "own_previous_model", "external_pretrained", "unknown")
 INITIALIZATIONS = ("scratch", "external_pretrained", "unknown")
-SMOKE_STEPS = 10_000
 
 
 def model_provenance(model: dict[str, Any] | None) -> tuple[str, int | None]:
@@ -96,28 +64,13 @@ def initialization(model: dict[str, Any] | None) -> str | None:
 
 
 def evidence(measurement: str, model: dict[str, Any] | None = None) -> dict[str, Any]:
-    """The ``evidence`` record of a report (see the module docstring)."""
+    """Record the measurement and available model metadata."""
     if measurement not in MEASUREMENTS:
         raise ValueError(f"measurement must be one of {MEASUREMENTS}")
     provenance, step = model_provenance(model)
-    training = None
-    if provenance == "own_checkpoint":
-        training = "training" if step is not None and step >= SMOKE_STEPS else "smoke_training"
-    real_photo = measurement in REAL_PHOTO_MEASUREMENTS and training == "training"
-    if provenance == "external_pretrained":
-        kind = "external_pretrained"
-    elif training == "smoke_training":
-        kind = "smoke_training"
-    elif real_photo:
-        kind = "new_model_real_photo"
-    else:
-        kind = measurement
     return {
-        "evidence_kind": kind,
         "measurement": measurement,
         "model_provenance": provenance,
-        "training": training,
         "checkpoint_step": step,
         "initialization": initialization(model),
-        "new_model_real_photo": real_photo,
     }

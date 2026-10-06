@@ -4,13 +4,14 @@ build-backend = "hatchling.build"
 
 [project]
 name = "flattener"
-version = "0.6.0"
+version = "1.0.0"
 description = "Document photo scanner: page detection, orientation, dewarping and one render"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 license = "Apache-2.0 AND MIT AND OFL-1.1"
 license-files = ["LICENSE", "src/flattener/assets/fonts/OFL.txt"]
 dependencies = [
+    "huggingface-hub>=1,<3",
     "numpy>=2.0,<3",
     "Pillow>=11,<13",
     "torch>=2.7,<3",
@@ -25,7 +26,7 @@ packages = ["src/flattener"]
 
 [tool.hatch.build.targets.sdist]
 include = [
-    "/src", "/tests", "/tools", "/examples", "/benchmarks",
+    "/src", "/tests", "/tools", "/docs",
     "/README.md", "/LICENSE",
     "/pyproject.toml", "/uv.lock", "/.python-version",
 ]
@@ -43,6 +44,7 @@ explicit = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
 addopts = "-ra"
 markers = ["training: executes training, backward, or optimizer steps; opt-in with --run-training"]
 

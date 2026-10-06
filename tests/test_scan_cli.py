@@ -53,13 +53,37 @@ def _lines(capsys):
     return [json.loads(line) for line in capsys.readouterr().out.splitlines()]
 
 
+def test_default_models_scan_without_weight_options(tmp_path, photo, capsys, monkeypatch):
+    loaded = _install(monkeypatch)
+    out = tmp_path / "out"
+    assert cli.main([str(photo), "--out", str(out)]) == 0
+    assert loaded[0][0] == (None,)
+    assert _lines(capsys)[0]["status"] == "success"
+    assert (out / "photo.jpg").is_file()
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        ["--bundle", "b.json", "--weights", "w.pt"],
+        ["--gate", "g.pt"],
+        ["--orient-weights", "o.pt"],
+    ],
+)
+def test_invalid_weight_options_fail_before_loading(photo, tmp_path, capsys, monkeypatch, options):
+    loaded = _install(monkeypatch)
+    assert cli.main([str(photo), "--out", str(tmp_path / "out"), *options]) == 2
+    assert loaded == []
+    assert json.loads(capsys.readouterr().err)["reason_code"] == "usage"
+
+
 def test_a_scanned_photo_writes_a_jpeg_and_its_record(tmp_path, photo, capsys, monkeypatch):
     loaded = _install(monkeypatch)
     out = tmp_path / "out"
     timing = tmp_path / "timing.jsonl"
     args = [str(photo), "--out", str(out), "--weights", "w.pt", "--orient-weights", "o.pt"]
     code = cli.main([*args, "--orient-threshold", "0.95", "--timing", str(timing), "--debug"])
-    assert code == 0 and loaded[0][1]["research"] is False
+    assert code == 0
     assert loaded[0][1]["orient_threshold"] == 0.95
     [line] = _lines(capsys)
     assert line["outcome"] == "rectified_with_warnings" and line["status"] == "success"
@@ -138,7 +162,7 @@ def test_manual_corrections_and_a_requested_perspective(tmp_path, photo, capsys,
     assert record["plan"]["provenance"]["orientation"] == "manual"
     assert record["plan"]["provenance"]["output_size"] == "manual"
     assert record["plan"]["provenance"]["aspect"] == "manual"
-    assert [view["pass"] for view in record["plan"]["views"]] == ["A"]
+    assert [view["pass"] for view in record["plan"]["views"]] == ["initial"]
     auto = [str(photo), "--out", str(tmp_path / "auto"), "--weights", "w"]
     assert cli.main(auto) == 0
     record = json.loads((tmp_path / "auto" / "photo.scan.json").read_text())
@@ -199,7 +223,7 @@ def test_timing_rows_cover_decoding_and_flag_cached_repeats(tmp_path, photo, cap
     assert all("model_load" not in row for row in rows[1:])
     assert [row["cached"] for row in rows] == [False, True, True]
     assert rows[1]["cache"]["hits"]["infer"] == 2
-    assert rows[0]["timings"]["read"] > 0 and "infer_pass_A" in rows[0]["timings"]
+    assert rows[0]["timings"]["read"] > 0 and "infer_pass_initial" in rows[0]["timings"]
     assert rows[0]["end_to_end"] >= rows[0]["timings"]["total"] + rows[0]["timings"]["save"] - 1e-9
     assert summarize_by_bucket(rows)["<=2"]["total"]["count"] == 1  # the fresh row only
     fresh = tmp_path / "fresh.jsonl"

@@ -10,7 +10,6 @@ import torch
 
 from flattener.dewarp.model import (
     UVDOC_CONFIG,
-    UVDOC_WEIGHTS_SHA256,
     DewarpModelConfig,
     UVDocNet,
     count_parameters,
@@ -49,8 +48,7 @@ def test_upstream_format_weights_load_into_matching_and_2d_only_models(tmp_path)
     torch.save({"model_state": source.state_dict()}, path)
     target = UVDocNet(TINY)
     lineage = load_uvdoc_weights(target, path)
-    assert lineage["kind"] == "uvdoc" and lineage["license"] == "unverified"  # not upstream
-    assert lineage["sha256_matches_upstream"] is False
+    assert lineage == {"kind": "uvdoc", "path": str(path)}
     for key, value in source.state_dict().items():
         assert torch.equal(value, target.state_dict()[key])
     load_uvdoc_weights(UVDocNet(DewarpModelConfig(**{**TINY.to_dict(), "with_3d": False})), path)
@@ -72,7 +70,7 @@ def test_forward_parity_with_upstream_uvdoc():
     upstream.load_state_dict(state["model_state"])
     upstream.eval()
     ours, lineage = uvdoc_model(repo / "model/best_model.pkl")
-    assert lineage["sha256"] == UVDOC_WEIGHTS_SHA256 and lineage["license"] == "MIT"
+    assert lineage["kind"] == "uvdoc"
     assert list(ours.state_dict()) == list(upstream.state_dict())
     generator = torch.Generator().manual_seed(20260926)
     with torch.no_grad():

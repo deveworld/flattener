@@ -1,8 +1,6 @@
-"""SyntheticDoc data tooling (tools/syntheticdoc): licenses, split, sample conversion and
+"""SyntheticDoc data tooling (tools/data/syntheticdoc): licenses, split, sample conversion and
 the compact training copy."""
 
-import hashlib
-import io
 import json
 import sys
 from pathlib import Path
@@ -14,83 +12,12 @@ from PIL import Image
 from flattener.dewarp.coords import flattener_to_syntheticdoc, pixels_to_flattener
 from flattener.dewarp.data import SPEC_SCHEMA, DataSpec, build_dataset
 
-TOOLS = Path(__file__).resolve().parents[1] / "tools" / "syntheticdoc"
+TOOLS = Path(__file__).resolve().parents[1] / "tools" / "data" / "syntheticdoc"
 sys.path.insert(0, str(TOOLS))
 
 import compact  # noqa: E402
-import fetch  # noqa: E402
-import sdcommon  # noqa: E402
-import sdlicense  # noqa: E402
-import sdsplit  # noqa: E402
 
-
-def test_licenses_normalize_and_the_split_is_group_disjoint():
-    cc = sdlicense.cc_license
-    base = "https://creativecommons.org/licenses/by"
-    assert cc(f"{base}/4.0/legalcode", "CC BY") == ("CC-BY-4.0", "clean")
-    assert cc("http://creativecommons.org/licenses/by-4.0/", "CC BY 4.0") == ("CC-BY-4.0", "clean")
-    assert cc(f"{base}-nc/3.0/", "CC BY NC") == ("CC-BY-NC-3.0", "nc")
-    for url, label, kind in (
-        (f"{base}-sa/4.0/deed.de", "CC BY SA", "sa"),
-        (f"{base}-nc-sa/4.0/", "", "nc"),
-        ("", "CC BY NC SA", "nc"),
-        ("", "CC BY-ND", "unknown"),
-        ("", "all rights reserved", "unknown"),
-    ):
-        assert cc(url, label)[1] == kind, label
-    assert sdlicense.background_class("CC0") == ("CC0-1.0", "clean")
-    assert sdlicense.background_class("CC-BY") == ("CC-BY", "clean")
-    assert sdlicense.background_class("CC BY-NC-ND 2.0")[1] == "nc"
-    assert sdlicense.background_class(None)[1] == "unknown"
-    assert sdlicense.combine("clean", "sa") == "sa"
-    assert sdlicense.combine("unknown", "nc", "clean") == "nc"
-
-    rng = np.random.default_rng(0)
-    rows = []
-    for k in range(6000):
-        split = "test" if k % 50 == 0 else ("val" if k % 10 == 0 else "train")
-        source = ["arxiv", "doab", "res_txt2img"][k % 3]
-        doc = f"{source}:{int(rng.integers(0, 400 if source != 'res_txt2img' else 5000))}"
-        mesh = f"fam{k % 6}/{int(rng.integers(0, 1500))}"
-        status = "success" if k % 97 else "incomplete"
-        rows.append((f"{split}/{k:07d}", split, status, source, "clean", doc, mesh))
-    out, info = sdsplit.assign(rows, val_fraction=0.02)
-    assert out == sdsplit.assign(rows, val_fraction=0.02)[0]
-    by = {r[0]: r for r in rows}
-    train = [by[u] for u, (s, _) in out.items() if s == "train"]
-    val = [by[u] for u, (s, _) in out.items() if s == "val"]
-    assert {r[5] for r in train}.isdisjoint({r[5] for r in val})
-    assert {r[6] for r in train}.isdisjoint({r[6] for r in val})
-    assert all(out[r[0]][0] == "official_test" for r in rows if r[1] == "test")
-    assert all(
-        out[r[0]][0] == "excluded_invalid" for r in rows if r[2] != "success" and r[1] != "test"
-    )
-    pool = sum(1 for r in rows if r[1] != "test" and r[2] == "success")
-    assert 0.01 < len(val) / pool < 0.035
-    assert info["leak_check"] == {"doc_groups_train_and_val": 0, "mesh_groups_train_and_val": 0}
-
-
-def test_convert_sample_full_resolution_and_fp16():
-    rng = np.random.default_rng(1)
-    png = io.BytesIO()
-    Image.new("RGB", (1024, 1440), (90, 120, 150)).save(png, "PNG")
-    bm = rng.uniform(-1, 1, (177, 121, 2)).astype(np.float32)
-    npy = io.BytesIO()
-    np.save(npy, bm)
-    jpeg, bm16_bytes, info = fetch.convert_sample(png.getvalue(), npy.getvalue())
-    with Image.open(io.BytesIO(jpeg)) as im:
-        assert im.format == "JPEG" and im.size == (1024, 1440) and im.mode == "RGB"
-    bm16 = np.load(io.BytesIO(bm16_bytes))
-    assert bm16.dtype == np.float16 and bm16.shape == (177, 121, 2)
-    assert np.abs(bm16.astype(np.float32) - bm).max() <= 2.0**-11 + 1e-9
-    assert info["backward_map"]["fp16_max_error_render_px_xy"][0] <= 0.25 + 1e-6
-    wrong = io.BytesIO()
-    np.save(wrong, bm[:100])
-    with pytest.raises(sdcommon.ConsistencyError):
-        fetch.convert_sample(png.getvalue(), wrong.getvalue())
-
-
-# Compact training copy (tools/syntheticdoc/compact.py) on a tiny download
+# Compact training copy (tools/data/syntheticdoc/compact.py) on a tiny download
 
 RENDER = (144, 102)  # (height, width) of the fake upstream renders
 
@@ -171,7 +98,7 @@ def test_compact_copy_is_readable_by_the_loader_and_keeps_its_settings_and_track
         image = output / entry["image"]
         with Image.open(image) as opened:
             assert opened.size == (57, 81) and entry["image_size"] == [81, 57]
-        assert hashlib.sha256(image.read_bytes()).hexdigest() == entry["image_sha256"]
+        assert image.stat().st_size == entry["image_bytes"]
         original = source / "samples" / entry["shard"] / f"{entry['sample_id'][-7:]}.bm16.npy"
         assert (output / entry["backward_map"]).read_bytes() == original.read_bytes()
         assert entry["original_render_size"] == list(RENDER) and entry["track"] == "release"

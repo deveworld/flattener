@@ -1,16 +1,6 @@
-"""Opt-in page localization, region-only cropping, and guarded rectification.
+"""Page detection and dewarping of a detected region.
 
-``crop_page`` crops the region (``ensure_page_coverage`` may widen a segmenter's
-footprint). ``unwarp_page`` takes a ``flattener.dewarp`` ``Dewarper``: the view is the
-region plus ``RERUN_MARGIN`` of its extent per side (whole pixels, clipped to the image),
-predicted once and placed in the source (``flattener.scan.placement``); the estimated page
-coverage of a segmenter's mask is a check only (``page_coverage_insufficient`` below
-``required_coverage``; a manual rectangle's coverage is recorded), and the map is the
-densification of the placed grid at ``output_size`` with the weights' own node placement
-(``dense_map(..., nodes=grid_convention)``: edge-aligned, or align_corners=True for UVDoc
-weights). The metadata names the weights (``model_id``, ``model_sha256``) and their ship
-gate stamp (``ship_gate``, ``shippable``, ``research``). Both paths sample the original
-once through ``flattener.render``.
+Model predictions map back to the original image before rendering.
 """
 
 from dataclasses import asdict
@@ -43,7 +33,6 @@ def estimate_page_region(image, segmenter, *, config=None):
         method="learned_page_region",
         source_size=list(image.shape[:2]),
         segmenter_id=getattr(segmenter, "model_id", None),
-        segmenter_sha256=getattr(segmenter, "model_sha256", None),
         segmenter_load_seconds=getattr(segmenter, "load_seconds", None),
     )
     try:
@@ -89,19 +78,8 @@ def _is_dewarper(predictor):
 
 
 def _dewarper_identity(dewarper):
-    """Model id, sha256 and ship-gate stamp of a ``Dewarper``: weights without a passing
-    ship-gate verdict (``scan.shippable.load_weights``) are research."""
-    info = dewarper.info
-    verdict = info.get("ship_gate")
-    shippable = isinstance(verdict, dict) and bool(verdict.get("shippable"))
-    sha256 = info.get("sha256")
-    return {
-        "model_sha256": sha256,
-        "model_id": info.get("model_id") or f"dewarp-{info.get('kind')}-{str(sha256)[:12]}",
-        "ship_gate": verdict if isinstance(verdict, dict) else None,
-        "shippable": shippable,
-        "research": not shippable,
-    }
+    """Describe the model used for this correction."""
+    return {"model": dewarper.info.get("path"), "model_id": dewarper.info.get("model_id")}
 
 
 def _dewarp_region_grid(image, dewarper, region, metadata):
@@ -116,7 +94,7 @@ def _dewarp_region_grid(image, dewarper, region, metadata):
     placement = crop_placement(box, 0.0, source_size)
     grid, record = run_view(dewarper, image, placement, crop_box=box)
     metadata["dewarp"] = {
-        "model_sha256": dewarper.info.get("sha256"),
+        "model": dewarper.info.get("path"),
         "grid_convention": dewarper.config.grid_convention,
         "grid_size": list(grid.shape[:2]),
         "box": list(box),

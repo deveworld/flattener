@@ -9,11 +9,50 @@ import {
   suggestFingers,
 } from './cleanup';
 import { createSteps, encode } from './previews';
-import type { Pixels, WorkerReply, WorkerRequest } from './types';
+import type { Backend, Pixels, WorkerReply, WorkerRequest } from './types';
 
 let models: Models | undefined;
+let preparation: Promise<Models> | undefined;
 let busy = false;
 const report = (event: WorkerReply) => self.postMessage(event);
+
+function prepare(base: string, backend?: Backend): Promise<Models> {
+  if (models) return Promise.resolve(models);
+  if (preparation) return preparation;
+  report({ type: 'preparation', state: 'loading' });
+  preparation = (async () => {
+    const candidate = new Models(await readManifest(base), base, (event) => {
+      if (event.type !== 'progress' || busy) report(event);
+    });
+    try {
+      await candidate.load(backend);
+      try {
+        await candidate.warmup();
+      } catch (error) {
+        if (candidate.backend !== 'webgpu') throw error;
+        await candidate.fallback();
+        await candidate.warmup();
+      }
+      models = candidate;
+      return candidate;
+    } catch (error) {
+      await candidate.dispose();
+      throw error;
+    }
+  })()
+    .then((candidate) => {
+      report({ type: 'preparation', state: 'ready' });
+      return candidate;
+    })
+    .catch((error) => {
+      report({ type: 'preparation', state: 'error' });
+      throw error;
+    })
+    .finally(() => {
+      preparation = undefined;
+    });
+  return preparation;
+}
 
 async function decode(file: File): Promise<Pixels> {
   if (file.size > 40 * 1024 * 1024)
@@ -55,6 +94,10 @@ async function decode(file: File): Promise<Pixels> {
 }
 
 self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
+  if (event.data.type === 'prepare') {
+    void prepare(event.data.base, event.data.backend).catch(() => {});
+    return;
+  }
   if (event.data.type !== 'scan' || busy) return;
   busy = true;
   try {
@@ -65,16 +108,13 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
       detail: 'Your photo stays in this browser.',
     });
     const source = await decode(file);
-    if (!models) {
-      const candidate = new Models(await readManifest(base), base, report);
-      try {
-        await candidate.load(backend);
-        models = candidate;
-      } catch (error) {
-        await candidate.dispose();
-        throw error;
-      }
-    }
+    if (!models)
+      report({
+        type: 'progress',
+        stage: 'Preparing scanner',
+        detail: 'Your photo will be processed automatically.',
+      });
+    models = await prepare(base, backend);
     const start = performance.now();
     let output;
     try {
@@ -138,7 +178,7 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
         passes,
         rotation,
         source: { width: source.width, height: source.height },
-        model: models.manifest.models.dewarp.sha256,
+        model: models.manifest.version,
       },
     });
   } catch (error) {

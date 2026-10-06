@@ -1,38 +1,20 @@
-"""OrientNet-1 trainer: ``python -m flattener.scan.orient_train --config run.json``.
+"""Train page orientation from upright grayscale pages.
 
-Reads a data directory written by ``tools/orient/build_data.py``: ``orient-data.json``
-(sources, tracks, licenses, counts) and ``manifest.jsonl`` (one upright grayscale page
-per row, with its page box). Each training item turns its page by a uniform quarter turn
-``k`` and applies the augmentation of design 2.2 inside the single sampling pass of
-``orient.page_views``: margins of -3% to +12% per side, skew (uniform +-5 degrees on
-flat pages, N(0, 3) degrees clipped to +-10 on warped crops), a smooth residual warp of
-up to 3% of the page on flat pages, then illumination, shadow, contrast, gamma, blur,
-noise and JPEG. Text-free pages train toward a uniform target.
-
-Loss: soft cross-entropy with label smoothing on the pooled logits, plus ``aux_weight``
-times the mean loss of the global-only and patch-only poolings. AdamW (no decay on
-biases and norms), warmup and cosine decay, AMP fp16 on CUDA. Item keys derive from the
-step, so a resumed run replays the same stream.
-
-Validation turns every labelled val page by all four ``k`` (text-free pages once), with
-augmentation seeded by the page id. It reports accuracy, macro accuracy, 90 and 180
-degree errors, NLL and ECE, fits a temperature and the threshold for at most
-``max_silent_error`` silent errors (``calibration``, source ``synthetic_val``), and keeps
-the best macro accuracy. Checkpoints (``orient.save_checkpoint``) use the dewarp record
-layout that ``orient.release_problems`` and ``flattener.scan.shippable`` read: ``track``,
-``lineage`` (a scratch start, then the training step), ``data_spec`` (the build's
-dewarp-schema spec) with ``data_spec_sha256``, and the license manifest ``data_sources``.
+Data comes from tools/data/orientation/build_data.py.
+Augmentation adds quarter turns, small rotations, warping and lighting changes.
+Validation measures all four orientations and fits the probability temperature.
+Checkpoints include weights, optimizer state, training settings and calibration.
 """
 
 from __future__ import annotations
 
 import argparse
 import contextlib
-import hashlib
 import io
 import json
 import math
 import os
+import random
 import sys
 import time
 import traceback
@@ -47,8 +29,8 @@ from PIL import Image, ImageFilter
 from torch.nn import functional as F
 
 from ..contracts import FlattenerError, Status
-from ..dewarp.checkpoint import environment, json_safe, sidecar_path, utc_now, write_json
-from ..dewarp.data import DataSpec, canonical_json, expand_path
+from ..dewarp.checkpoint import environment, json_safe, utc_now, write_json
+from ..dewarp.data import expand_path
 from ..dewarp.train import StepSampler, memory_stats, resolve_device, worker_init
 from ..evidence import evidence
 from . import orient
@@ -62,7 +44,6 @@ from .orient import (
     count_parameters,
     load_checkpoint,
     page_views,
-    release_problems,
     save_checkpoint,
 )
 
@@ -118,8 +99,6 @@ class OrientData:
             raise _error("invalid_data", f"{path}: needs schema {DATA_SCHEMA} and complete")
         manifest = root / summary["records_file"]
         data = manifest.read_bytes()
-        if hashlib.sha256(data).hexdigest() != summary.get("records_sha256"):
-            raise _error("stale_manifest", f"{manifest} does not match its recorded sha256")
         records = [json.loads(line) for line in data.decode("utf-8").splitlines() if line]
         for record in records:
             if record.get("kind") not in DATA_KINDS:
@@ -132,10 +111,6 @@ class OrientData:
         return self.summary["data_spec"]
 
     @property
-    def spec_sha256(self) -> str:
-        return DataSpec.from_dict(self.spec).sha256
-
-    @property
     def data_sources(self) -> dict[str, Any]:
         """The license manifest: per split, sources with track and license classes."""
         return self.summary["data_sources"]
@@ -144,12 +119,6 @@ class OrientData:
     def description(self) -> dict[str, Any]:
         """The build summary without creation time and environment (``orient_data``)."""
         return {k: v for k, v in self.summary.items() if k not in ("created_utc", "environment")}
-
-    @property
-    def sha256(self) -> str:
-        """Digest of the built pages (records and build spec); a resume must match it."""
-        keys = ("name", "track", "build_spec_sha256", "records_sha256", "sources")
-        return hashlib.sha256(canonical_json({k: self.summary.get(k) for k in keys})).hexdigest()
 
     @property
     def track(self) -> str:
@@ -361,7 +330,7 @@ def augmented_views(
 
 
 def _stable_seed(text: str) -> int:
-    return int.from_bytes(hashlib.sha256(text.encode("utf-8")).digest()[:8], "little")
+    return random.Random(int.from_bytes(text.encode("utf-8"), "little")).getrandbits(64)
 
 
 class OrientDataset(torch.utils.data.Dataset):
@@ -626,8 +595,8 @@ def commit_checkpoint(
 ) -> Path:
     """Save ``step_<step>.pt``, move ``latest.json`` (and ``best.json``), prune old files."""
     path = directory / f"step_{int(payload['step']):08d}.pt"
-    sidecar = save_checkpoint(path, payload)
-    pointer = {"file": path.name, "sha256": sidecar["sha256"], "step": payload["step"]}
+    save_checkpoint(path, payload)
+    pointer = {"file": path.name, "step": payload["step"]}
     write_json(directory / "latest.json", pointer)
     if is_best:
         write_json(directory / "best.json", {**pointer, "metrics": payload.get("metrics", {})})
@@ -639,30 +608,15 @@ def commit_checkpoint(
     for old in steps[: max(0, len(steps) - max(1, keep))]:
         if old.name not in protected:
             old.unlink(missing_ok=True)
-            sidecar_path(old).unlink(missing_ok=True)
     return path
 
 
 def _initialize(model: OrientNet, config: TrainConfig) -> dict[str, Any]:
-    """Load the initial weights and return their lineage record."""
     if config.init == "scratch":
         return {"kind": "scratch", "seed": config.seed}
     parent = load_checkpoint(config.init_path)
-    problems = release_problems(parent)
-    if config.track == "release" and problems:
-        raise _error("track_violation", f"release run cannot start from {problems}")
     model.load_state_dict(parent["model_state"])
-    return {
-        "kind": "checkpoint",
-        "path": str(config.init_path),
-        "sha256": json.loads(sidecar_path(Path(config.init_path)).read_text("utf-8"))["sha256"],
-        "step": parent["step"],
-        "track": parent["track"],
-        "data_spec_sha256": parent.get("data_spec_sha256"),
-        "data_spec": parent.get("data_spec"),
-        "code_sha256": (parent.get("code") or {}).get("sha256"),
-        "lineage": parent["lineage"],
-    }
+    return {"kind": "checkpoint", "path": str(config.init_path), "step": parent["step"]}
 
 
 def _check_resume(config: TrainConfig, payload: dict[str, Any], data: OrientData) -> None:
@@ -670,7 +624,7 @@ def _check_resume(config: TrainConfig, payload: dict[str, Any], data: OrientData
     changed = sorted(
         k for k in current if k not in RESUMABLE_CHANGES and current[k] != saved.get(k)
     )
-    if payload.get("orient_data_sha256") != data.sha256:
+    if payload.get("orient_data") != data.description:
         changed.append("data")
     if changed:
         raise _error("resume_mismatch", f"resume differs in {changed}; use a new output_dir")
@@ -794,7 +748,7 @@ def train(config: TrainConfig, *, resume: str = "auto") -> dict[str, Any]:
             metrics = dict(payload.get("metrics") or {})
             resumes = [
                 *payload.get("resumes", []),
-                {"step": step, "code_sha256": code["sha256"], "utc": utc_now()},
+                {"step": step, "utc": utc_now()},
             ]
         else:
             lineage = [
@@ -802,9 +756,6 @@ def train(config: TrainConfig, *, resume: str = "auto") -> dict[str, Any]:
                 {
                     "kind": "train",
                     "track": config.track,
-                    "data_spec_sha256": data.spec_sha256,
-                    "orient_data_sha256": data.sha256,
-                    "code_sha256": code["sha256"],
                     "started_utc": utc_now(),
                 },
             ]
@@ -853,10 +804,8 @@ def train(config: TrainConfig, *, resume: str = "auto") -> dict[str, Any]:
                     "model_config": config.model.to_dict(),
                     "train_config": config.to_dict(),
                     "data_spec": data.spec,
-                    "data_spec_sha256": data.spec_sha256,
                     "data_sources": data.data_sources,
                     "orient_data": data.description,
-                    "orient_data_sha256": data.sha256,
                     "code": code,
                     "lineage": lineage,
                     "resumes": resumes,

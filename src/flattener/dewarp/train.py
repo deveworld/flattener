@@ -14,8 +14,8 @@ small page on a canvas) and logs a grid endpoint error per view in pixels of
 first view (``page`` by default); the others are logged only, and the best records
 which view chose it. Samples without a valid target node are counted as
 ``not_evaluable`` and left out; a validation with nothing to evaluate picks no best.
-The best metric carries a signature of everything that defines validation; a resume
-with a different signature starts a new best. Every new best is saved.
+The best metric carries a settings of everything that defines validation; a resume
+with a different settings starts a new best. Every new best is saved.
 
 Loss (UVDoc ``train.py`` defaults): 5 * L1(2-D grid) + 5 * L1(3-D grid, only
 samples that have one) + optional reconstruction L1 (UVDoc: 1.0 from epoch 10
@@ -23,14 +23,6 @@ of 21), all masked by grid-node validity. ``loss_axis`` adds the axis-alignment 
 (``axis_alignment_loss``, after the AADD paper, arXiv 2507.15000) and ``loss_page`` the
 grid error on the flat page (``page_space_loss``).
 
-``examples/dewarp/train-research-uvdoc-recipe.json`` maps the upstream
-schedule to steps: batch 8, two optimizer steps (Doc3D, UVDoc) per mixDataset
-batch over the 74,527 Doc3D ``traindoc.txt`` ids = 2 * 9,316 steps per epoch,
-21 epochs = 391,272 steps; reconstruction from epoch 10 (step 186,320);
-constant lr, then linear decay from about epoch 10.5 (``decay_start`` 0.5);
-rotation (p 0.5, 30 deg) only on UVDoc samples. Remaining differences:
-batches mix sources (upstream alternates single-source batches), AMP fp16,
-fractional crop margins, approximate appearance augmentation.
 """
 
 from __future__ import annotations
@@ -38,7 +30,6 @@ from __future__ import annotations
 import argparse
 import contextlib
 import csv
-import hashlib
 import json
 import math
 import os
@@ -57,8 +48,7 @@ from ..contracts import FlattenerError, Status
 from ..evidence import evidence
 from .checkpoint import (
     CHECKPOINT_SCHEMA,
-    checkpoint_sha256,
-    code_fingerprint,
+    code_version,
     commit_checkpoint,
     environment,
     json_safe,
@@ -76,14 +66,11 @@ from .data import (
     DewarpDataset,
     ViewConfig,
     build_dataset,
-    canonical_json,
     expand_path,
     require_track,
-    target_code_sha256,
     to_float_images,
 )
 from .model import (
-    UVDOC_WEIGHTS_SHA256,
     DewarpModelConfig,
     UVDocNet,
     count_parameters,
@@ -318,9 +305,8 @@ class TrainConfig:
         return self.val_select or self.val_views[0].name
 
 
-def validation_signature(config: TrainConfig, val_sources: list[dict[str, Any]]) -> str:
-    """sha256 of everything that defines a validation result: views, selection, sample
-    limit, reference size, model sizes and the validation data (ids and contents)."""
+def validation_settings(config: TrainConfig, val_sources: list[dict[str, Any]]) -> dict[str, Any]:
+    """Settings needed to compare validation results across training runs."""
     batch = config.val_batch_size or config.batch_size
     body = {
         "views": [view.to_dict() for view in config.val_views],
@@ -331,18 +317,18 @@ def validation_signature(config: TrainConfig, val_sources: list[dict[str, Any]])
         "grid_size": list(config.model.grid_size),
         "data": val_sources,
     }
-    return hashlib.sha256(canonical_json(body)).hexdigest()
+    return body
 
 
 def carry_best(
-    best: dict[str, Any] | None, signature: str
+    best: dict[str, Any] | None, settings: dict[str, Any]
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     """A resumed best and the note of a dropped one.
 
-    The best carries over when it was measured under ``signature``; otherwise the run
+    The best carries over when it was measured under ``settings``; otherwise the run
     starts a new best and the note records the old step and EPE.
     """
-    if best is None or best.get("signature") == signature:
+    if best is None or best.get("settings") == settings:
         return best, None
     return None, {"step": best.get("step"), "epe_px": best.get("epe_px")}
 
@@ -719,51 +705,20 @@ def _parameter_groups(model: torch.nn.Module, weight_decay: float) -> list[dict[
 
 
 def _initialize(model: UVDocNet, config: TrainConfig) -> dict[str, Any]:
-    """Load the initial weights and return their lineage record.
-
-    The weights do not depend on the input or grid size, so a checkpoint trained at
-    another size initializes this model; the record keeps the parent's model config
-    and, when the parent has one, its data spec.
-    """
+    """Initialize the model from scratch or an existing checkpoint."""
     if config.init == "scratch":
         return {"kind": "scratch", "seed": config.seed}
     if config.init == "uvdoc":
         try:
-            lineage = load_uvdoc_weights(model, config.init_path)
+            return load_uvdoc_weights(model, config.init_path)
         except ValueError as error:
             raise _error("invalid_init", str(error)) from error
-        if config.track == "release" and not lineage["sha256_matches_upstream"]:
-            raise _error(
-                "track_violation",
-                f"release run needs the published UVDoc weights (sha256 {UVDOC_WEIGHTS_SHA256}); "
-                f"{config.init_path} has {lineage['sha256']}",
-            )
-        return lineage
-    parent = load_checkpoint(config.init_path)  # sha256 verified against its sidecar
-    if config.track == "release" and parent.get("track") != "release":
-        raise _error(
-            "track_violation", f"release run cannot start from {parent.get('track')} weights"
-        )
+    parent = load_checkpoint(config.init_path)
     state = parent["model_state"]
     if model.out_point_positions3D is None:
         state = {k: v for k, v in state.items() if not k.startswith("out_point_positions3D.")}
     model.load_state_dict(state)
-    record = {
-        "kind": "checkpoint",
-        "path": str(config.init_path),
-        "sha256": checkpoint_sha256(config.init_path),
-        "step": parent["step"],
-        "track": parent["track"],
-        "model_config": parent.get("model_config"),
-        "data_spec_sha256": parent["data_spec_sha256"],
-        "code_sha256": parent["code"]["sha256"],
-        "lineage": parent["lineage"],
-    }
-    if isinstance(parent.get("data_spec"), dict):
-        # The ship gate checks the data spec of every training step in the chain. With
-        # the parent's spec here, the child's record passes without the parent's sidecar.
-        record["data_spec"] = parent["data_spec"]
-    return record
+    return {"kind": "checkpoint", "path": str(config.init_path), "step": parent["step"]}
 
 
 class _Logger:
@@ -795,9 +750,7 @@ class _Logger:
 
 
 def code_record() -> dict[str, Any]:
-    """The checkpoint's ``code``: file hashes (``code_fingerprint``) and the target-code
-    digest (``target_code_sha256``)."""
-    return {**code_fingerprint(), "targets_sha256": target_code_sha256()}
+    return code_version()
 
 
 def _check_resume(
@@ -807,30 +760,17 @@ def _check_resume(
     sources: dict[str, Any],
     code: dict[str, Any],
 ) -> None:
-    """Refuse a resume whose config, track, data spec, indexed samples, target
-    conventions (``DewarpDataset.describe``) or target code (``target_code_sha256``)
-    changed. A checkpoint without the target-code digest must have the same
-    ``coords.py`` bytes."""
-    saved = payload["train_config"]
-    current = config.to_dict()
+    """Check the saved training configuration before restoring optimizer state."""
+    saved, current = payload["train_config"], config.to_dict()
     changed = sorted(
         k for k in current if k not in RESUMABLE_CHANGES and current[k] != saved.get(k)
     )
     if payload["track"] != config.track:
         changed.append("track")
-    if payload["data_spec_sha256"] != spec.sha256:
+    if payload.get("data_spec") != spec.to_dict():
         changed.append("data spec")
-    saved_sources = payload.get("data_sources") or {}
-    if any("targets_sha256" not in source for split in saved_sources.values() for source in split):
-        changed.append("data sources (the checkpoint predates the target-convention signature)")
-    elif saved_sources != sources:  # re-converted, re-split, relabelled or reinterpreted data
-        changed.append("data sources (samples, license classes or target conventions)")
-    saved_code = payload.get("code") or {}
-    if "targets_sha256" in saved_code:
-        if saved_code["targets_sha256"] != code["targets_sha256"]:
-            changed.append("target code (coords.py, grid readers, loaders or crop mapping)")
-    elif (saved_code.get("files") or {}).get("coords.py") != code["files"].get("coords.py"):
-        changed.append("coords.py (the checkpoint predates the target-code digest)")
+    if payload.get("data_sources") != sources:
+        changed.append("data sources")
     if changed:
         raise _error("resume_mismatch", f"resume differs in {changed}; use a new output_dir")
 
@@ -904,7 +844,7 @@ def train(config: TrainConfig, *, resume: str = "auto") -> dict[str, Any]:
             spec, split="val", train=False, views=config.val_views, **dataset_args
         )
         data_sources = _data_sources(train_set, val_set)
-        signature = validation_signature(config, data_sources["val"])
+        settings = validation_settings(config, data_sources["val"])
 
         if resume == "auto":
             resume_path = latest_checkpoint(checkpoints)
@@ -932,12 +872,12 @@ def train(config: TrainConfig, *, resume: str = "auto") -> dict[str, Any]:
             counters.update(payload.get("counters", {}))
             resumes = [
                 *payload.get("resumes", []),
-                {"step": step, "code_sha256": code["sha256"], "utc": utc_now()},
+                {"step": step, "utc": utc_now()},
             ]
-            best, dropped = carry_best(best, signature)
+            best, dropped = carry_best(best, settings)
             if dropped is not None:
                 resumes[-1]["best_reset"] = dropped
-                note = {"resumed_step": step, "reason": "validation signature changed"}
+                note = {"resumed_step": step, "reason": "validation settings changed"}
                 retire_best(checkpoints, step, note)
         else:
             lineage = [
@@ -945,8 +885,6 @@ def train(config: TrainConfig, *, resume: str = "auto") -> dict[str, Any]:
                 {
                     "kind": "train",
                     "track": config.track,
-                    "data_spec_sha256": spec.sha256,
-                    "code_sha256": code["sha256"],
                     "started_utc": utc_now(),
                 },
             ]
@@ -1011,7 +949,6 @@ def train(config: TrainConfig, *, resume: str = "auto") -> dict[str, Any]:
                     "model_config": config.model.to_dict(),
                     "train_config": config.to_dict(),
                     "data_spec": spec.to_dict(),
-                    "data_spec_sha256": spec.sha256,
                     "data_sources": data_sources,
                     "counters": counters,
                     "code": code,
@@ -1038,7 +975,7 @@ def train(config: TrainConfig, *, resume: str = "auto") -> dict[str, Any]:
             nonlocal best, metrics, validated_step
             if val_loader is None or validated_step == step:
                 return False
-            metrics = {**validate(model, val_loader, config, device), "signature": signature}
+            metrics = {**validate(model, val_loader, config, device), "settings": settings}
             validated_step = step
             for view in config.val_views:
                 crop = "gt_full_frame_validation" if view.crop == "full_frame" else None

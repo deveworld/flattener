@@ -28,7 +28,6 @@ page crop seen by a tilted camera, the frame corners moved by up to a fixed frac
 
 from __future__ import annotations
 
-import hashlib
 import io
 import json
 import math
@@ -71,7 +70,7 @@ class CompositeConfig:
     - ``turns``: weights of counter-clockwise quarter turns by 0, 90, 180 and 270
       degrees. The target stays the upright page and the item's ``turn`` holds 0-3.
     - ``background_dir``: folder with ``manifest.json`` and texture files
-      (``tools/backgrounds/fetch_polyhaven.py``). Without it every background is
+      (``tools/data/backgrounds/fetch_polyhaven.py``). Without it every background is
       procedural. ``${VAR}`` expands when the dataset opens it.
     - ``texture_prob``: chance of a texture over a procedural surface.
     - ``panel_prob``: chance of a second flat surface in the background (a table edge,
@@ -485,7 +484,6 @@ class BackgroundBank:
             raise PermissionError(f"{self.directory}: licenses not allowed for {refused[:3]}")
         self.files = [str(entry["file"]) for entry in entries]
         self.licenses = Counter(str(entry["license"]) for entry in entries)
-        self.manifest_sha256 = hashlib.sha256(raw).hexdigest()
         self.cache_size = cache_size
         self._cache: OrderedDict[tuple[int, int], Image.Image] = OrderedDict()
         self._sides: dict[int, float] = {}
@@ -503,7 +501,6 @@ class BackgroundBank:
         return {
             "files": len(self.files),
             "licenses": dict(sorted(self.licenses.items())),
-            "manifest_sha256": self.manifest_sha256,
         }
 
     def tiled(self, index: int, count: int = 2) -> Image.Image:

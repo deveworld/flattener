@@ -40,6 +40,28 @@ test('color correction removes a smooth shadow and warm cast without washing out
   assert.deepEqual(source.data, before, 'Source never mutates');
 });
 
+test('lighting interpolation preserves pixel centers and border colors', () => {
+  const source: Pixels = {
+    width: 3,
+    height: 3,
+    data: new Uint8ClampedArray(Array.from({ length: 9 }, () => [100, 100, 100, 255]).flat()),
+  };
+  const field = {
+    width: 2,
+    height: 2,
+    data: new Float32Array([128, 192, 160, 224].flatMap((v) => [v, v, v])),
+  };
+  const corrected = cleanDocument(source, emptyMask(3, 3), true, field);
+  const expected = [128, 160, 192, 144, 176, 208, 160, 192, 224];
+  assert.deepEqual(
+    Array.from(corrected.data),
+    expected.flatMap((paper) => {
+      const value = Math.round((100 * 248) / paper);
+      return [value, value, value, 255];
+    }),
+  );
+});
+
 test('colored ink keeps its hue and original color is an exact no-op', () => {
   const source = paper();
   for (let y = 70; y < 76; y++)

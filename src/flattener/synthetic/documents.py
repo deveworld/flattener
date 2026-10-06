@@ -6,7 +6,6 @@ environment produce the same pixels. No system fonts, network calls, copied
 documents, external photographs, or global random state are used.
 """
 
-import hashlib
 import io
 from dataclasses import dataclass
 from functools import lru_cache
@@ -19,7 +18,6 @@ from PIL import Image, ImageDraw, ImageFont, features
 from PIL import __version__ as pillow_version
 
 DOCUMENT_VERSION = "2.0"  # 2.0: English text only
-FONT_SHA256 = "194018e6b2b293a7964f037b25c0249ce1418bc9ab3c971060a03aa57861e252"
 FONT_COMMIT = "b38c5c93af322c45f633e17ac440ec1e6c94d489"
 FONT_SOURCE = (
     f"https://raw.githubusercontent.com/google/fonts/{FONT_COMMIT}/ofl/notosanskr/"
@@ -69,8 +67,6 @@ class Document:
 def _font_bytes() -> bytes:
     asset = files("flattener").joinpath("assets", "fonts", "NotoSansKR[wght].ttf")
     data = asset.read_bytes()
-    if hashlib.sha256(data).hexdigest() != FONT_SHA256:
-        raise RuntimeError("Bundled Noto Sans KR font failed its SHA-256 integrity check")
     return data
 
 
@@ -116,8 +112,7 @@ def generate_document(
     """Generate a flat RGB page with English text, a table, and shapes.
 
     ``output_size`` is (height, width), each dimension in [128, 2048]. The ID is
-    a document-group identifier, not a path. It contributes to a SHA-256-derived
-    local generator state, so distinct IDs remain independent at a common seed.
+    a document-group identifier. The ID and seed initialize a local random generator.
     Generated prose, numbers, and vectors use Apache-2.0; the bundled font has
     its separate OFL-1.1 license.
     """
@@ -134,7 +129,7 @@ def generate_document(
         raise ValueError("output_size must be a (height, width) tuple with sides in [128, 2048]")
     height, width = output_size
     identity = document_id.encode("utf-8") + b"\0" + seed.to_bytes(8, "little")
-    rng_seed = int.from_bytes(hashlib.sha256(identity).digest()[:16], "little")
+    rng_seed = int.from_bytes(identity, "little")
     rng = np.random.default_rng(rng_seed)
     supersample = 3
     h, w = height * supersample, width * supersample
@@ -241,7 +236,6 @@ def generate_document(
     )
     write(w - margin - small.getlength("01 / 01"), h * 0.90, "01 / 01", small)
     result = np.asarray(image.resize((width, height), Image.Resampling.LANCZOS)).copy()
-    sha256 = hashlib.sha256(result.tobytes(order="C")).hexdigest()
     metadata = {
         "document_id": document_id,
         "document_group": document_id,
@@ -251,8 +245,6 @@ def generate_document(
         "derived_rng_seed": rng_seed,
         "output_size": [height, width],
         "original_aspect_ratio": width / height,
-        "source_sha256": sha256,
-        "source_hash_encoding": "RGB uint8 C-order raw pixels; size recorded separately",
         "settings": {
             "supersample": supersample,
             "resampling": "lanczos",
@@ -268,7 +260,6 @@ def generate_document(
         "font": {
             "family": "Noto Sans KR",
             "version": "2.004",
-            "sha256": FONT_SHA256,
             "source": FONT_SOURCE,
             "commit": FONT_COMMIT,
             "license": "OFL-1.1",

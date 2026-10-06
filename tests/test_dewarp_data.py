@@ -1,8 +1,6 @@
 """Dewarp data adapters, license tracks, views, seeded augmentation and the data
-signature, on tiny fixtures."""
+settings, on tiny fixtures."""
 
-import hashlib
-import inspect
 import json
 import pickle
 
@@ -14,7 +12,6 @@ from PIL import Image
 
 import flattener.dewarp.data as dewarp_data
 from flattener import FlattenerError
-from flattener.dewarp import coords
 from flattener.dewarp.coords import edge_positions, flattener_to_syntheticdoc, pixels_to_flattener
 from flattener.dewarp.data import (
     COMPACT_SCHEMA,
@@ -37,7 +34,7 @@ from flattener.dewarp.train import (
     _check_resume,
     _data_sources,
     code_record,
-    validation_signature,
+    validation_settings,
 )
 
 INPUT, GRID = (48, 36), (5, 4)
@@ -268,9 +265,9 @@ def test_release_track_refuses_research_sources(tmp_path):
 
 
 def test_sources_refuse_benchmark_folders(tmp_path):
-    from flattener.benchmark.uvdoc import MANIFEST_SCHEMA
+    from tools.benchmark.uvdoc import MANIFEST_SCHEMA
 
-    bench = tmp_path / "uvdoc-bench"  # as `python -m flattener.benchmark uvdoc-prepare` leaves it
+    bench = tmp_path / "uvdoc-bench"  # as `python -m tools.benchmark uvdoc-prepare` leaves it
     for folder in ("img", "grid2d", "grid3d", "metadata_sample"):
         (bench / folder).mkdir(parents=True)
     Image.fromarray(_image((64, 48))).save(bench / "img/00000.png")
@@ -304,7 +301,7 @@ def test_sources_refuse_benchmark_folders(tmp_path):
 
 
 def _write_compact(root, *, track="release", count=2):
-    """A tiny copy in the layout written by tools/syntheticdoc/compact.py."""
+    """A tiny copy in the layout written by tools/data/syntheticdoc/compact.py."""
     root.mkdir(parents=True)
     (root / "compact.json").write_text(json.dumps({"schema": COMPACT_SCHEMA, "track": track}))
     lines = []
@@ -326,13 +323,12 @@ def _write_compact(root, *, track="release", count=2):
         }
         for key, name in (("image", f"c{index}.jpg"), ("backward_map", f"c{index}.npy")):
             data = (root / name).read_bytes()
-            entry[f"{key}_sha256"] = hashlib.sha256(data).hexdigest()
             entry[f"{key}_bytes"] = len(data)
         lines.append(json.dumps(entry) + "\n")
     (root / "manifest.jsonl").write_text("".join(lines))
 
 
-def test_compact_source_checks_hashes_sizes_and_track(tmp_path):
+def test_compact_source_checks_sizes_and_track(tmp_path):
     _write_compact(tmp_path / "compact")
     source = {
         "name": "sd",
@@ -344,23 +340,13 @@ def test_compact_source_checks_hashes_sizes_and_track(tmp_path):
     spec = _spec(tmp_path, [source], track="release")
     dataset = _build(spec, track="release")
     assert len(dataset) == 2 and _fills_crop(dataset[0]["grid2d"][0].numpy(), 0.08)
-    digest = dataset.describe()[0]["content_sha256"]
-    # A re-encoded file under the same id changes the content digest (resume refuses).
     manifest = tmp_path / "compact/manifest.jsonl"
     entries = [json.loads(line) for line in manifest.read_text().splitlines()]
-    entries[0]["image_sha256"] = "0" * 64
-    manifest.write_text("".join(json.dumps(e) + "\n" for e in entries))
-    assert _build(spec, track="release").describe()[0]["content_sha256"] != digest
     # A file that no longer matches the manifest size is refused before training.
     Image.fromarray(_image((60, 44), 9)).save(tmp_path / "compact/c1.jpg", quality=50)
     with pytest.raises(FlattenerError) as error:
         _build(spec, track="release")
     assert error.value.reason_code == "stale_manifest"
-    del entries[1]["image_sha256"]
-    manifest.write_text("".join(json.dumps(e) + "\n" for e in entries))
-    with pytest.raises(FlattenerError, match="sha256"):
-        _build(spec, track="release")
-    entries[1]["image_sha256"] = "0" * 64
     del entries[1]["backward_map_bytes"]
     manifest.write_text("".join(json.dumps(e) + "\n" for e in entries))
     with pytest.raises(FlattenerError, match="bytes missing"):
@@ -542,12 +528,12 @@ def test_evaluation_views_keep_exact_targets(tmp_path):
     assert image[:, torch.from_numpy(outside)].float().std() > 1  # canvas grain and shading
 
 
-# The data signature covers how targets are read from the files.
+# The data settings covers how targets are read from the files.
 #
 # A resume compares ``data_sources`` (``DewarpDataset.describe``) with the checkpoint.
 # Records that keep their files and ids but change how the stored map is interpreted
 # (``backward_map_convention``) or a compact copy whose settings changed (``compact.json``
-# ``scale``) give other targets, so the resume is refused and the validation signature
+# ``scale``) give other targets, so the resume is refused and the validation settings
 # changes.
 
 TINY = DewarpModelConfig(input_size=(64, 48), grid_size=(5, 4), num_filter=4)
@@ -580,7 +566,6 @@ def _write_samples(root, *, compact=False):
         if compact:
             for key in ("image", "backward_map"):
                 data = (root / entry[key]).read_bytes()
-                entry[f"{key}_sha256"] = hashlib.sha256(data).hexdigest()
                 entry[f"{key}_bytes"] = len(data)
         lines.append(json.dumps(entry) + "\n")
     (root / "manifest.jsonl").write_text("".join(lines))
@@ -589,7 +574,7 @@ def _write_samples(root, *, compact=False):
         (root / "compact.json").write_text(json.dumps(settings))
 
 
-def _signature_spec(tmp_path, kind):
+def _training_spec(tmp_path, kind):
     sources = [
         {
             "name": f"sd-{split}",
@@ -656,7 +641,7 @@ def _resume_payload(config, spec, sources):
     return {
         "train_config": config.to_dict(),
         "track": "release",
-        "data_spec_sha256": spec.sha256,
+        "data_spec": spec.to_dict(),
         "data_sources": sources,
         "code": CODE,
     }
@@ -667,7 +652,7 @@ def test_resume_refuses_records_read_in_another_coordinate_convention(tmp_path):
         root = tmp_path / case
         root.mkdir()
         _write_samples(root / "data", compact=kind == "syntheticdoc_compact")
-        spec = _signature_spec(root, kind)
+        spec = _training_spec(root, kind)
         config = _config(root)
         before = _sources(spec, config)
         payload = _resume_payload(config, spec, before)
@@ -677,35 +662,12 @@ def test_resume_refuses_records_read_in_another_coordinate_convention(tmp_path):
         with pytest.raises(FlattenerError, match="resume") as error:
             _check_resume(config, payload, spec, after, CODE)
         assert error.value.reason_code == "resume_mismatch", case
-        before_signature = validation_signature(config, before["val"])
-        assert validation_signature(config, after["val"]) != before_signature, case
+        before_settings = validation_settings(config, before["val"])
+        assert validation_settings(config, after["val"]) != before_settings, case
 
 
-def test_resume_refuses_other_target_code_and_conventions(tmp_path, monkeypatch):
+def test_source_description_includes_the_target_grid_size(tmp_path):
     _write_samples(tmp_path / "data")
-    spec = _signature_spec(tmp_path, "converted")
-    config = _config(tmp_path)
-    sources = _sources(spec, config)
-    monkeypatch.setitem(dewarp_data.TARGET_CONVENTIONS, "version", 2)
-    assert _sources(spec, config) != sources
-    monkeypatch.undo()
+    spec = _training_spec(tmp_path, "converted")
     finer = DewarpModelConfig(input_size=(64, 48), grid_size=(9, 7), num_filter=4)
     assert _sources(spec, _config(tmp_path, finer))["val"][0]["grid_size"] == [9, 7]
-    payload = _resume_payload(config, spec, sources)
-    _check_resume(config, payload, spec, sources, code_record())
-    source = inspect.getsource
-
-    def edited(part):  # coords.py with one more statement
-        return source(part) + "\nEXTRA = 1\n" if part is coords else source(part)
-
-    monkeypatch.setattr(inspect, "getsource", edited)
-    changed = code_record()
-    assert changed["targets_sha256"] != CODE["targets_sha256"]
-    with pytest.raises(FlattenerError, match="target code"):
-        _check_resume(config, payload, spec, sources, changed)
-    # A checkpoint written before the digest resumes only with the same coords.py bytes.
-    older = {key: value for key, value in CODE.items() if key != "targets_sha256"}
-    _check_resume(config, {**payload, "code": older}, spec, sources, changed)
-    files = {**older["files"], "coords.py": "0" * 64}
-    with pytest.raises(FlattenerError, match="predates the target-code digest"):
-        _check_resume(config, {**payload, "code": {**older, "files": files}}, spec, sources, CODE)

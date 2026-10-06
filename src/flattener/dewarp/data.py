@@ -6,7 +6,7 @@ stay private). Doc3D, the UVDoc dataset and the raw SyntheticDoc layout are
 research-only kinds. A release-track dataset accepts release sources only, and a
 converted release source accepts only samples labelled release with an allowlisted
 license class. Source roots may name environment variables (``${FLATTENER_DATA}/...``);
-the spec hash uses the unexpanded text. A source whose root holds benchmark data
+A source whose root holds benchmark data
 (``benchmark_marker``) stops with ``benchmark_data`` on either track.
 
 Items hold the model input as uint8 ``image`` (3, H, W), the target 2-D grid in the
@@ -29,7 +29,7 @@ Converted layout (``kind: "converted"``, written by the data pipeline)::
      "image": "relative/path.jpg", "backward_map": "relative/path.npy",
      "backward_map_convention": "flattener" | "syntheticdoc",
      "original_render_size": [1440, 1024], "track": "release",
-     "license_class": "clean", "image_sha256": "...", "backward_map_sha256": "...",
+     "license_class": "clean", "image_bytes": 12345, "backward_map_bytes": 6789,
      "grid3d": "relative/path.g3.npy", "grid3d_convention": "page_frame", ...}
 
 Paths are relative to the JSON document that lists them. ``backward_map`` is a
@@ -37,15 +37,15 @@ center-aligned (H, W, 2) float16/float32 map holding flattener values, or raw
 SyntheticDoc values when the convention is ``"syntheticdoc"`` (then
 ``original_render_size`` (H, W) of the upstream render is required; the image may be
 a resized copy). Entries without ``split`` belong to the source's split. The optional
-sha256 and ``*_bytes`` fields feed the content digest and the size check. The optional
+``*_bytes`` fields allow a size check. The optional
 ``grid3d`` is a center-aligned (H, W, 3) map of the surface point under each map point
 in the page's own frame (``page_frame``: x across, y down, z away from the camera,
 page-width units, centred), the 3-D target; it does not depend on the camera, so crops,
 turns and composites leave it as it is.
 
 ``kind: "syntheticdoc_compact"`` reads the training copy written by
-``tools/syntheticdoc/compact.py``: the converted layout plus ``compact.json`` and
-required per-file sha256 and sizes.
+``tools/data/syntheticdoc/compact.py``: the converted layout plus ``compact.json`` and
+required per-file sizes.
 
 Doc3D and UVDoc read MATLAB grids (``<name>.mat``) or a ``<name>.npy`` converted from
 one. Indexing refuses a ``.mat`` newer than the ``.npy`` next to it.
@@ -54,15 +54,10 @@ one. Indexing refuses a ``.mat`` newer than the ``.npy`` next to it.
 from __future__ import annotations
 
 import bisect
-import hashlib
-import inspect
-import io
 import json
 import math
 import os
 import re
-import textwrap
-import tokenize
 import zlib
 from collections import Counter
 from dataclasses import asdict, dataclass, field, fields
@@ -76,7 +71,7 @@ from PIL import Image
 from torch.nn import functional as F
 
 from ..contracts import FlattenerError, Status
-from . import composite, coords
+from . import composite
 from .composite import BackgroundBank, CompositeConfig
 from .coords import (
     map_to_grid,
@@ -114,19 +109,6 @@ DOC3D_GRID3D_RANGE = (1.2539363, -1.2442188, 1.2396319, -1.2289206, 0.6436657, -
 UVDOC_GRID3D_RANGE = (0.11433014, -0.12551452, 0.12401487, -0.12401487, 0.1952378, -0.1952378)
 PAGE_GRID3D_RANGE = (0.6, -0.6, 0.9, -0.9, 0.3, -0.3)  # page_frame, page-width units
 # How stored values become targets, as defined in code (``coords`` and the adapters).
-# Every source description carries its digest; raise the version when a conversion
-# changes, so resumes and best checkpoints of the old targets are refused. The code
-# itself is digested by ``target_code_sha256`` and checked on resume as well.
-TARGET_CONVENTIONS = {
-    "version": 1,
-    "values": "flattener align_corners=False; syntheticdoc q = b + 1/render_size; "
-    "pixel grids q = (2x + 1)/size - 1",
-    "grid": "edge-aligned nodes; map_to_grid extrapolates half a map pixel",
-    "doc3d_grid3d": {"range": DOC3D_GRID3D_RANGE, "order": "zyx", "flip_channel_1": True},
-    "uvdoc_grid3d": {"range": UVDOC_GRID3D_RANGE, "order": "xyz"},
-    "page_grid3d": {"range": PAGE_GRID3D_RANGE, "order": "xyz", "map": "center-aligned"},
-    "layouts": {"sample": SAMPLE_SCHEMA, "compact": COMPACT_SCHEMA},
-}
 # compact.json fields that decide how the copy was made (not its creation time or tool).
 COMPACT_SETTINGS_KEYS = (
     "schema",
@@ -138,9 +120,8 @@ COMPACT_SETTINGS_KEYS = (
     "backward_map",
 )
 # Files that mark a benchmark copy, which no source may read: the manifest.json of
-# ``python -m flattener.benchmark uvdoc-prepare`` and of the DocUNet and SmartDoc copies,
-# the eval-only records of tools/research_data/fetch_research.py and DIR300's
-# provenance.json.
+# ``python -m tools.benchmark uvdoc-prepare`` and of the DocUNet and SmartDoc copies,
+# other evaluation-only manifests.
 BENCHMARK_FILES = (
     ("manifest.json", lambda data: str(data.get("schema", "")).startswith("flattener-benchmark-")),
     ("MANIFEST.json", lambda data: data.get("track") == "eval-only"),
@@ -189,10 +170,6 @@ def license_key(license_class: str) -> str:
 
 def release_license_ok(license_class: str) -> bool:
     return license_key(license_class) in RELEASE_LICENSE_KEYS
-
-
-def canonical_json(value: Any) -> bytes:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
 
 
 def benchmark_marker(root: str | Path) -> str | None:
@@ -259,7 +236,7 @@ class SourceSpec:
 
 @dataclass(frozen=True, slots=True)
 class DataSpec:
-    """Sources by track. ``base_dir`` resolves relative roots and stays out of the hash."""
+    """Sources by track. ``base_dir`` resolves relative roots."""
 
     name: str
     track: str
@@ -308,10 +285,6 @@ class DataSpec:
     def to_dict(self) -> dict[str, Any]:
         sources = [asdict(source) for source in self.sources]
         return {"schema": SPEC_SCHEMA, "name": self.name, "track": self.track, "sources": sources}
-
-    @property
-    def sha256(self) -> str:
-        return hashlib.sha256(canonical_json(self.to_dict())).hexdigest()
 
     def root(self, source: SourceSpec) -> Path:
         return Path(self.base_dir, expand_path(source.root))
@@ -575,9 +548,7 @@ def _matrix_files(path_without_suffix: Path, sizes: _FileSizes) -> list[str]:
 class _Source:
     """One spec source: indexes records on construction; ``load`` opens one sample.
 
-    Construction also digests the sample contents (file sizes, plus the manifest sha256
-    where given, plus ``shared_files``) so a resume can refuse re-encoded data that keeps
-    its ids.
+    Construction checks that sample files exist and match any recorded sizes.
     """
 
     def __init__(self, spec: SourceSpec, root: Path, grid_size: tuple[int, int]) -> None:
@@ -590,7 +561,6 @@ class _Source:
                 f"source {spec.name!r}: root {root} holds benchmark data ({marker})",
             )
         self.spec, self.root, self.grid_size = spec, root, grid_size
-        self.hashes: dict[str, tuple[str, ...]] = {}
         self.settings: dict[str, Any] | None = None  # copy settings that shape the targets
         records = self._index()
         if spec.ids_file is not None:
@@ -602,8 +572,7 @@ class _Source:
         if not records:
             raise _error("missing_data", f"source {spec.name!r}: no samples for split {spec.split}")
         self.records = records
-        self.content_sha256 = self._content_digest()
-        self.hashes = {}  # pickled into loader workers; the digest is enough
+        self._validate_files()
         self._read_target_details(records)
 
     def __len__(self) -> int:
@@ -616,40 +585,30 @@ class _Source:
         raise NotImplementedError
 
     def content_files(self, record: dict[str, Any], sizes: _FileSizes) -> list[str]:
-        """Files whose sizes identify the sample (with the manifest hashes, if any)."""
+        """Files required to load this sample."""
         raise NotImplementedError
 
     def shared_files(self, sizes: _FileSizes) -> list[str]:
-        """Files that samples share (digested once per source)."""
+        """Files shared by samples."""
         return []
 
     def _read_target_details(self, records: list[dict[str, Any]]) -> None:
         """Add per-record fields that decide which stored values a sample's targets come
-        from (they enter ``targets_sha256``)."""
+        from."""
 
-    def _content_digest(self) -> str:
+    def _validate_files(self) -> None:
         sizes = _FileSizes()
-        digest = hashlib.sha256()
         for record in self.records:
             files = self.content_files(record, sizes)
             found = [sizes(path) for path in files]
             missing = [path for path, size in zip(files, found, strict=True) if size is None]
             if missing:
                 raise _error("missing_data", f"source {self.spec.name!r}: missing {missing[:3]}")
-            expected = record.pop("bytes", None)  # checked here, then dropped
+            expected = record.pop("bytes", None)
             if expected is not None and tuple(found) != tuple(expected):
                 raise _error(
-                    "stale_manifest",
-                    f"source {self.spec.name!r}: {record['sample_id']} files have sizes {found}, "
-                    f"the manifest records {list(expected)}",
+                    "stale_manifest", f"{record['sample_id']}: file sizes differ from manifest"
                 )
-            hashes = self.hashes.get(record["sample_id"], ())
-            line = "\t".join([record["sample_id"], *hashes, *map(str, found)])
-            digest.update(line.encode("utf-8") + b"\n")
-        for path in self.shared_files(sizes):
-            name = os.path.relpath(path, self.root).replace(os.sep, "/")
-            digest.update(f"{name}\t{sizes(path)}\n".encode())
-        return digest.hexdigest()
 
     def _meta(self, record: dict[str, Any], track: str, license_text: str) -> dict[str, str]:
         return {
@@ -665,42 +624,32 @@ class _Source:
         return grid.astype(np.float32), np.isfinite(grid).all(axis=-1)
 
     def describe(self) -> dict[str, Any]:
-        """Name, track, license manifest (sample counts per license class), a digest of the
-        sample list (ids, tracks, license classes; paths excluded), the content digest and
-        what decides how targets are read: the grid size, the code conventions
-        (``TARGET_CONVENTIONS``), each record's map convention and render size and, for
-        UVDoc, its geometry name (``targets_sha256``) and the copy settings."""
+        """Summarize the source and target settings used for training."""
         fallback = self.spec.license or self.spec.kind
         classes = Counter(r.get("license_class") or fallback for r in self.records)
-        listing = "\n".join(
-            f"{r['sample_id']}\t{r.get('track', '')}\t{r.get('license_class', '')}"
-            for r in self.records
-        )
-        targets = "\n".join(
-            "\t".join(
-                [r["sample_id"], str(r.get("render_size"))]
-                + ([r["geometry"]] if "geometry" in r else [])
-            )
-            for r in self.records
-        )
         return {
             "name": self.spec.name,
             "kind": self.spec.kind,
             "track": self.spec.track,
             "samples": len(self.records),
             "license_classes": dict(sorted(classes.items())),
-            "records_sha256": hashlib.sha256(listing.encode("utf-8")).hexdigest(),
-            "content_sha256": self.content_sha256,
             "grid_size": list(self.grid_size),
-            "conventions_sha256": hashlib.sha256(canonical_json(TARGET_CONVENTIONS)).hexdigest(),
-            "targets_sha256": hashlib.sha256(targets.encode("utf-8")).hexdigest(),
             "settings": self.settings,
+            "render_sizes": [
+                list(size)
+                for size in sorted(
+                    {
+                        tuple(r["render_size"])
+                        for r in self.records
+                        if r.get("render_size") is not None
+                    }
+                )
+            ],
         }
 
 
 class ConvertedSource(_Source):
     require_manifest = False
-    require_hashes = False
     require_sizes = False
 
     def _documents(self) -> list[tuple[Any, Path]]:
@@ -749,17 +698,11 @@ class ConvertedSource(_Source):
             ):
                 raise _error("invalid_data", f"{entry['sample_id']}: bad map convention")
             sample_id = str(entry["sample_id"])
-            hash_keys = ("image_sha256", "backward_map_sha256")
             size_keys = ("image_bytes", "backward_map_bytes")
             if entry.get("grid3d"):
                 if entry.get("grid3d_convention") != "page_frame":
                     raise _error("invalid_data", f"{sample_id}: grid3d must be page_frame")
-                hash_keys, size_keys = (*hash_keys, "grid3d_sha256"), (*size_keys, "grid3d_bytes")
-            hashes = tuple(entry.get(k) for k in hash_keys)
-            if all(isinstance(h, str) and h for h in hashes):
-                self.hashes[sample_id] = hashes
-            elif self.require_hashes:
-                raise _error("invalid_data", f"{sample_id}: image/backward_map sha256 missing")
+                size_keys = (*size_keys, "grid3d_bytes")
             sizes = tuple(entry.get(k) for k in size_keys)
             known_sizes = all(isinstance(s, int) and not isinstance(s, bool) for s in sizes)
             if self.require_sizes and not known_sizes:
@@ -800,10 +743,9 @@ class ConvertedSource(_Source):
 
 
 class SyntheticDocCompactSource(ConvertedSource):
-    """Training copy from ``tools/syntheticdoc/compact.py`` (``compact.json`` + manifest)."""
+    """Training copy from ``tools/data/syntheticdoc/compact.py`` (``compact.json`` + manifest)."""
 
     require_manifest = True
-    require_hashes = True
     require_sizes = True
 
     def _index(self) -> list[dict[str, Any]]:
@@ -901,7 +843,7 @@ class UVDocSource(_Source):
     (``geom_name``), ``grid2d/<geom>.mat`` (89x61 pixel coordinates), ``grid3d/<geom>.mat``.
 
     The content digest covers every geometry file, since samples share them. Each
-    sample's ``geom_name`` is read once at indexing and enters ``targets_sha256``.
+    sample's ``geom_name`` is read once at indexing.
     """
 
     def _index(self) -> list[dict[str, Any]]:
@@ -1506,51 +1448,3 @@ def build_dataset(
         track=track,
         views=tuple(views),
     )
-
-
-def _code_tokens(source: str) -> str:
-    """The tokens of ``source``, one logical line per text line, without comments, blank
-    lines, line breaks inside brackets and docstrings (lines that are only a string)."""
-    lines, line = [], []
-    for token in tokenize.generate_tokens(io.StringIO(textwrap.dedent(source)).readline):
-        if token.type in (tokenize.COMMENT, tokenize.NL):
-            continue
-        if token.type in (tokenize.INDENT, tokenize.DEDENT):
-            lines.append(tokenize.tok_name[token.type])
-        elif token.type in (tokenize.NEWLINE, tokenize.ENDMARKER):
-            if line and not (len(line) == 1 and line[0][0] == tokenize.STRING):
-                lines.append(" ".join(text for _, text in line))
-            line = []
-        else:
-            line.append((token.type, token.string))
-    return "\n".join(lines)
-
-
-def target_code_sha256() -> str:
-    """sha256 of the code that turns stored values into targets and pairs them with the
-    image: ``coords`` and here the grid readers, the source loaders, the crop mapping,
-    the image warp, the target masking and the composite warp. Only tokens count, so
-    comment, docstring and layout edits leave it unchanged."""
-    parts = (
-        coords,
-        _read_matrix,
-        _normalize_3d,
-        _Source._grid,
-        ConvertedSource.load,
-        SyntheticDocRawSource.load,
-        Doc3DSource.load,
-        UVDocSource._read_target_details,
-        UVDocSource.load,
-        Crop,
-        _edge_points,
-        warp_image,
-        DewarpDataset._target,
-        composite.apply_homography,
-        composite._reduce_source,
-        composite.warp_homography,
-        composite.compose,
-    )
-    digest = hashlib.sha256()
-    for part in parts:
-        digest.update(_code_tokens(inspect.getsource(part)).encode("utf-8") + b"\0")
-    return digest.hexdigest()

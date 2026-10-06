@@ -6,8 +6,8 @@ import json
 import numpy as np
 import pytest
 
-from flattener.benchmark import calibration, docunet, ocr
-from flattener.benchmark.reporting import write_json_atomic
+from tools.benchmark import calibration, docunet, ocr
+from tools.benchmark.reporting import write_json_atomic
 
 
 def _docunet_report(name, values, *, shift=None):
@@ -41,7 +41,7 @@ ALL = [(k, m) for k in range(1, 66) for m in (1, 2)]
 EXCL = [(k, m) for k, m in ALL if k != 64]
 
 
-def test_g1_compares_means_with_both_solvers():
+def test_paperedge_compares_means_with_both_solvers():
     values = _values(0.47, 8.5, 0.39, ALL)
     adres = {"rows": {f"{k}_{m}": v for (k, m), v in values.items()}, "file_mean_row": {}}
     ok = calibration.gate_paperedge_matlab(_docunet_report("paperedge-once", values), adres)
@@ -65,7 +65,7 @@ def test_g1_compares_means_with_both_solvers():
         calibration.gate_paperedge_matlab(wrong, adres)
 
 
-def test_g2_uses_rounding_and_g3_uses_absolute_tolerances(tmp_path):
+def test_published_tables_use_rounding_and_absolute_tolerances(tmp_path):
     good = _values(0.4722, 7.9815, 0.3668, EXCL)
     write_json_atomic(tmp_path / "paperedge-uvdoc.json", _docunet_report("paperedge-uvdoc", good))
     bad = _values(0.4726, 7.98, 0.367, EXCL)
@@ -91,7 +91,6 @@ def _ocr_report(scale, version="tesseract v5.0.1.20220118"):
     return {
         "config": {
             "protocols": ["doctr"],
-            "references_verified": True,
             "tesseract_config": {"doctr": ""},
         },
         "schema": ocr.REPORT_SCHEMA,
@@ -105,7 +104,7 @@ def _ocr_report(scale, version="tesseract v5.0.1.20220118"):
     }
 
 
-def test_g4_needs_the_relative_tolerance_tesseract_501_and_the_plain_doctr_setup():
+def test_ocr_checks_tolerances_engine_version_and_protocol():
     assert calibration.gate_ocr_table(_ocr_report(1.019))["status"] == "pass"
     assert calibration.gate_ocr_table(_ocr_report(0.979))["status"] == "fail"
     gate = calibration.gate_ocr_table(_ocr_report(1.0))
@@ -119,7 +118,6 @@ def test_g4_needs_the_relative_tolerance_tesseract_501_and_the_plain_doctr_setup
     for key, value in (
         ("protocols", ["doctr", "uvdoc"]),
         ("tesseract_config", {"doctr": "--psm 6"}),
-        ("references_verified", False),
     ):
         report = _ocr_report(1.0)
         report["config"][key] = value

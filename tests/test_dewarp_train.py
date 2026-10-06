@@ -5,7 +5,6 @@ import csv
 import json
 import math
 from dataclasses import replace
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -20,7 +19,7 @@ from flattener.dewarp.checkpoint import (
     load_checkpoint,
     save_checkpoint,
 )
-from flattener.dewarp.data import SAMPLE_SCHEMA, SPEC_SCHEMA, DataSpec, ViewConfig, require_track
+from flattener.dewarp.data import SAMPLE_SCHEMA, SPEC_SCHEMA, DataSpec
 from flattener.dewarp.model import DewarpModelConfig, UVDocNet
 from flattener.dewarp.train import (
     DEFAULT_VIEWS,
@@ -35,7 +34,7 @@ from flattener.dewarp.train import (
     page_space_loss,
     train,
     validate,
-    validation_signature,
+    validation_settings,
 )
 
 TINY = DewarpModelConfig(input_size=(64, 48), grid_size=(5, 4), num_filter=4)
@@ -113,8 +112,6 @@ def _payload(step, **extra):
         "track": "release",
         "model_config": TINY.to_dict(),
         "lineage": [{"kind": "scratch"}],
-        "data_spec_sha256": "0" * 64,
-        "code": {"sha256": "1" * 64},
         "metrics": {},
         "model_state": model.state_dict(),
         **extra,
@@ -135,137 +132,74 @@ def test_step_sampler_is_deterministic_resumable_and_weighted():
     assert take(StepSampler([10, 1000], [0.5, 0.5], seed=1, start=100), 5) == weighted[100:105]
 
 
-def test_checkpoint_commit_verify_prune_and_tamper_detection(tmp_path):
+def test_checkpoint_commit_prune_and_round_trip(tmp_path):
     directory = tmp_path / "checkpoints"
     for step in (1, 2, 3, 4):
-        commit_checkpoint(
-            directory, _payload(step, metrics={"epe_px": step}), keep=2, is_best=step == 1
-        )
+        saved = _payload(step, metrics={"epe_px": step})
+        commit_checkpoint(directory, saved, keep=2, is_best=step == 1)
     assert sorted(p.name for p in directory.glob("*.pt")) == [
         "step_00000001.pt",
         "step_00000003.pt",
         "step_00000004.pt",
     ]
     latest = latest_checkpoint(directory)
-    sidecar = json.loads((directory / "step_00000004.pt.json").read_text())
-    assert latest.name == "step_00000004.pt" and sidecar["track"] == "release"
-    assert "model_state" not in sidecar and len(sidecar["sha256"]) == 64
+    assert latest.name == "step_00000004.pt"
     payload = load_checkpoint(latest)
-    reference = _payload(4)["model_state"]
-    assert payload["model_state"].keys() == reference.keys()
-    with latest.open("r+b") as stream:
-        stream.seek(-8, 2)
-        stream.write(b"tampered")
-    with pytest.raises(FlattenerError) as error:
-        load_checkpoint(latest)
-    assert error.value.reason_code == "checksum_mismatch"
+    reference = saved["model_state"]
+    for key, value in reference.items():
+        assert torch.equal(value, payload["model_state"][key])
     with pytest.raises(FlattenerError, match="schema"):
         save_checkpoint(tmp_path / "x.pt", {"step": 1})
 
 
-def test_resume_compatibility_and_initialization_lineage(tmp_path):
-    spec_path = _spec(tmp_path)
-    spec = DataSpec.load(spec_path)
+def test_resume_settings_and_checkpoint_initialization(tmp_path):
+    spec = DataSpec.load(_spec(tmp_path))
     config = _config(tmp_path)
-    source = {"name": "own-train", "samples": 4, "records_sha256": "a", "targets_sha256": "t"}
-    sources = {"train": [source], "val": []}
+    sources = {"train": [{"name": "own-train", "samples": 4}], "val": []}
     code = code_record()
     payload = {
         "train_config": config.to_dict(),
         "track": "release",
-        "data_spec_sha256": spec.sha256,
+        "data_spec": spec.to_dict(),
         "data_sources": sources,
         "code": code,
     }
     _check_resume(
         replace(config, max_steps=2, num_workers=3, device="cuda"), payload, spec, sources, code
     )
-    _check_resume(  # validation settings may change; they start a new best instead
-        replace(config, val_max_batches=1, val_views=[ViewConfig("x")]),
-        payload,
-        spec,
-        sources,
-        code,
-    )
-    # The validation signature (which marks a new best) covers what defines a result.
-    val = [{"name": "own-val", "records_sha256": "a", "content_sha256": "b"}]
-    reference = validation_signature(config, val)
-    for same in (
-        replace(config, val_batch_size=7),  # no sample limit: batch size does not matter
-        replace(config, num_workers=3, val_every=5, lr=1e-3),
-    ):
-        assert validation_signature(same, val) == reference
-    for changed in (
-        replace(config, val_max_batches=1),
-        replace(config, val_views=[ViewConfig("page", "page", (0.1, 0.1))]),
-        replace(config, val_select="docunet"),
-        replace(config, epe_reference_size=(1440, 1024)),
-    ):
-        assert validation_signature(changed, val) != reference
-    assert validation_signature(config, [{**val[0], "content_sha256": "c"}]) != reference
-    limited = replace(config, val_max_batches=1)
-    assert validation_signature(replace(limited, val_batch_size=1), val) != validation_signature(
-        limited, val
-    )
     for changed in (replace(config, lr=1e-3), replace(config, seed=1)):
         with pytest.raises(FlattenerError, match="resume"):
             _check_resume(changed, payload, spec, sources, code)
-    with pytest.raises(FlattenerError, match="resume"):
-        _check_resume(config, {**payload, "data_spec_sha256": "x"}, spec, sources, code)
-    reconverted = {"train": [{**sources["train"][0], "records_sha256": "b"}], "val": []}
+    with pytest.raises(FlattenerError, match="data spec"):
+        _check_resume(config, {**payload, "data_spec": {}}, spec, sources, code)
     with pytest.raises(FlattenerError, match="data sources"):
-        _check_resume(config, payload, spec, reconverted, code)
-    legacy = {"train": [{k: v for k, v in source.items() if k != "targets_sha256"}], "val": []}
-    with pytest.raises(FlattenerError, match="predates the target-convention signature"):
-        _check_resume(config, {**payload, "data_sources": legacy}, spec, sources, code)
-    research = tmp_path / "research.pt"
-    save_checkpoint(research, _payload(7, track="research"))
-    with pytest.raises(FlattenerError) as error:
-        _initialize(UVDocNet(TINY), replace(config, init="checkpoint", init_path=str(research)))
-    assert error.value.reason_code == "track_violation"
-    lineage = _initialize(
-        UVDocNet(TINY),
-        replace(config, track="research", init="checkpoint", init_path=str(research)),
-    )
-    assert lineage["kind"] == "checkpoint" and lineage["track"] == "research"
-    assert lineage["sha256"] == json.loads((tmp_path / "research.pt.json").read_text())["sha256"]
-    assert "data_spec" not in lineage  # the parent recorded none
-    # A release fine-tune carries its parent's data spec, so the ship gate can check the
-    # parent's training step without the parent's sidecar.
-    release = tmp_path / "release.pt"
-    save_checkpoint(release, _payload(9, data_spec=spec.to_dict(), data_spec_sha256=spec.sha256))
-    lineage = _initialize(
-        UVDocNet(TINY), replace(config, init="checkpoint", init_path=str(release))
-    )
-    assert lineage["data_spec"] == spec.to_dict()
-    assert DataSpec.from_dict(lineage["data_spec"]).sha256 == lineage["data_spec_sha256"]
-    # The weights do not depend on the sizes: a checkpoint trained at another input and
-    # grid size initializes a larger model, and the lineage keeps the parent's sizes.
+        _check_resume(config, payload, spec, {"train": [], "val": []}, code)
+    val = [{"name": "own-val", "samples": 2}]
+    reference = validation_settings(config, val)
+    assert validation_settings(replace(config, val_batch_size=7), val) == reference
+    for changed in (
+        replace(config, val_max_batches=1),
+        replace(config, val_select="docunet"),
+        replace(config, epe_reference_size=(1440, 1024)),
+    ):
+        assert validation_settings(changed, val) != reference
+    path = tmp_path / "model.pt"
+    save_checkpoint(path, _payload(9))
     larger = UVDocNet(DewarpModelConfig(input_size=(96, 64), grid_size=(6, 4), num_filter=4))
-    lineage = _initialize(
-        larger, replace(config, track="research", init="checkpoint", init_path=str(research))
-    )
-    assert lineage["model_config"] == TINY.to_dict()
-    parent = load_checkpoint(research)["model_state"]
+    info = _initialize(larger, replace(config, init="checkpoint", init_path=str(path)))
+    assert info == {"kind": "checkpoint", "path": str(path), "step": 9}
+    parent = load_checkpoint(path)["model_state"]
     assert all(torch.equal(v, parent[k]) for k, v in larger.state_dict().items())
     with torch.no_grad():
-        grid2d, _ = larger.eval()(torch.rand(1, 3, 96, 64))
-    assert grid2d.shape == (1, 2, 6, 4)
-    # init="uvdoc": a release run needs the published upstream file (sha256), and a
-    # dewarp checkpoint (research weights) is never accepted as upstream weights.
-    fake_uvdoc = tmp_path / "best_model.pkl"
-    torch.save({"model_state": UVDocNet(TINY).state_dict()}, fake_uvdoc)
-    uvdoc = replace(config, init="uvdoc", init_path=str(fake_uvdoc))
-    with pytest.raises(FlattenerError) as error:
-        _initialize(UVDocNet(TINY), uvdoc)
-    assert error.value.reason_code == "track_violation"
-    lineage = _initialize(UVDocNet(TINY), replace(uvdoc, track="research"))
-    assert lineage["kind"] == "uvdoc" and lineage["license"] == "unverified"
-    for track in ("release", "research"):
-        disguised = replace(uvdoc, track=track, init_path=str(research))
-        with pytest.raises(FlattenerError) as error:
-            _initialize(UVDocNet(TINY), disguised)
-        assert error.value.reason_code == "invalid_init"
+        assert larger.eval()(torch.rand(1, 3, 96, 64))[0].shape == (1, 2, 6, 4)
+    upstream = tmp_path / "uvdoc.pkl"
+    torch.save({"model_state": UVDocNet(TINY).state_dict()}, upstream)
+    assert (
+        _initialize(UVDocNet(TINY), replace(config, init="uvdoc", init_path=str(upstream)))["kind"]
+        == "uvdoc"
+    )
+    with pytest.raises(FlattenerError, match="upstream UVDoc"):
+        _initialize(UVDocNet(TINY), replace(config, init="uvdoc", init_path=str(path)))
 
 
 def test_train_and_val_must_not_share_samples(tmp_path):
@@ -288,9 +222,8 @@ def test_two_step_cpu_training_smoke_and_exact_resume(tmp_path):
     assert status["state"] == "stopped" and status["evidence"] == first["evidence"]
     log = [json.loads(line) for line in (run / "train_log.jsonl").read_text().splitlines()]
     trained = [r["evidence"] for r in log if r["kind"] == "train"]
-    assert {(e["measurement"], e["evidence_kind"]) for e in trained} == {
-        ("training_loss", "smoke_training")
-    }
+    assert {e["measurement"] for e in trained} == {"training_loss"}
+    assert {e["checkpoint_step"] for e in trained} == {1, 2}
     names = [view.name for view in DEFAULT_VIEWS]
     assert [r["kind"] for r in log] == ["train", "train"] + ["val"] * len(names)
     assert [(r["view"], r["selected"]) for r in log[2:]] == [(n, n == "page") for n in names]
@@ -306,13 +239,13 @@ def test_two_step_cpu_training_smoke_and_exact_resume(tmp_path):
     assert views["full_frame"]["evidence"]["measurement"] == "gt_full_frame_validation"
     assert views["rot90"]["evidence"]["measurement"] == "gt_crop_validation"
     assert checkpoint["metrics"]["evidence"] == views["page"]["evidence"]
-    assert first["evidence"]["evidence_kind"] == "smoke_training"
+    assert first["evidence"]["checkpoint_step"] == 2
     assert first["evidence"]["initialization"] == "scratch"
-    assert checkpoint["best"]["signature"] == checkpoint["metrics"]["signature"]
+    assert checkpoint["best"]["settings"] == checkpoint["metrics"]["settings"]
     manifest = checkpoint["data_sources"]
     assert [s["license_classes"] for s in manifest["train"]] == [{"clean": 4}]
     assert [s["samples"] for s in manifest["val"]] == [2]
-    assert checkpoint["code"]["files"].keys() >= {"model.py", "train.py", "data.py"}
+    assert checkpoint["code"] == code_record()
     resumed = train(_config(tmp_path))
     assert resumed["state"] == "completed" and resumed["step"] == 4
     straight = train(_config(tmp_path, name="straight"))
@@ -345,15 +278,6 @@ def test_device_tallies_train_the_same_weights_as_host_checks(tmp_path, monkeypa
         return [json.loads(r)["loss"] for r in rows if json.loads(r)["kind"] == "train"]
 
     assert losses("scaled") == pytest.approx(losses("plain"), rel=1e-6)
-
-
-def test_example_configs_parse_and_respect_tracks():
-    examples = Path(__file__).resolve().parents[1] / "examples/dewarp"
-    for path in sorted(examples.glob("train-*.json")):
-        config = TrainConfig.from_dict(json.loads(path.read_text()))
-        spec = DataSpec.load(examples / config.data_spec)
-        require_track(spec, config.track)
-        assert spec.track == config.track
 
 
 # Targets without valid nodes.

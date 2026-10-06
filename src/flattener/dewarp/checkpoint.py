@@ -1,18 +1,7 @@
-"""Atomic dewarp checkpoints with sha256 JSON sidecars and a latest pointer.
-
-A checkpoint ``step_XXXXXXXX.pt`` holds tensors and plain Python data only
-(it loads with ``weights_only=True``). Its sidecar ``<name>.pt.json`` repeats
-every non-state field (track, configs, data spec hash, code hash, lineage,
-metrics) plus the file's sha256. ``latest.json`` is replaced only after a
-checkpoint and its sidecar are durable, so resume always finds a complete
-checkpoint. ``best.json`` names the best validation of the current validation
-signature; a resume under another signature moves it to
-``best_before_step_XXXXXXXX.json``. Pruning keeps every checkpoint a pointer names.
-"""
+"""Save and load tensor checkpoints, with latest and best checkpoint pointers."""
 
 from __future__ import annotations
 
-import hashlib
 import json
 import math
 import os
@@ -27,23 +16,18 @@ from typing import Any, BinaryIO
 import numpy as np
 import torch
 
+from .._version import __version__
 from ..contracts import FlattenerError, Status
-from .model import sha256_file
 
 CHECKPOINT_SCHEMA = "flattener-dewarp-checkpoint-1"
-SIDECAR_SCHEMA = "flattener-dewarp-sidecar-1"
-STATE_KEYS = frozenset({"model_state", "optimizer_state", "scaler_state", "rng_state"})
 
 
 def _error(reason: str, message: str) -> FlattenerError:
     return FlattenerError(Status.IO_ERROR, reason, message)
 
 
-def code_fingerprint() -> dict[str, Any]:
-    """sha256 of ``src/flattener/dewarp/*.py`` (per file and combined)."""
-    files = {path.name: sha256_file(path) for path in sorted(Path(__file__).parent.glob("*.py"))}
-    combined = hashlib.sha256(json.dumps(files, sort_keys=True).encode()).hexdigest()
-    return {"sha256": combined, "files": files}
+def code_version() -> dict[str, str]:
+    return {"version": __version__}
 
 
 def environment() -> dict[str, str]:
@@ -101,56 +85,29 @@ def write_json(path: Path, value: Any) -> None:
     atomic_write(path, lambda stream: stream.write(text.encode("utf-8")))
 
 
-def sidecar_path(path: Path) -> Path:
-    return path.with_name(path.name + ".json")
-
-
 def save_checkpoint(path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
-    """Atomically save ``payload`` and its sidecar; return the sidecar content."""
+    """Atomically save the model and training state."""
     path = Path(path)
     if payload.get("schema") != CHECKPOINT_SCHEMA:
         raise _error("invalid_checkpoint", f"payload schema must be {CHECKPOINT_SCHEMA}")
     atomic_write(path, lambda stream: torch.save(payload, stream))
-    sidecar = {key: value for key, value in payload.items() if key not in STATE_KEYS}
-    sidecar.update(
-        schema=SIDECAR_SCHEMA,
-        checkpoint_schema=CHECKPOINT_SCHEMA,
-        file=path.name,
-        sha256=sha256_file(path),
-        bytes=path.stat().st_size,
-    )
-    write_json(sidecar_path(path), sidecar)
-    return sidecar
+    return {"file": path.name, "step": payload.get("step")}
 
 
-def read_checkpoint(path: str | Path, *, verify: bool = True) -> dict[str, Any]:
-    """Load any checkpoint-like file safely; with ``verify``, a present sidecar must match."""
+def read_checkpoint(path: str | Path) -> dict[str, Any]:
+    """Read tensors and plain data from a checkpoint."""
     path = Path(path)
     if not path.is_file():
         raise _error("missing_checkpoint", f"{path} does not exist")
-    sidecar = sidecar_path(path)
-    if verify and sidecar.is_file():
-        expected = json.loads(sidecar.read_text(encoding="utf-8")).get("sha256")
-        actual = sha256_file(path)
-        if expected != actual:
-            raise _error("checksum_mismatch", f"{path}: sha256 {actual} != sidecar {expected}")
     return torch.load(path, map_location="cpu", weights_only=True)
 
 
-def load_checkpoint(path: str | Path, *, verify: bool = True) -> dict[str, Any]:
-    """Load a dewarp checkpoint; with ``verify`` the sidecar is required and must match."""
-    path = Path(path)
-    if verify and not sidecar_path(path).is_file():
-        raise _error("missing_sidecar", f"{sidecar_path(path)} is missing")
-    payload = read_checkpoint(path, verify=verify)
+def load_checkpoint(path: str | Path) -> dict[str, Any]:
+    """Load a dewarp checkpoint."""
+    payload = read_checkpoint(path)
     if not isinstance(payload, dict) or payload.get("schema") != CHECKPOINT_SCHEMA:
         raise _error("invalid_checkpoint", f"{path} is not a {CHECKPOINT_SCHEMA} checkpoint")
     return payload
-
-
-def checkpoint_sha256(path: str | Path) -> str:
-    """sha256 of a checkpoint file, as recorded in its sidecar."""
-    return json.loads(sidecar_path(Path(path)).read_text(encoding="utf-8"))["sha256"]
 
 
 def latest_checkpoint(directory: str | Path) -> Path | None:
@@ -166,8 +123,8 @@ def commit_checkpoint(
     """Save ``step_<step>.pt``, move ``latest.json`` (and ``best.json``), prune old files."""
     directory = Path(directory)
     path = directory / f"step_{int(payload['step']):08d}.pt"
-    sidecar = save_checkpoint(path, payload)
-    pointer = {"file": path.name, "sha256": sidecar["sha256"], "step": payload["step"]}
+    save_checkpoint(path, payload)
+    pointer = {"file": path.name, "step": payload["step"]}
     write_json(directory / "latest.json", pointer)
     if is_best:
         write_json(directory / "best.json", {**pointer, "metrics": payload.get("metrics", {})})
@@ -179,7 +136,6 @@ def commit_checkpoint(
     for old in steps[: max(0, len(steps) - max(1, keep))]:
         if old.name not in protected:
             old.unlink(missing_ok=True)
-            sidecar_path(old).unlink(missing_ok=True)
     return path
 
 

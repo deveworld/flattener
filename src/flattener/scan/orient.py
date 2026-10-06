@@ -1,4 +1,4 @@
-"""OrientNet-1: the quarter-turn classifier of the single-page scanner (design 2.2).
+"""OrientNet-1: the quarter-turn classifier of the single-page scanner.
 
 Label ``k`` counts the clockwise quarter turns of the text-up direction in the input
 view. ``numpy.rot90(view, k)`` turns the page upright, and the scanner's view angle is
@@ -30,16 +30,12 @@ accepted when its probability reaches ``threshold`` (0.9 until one is calibrated
 real-photo dev split, ``operating_threshold``), and the result carries
 ``orientation_uncertain`` otherwise.
 
-Weights load from a release-track, scratch-rooted lineage with release data only;
-anything else needs ``research=True`` and is marked as research (``release_problems``).
-
 CLI: ``python -m flattener.scan.orient predict|export|cost``.
 """
 
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import math
 import os
@@ -58,26 +54,22 @@ from torch.nn import functional as F
 from ..contracts import FlattenerError, Status
 from ..dewarp.checkpoint import (
     atomic_write,
+    code_version,
     environment,
     read_checkpoint,
-    sidecar_path,
     utc_now,
     write_json,
 )
 from ..dewarp.data import DataSpec, release_license_ok, require_track
-from ..dewarp.model import sha256_file
-from .shippable import parent_sidecars, shippable
 
 MODEL_ID = "orientnet-1"
 CHECKPOINT_SCHEMA = "flattener-orient-checkpoint-1"
-SIDECAR_SCHEMA = "flattener-orient-sidecar-1"
 EXPORT_SCHEMA = "flattener-orient-onnx-1"
 VIEWS_VERSION = "orient-views-1"
 CLASSES = 4
 DEFAULT_TEMPERATURE = 1.0
 DEFAULT_THRESHOLD = 0.9
 UNCERTAIN = "orientation_uncertain"
-STATE_KEYS = frozenset({"model_state", "optimizer_state", "scaler_state", "rng_state"})
 # (out channels, stride, depthwise kernel, squeeze-excitation) after a 3x3 stride-2 stem.
 BLOCKS = (
     (32, 1, 3, False),
@@ -746,29 +738,6 @@ def orientation_metrics(
 # ----------------------------------------------------------------------------- lineage
 
 
-def lineage_problems(lineage: Any) -> list[str]:
-    """Why a lineage is not release-shippable: every step must be release-track and the
-    chain must start from scratch (``kind: "scratch"``), through parent checkpoints."""
-    problems: list[str] = []
-    depth = 0
-    while True:
-        if not isinstance(lineage, list) or not lineage or not isinstance(lineage[0], dict):
-            return [*problems, f"lineage record missing at depth {depth}"]
-        for entry in lineage[1:]:
-            if isinstance(entry, dict) and entry.get("kind") == "train":
-                if entry.get("track") != "release":
-                    problems.append(f"depth {depth}: {entry.get('track')!r} training step")
-        start = lineage[0]
-        kind = start.get("kind")
-        if kind == "scratch":
-            return problems
-        if kind != "checkpoint":
-            return [*problems, f"depth {depth}: starts from {kind!r} weights"]
-        if start.get("track") != "release":
-            problems.append(f"depth {depth}: parent checkpoint track {start.get('track')!r}")
-        lineage, depth = start.get("lineage"), depth + 1
-
-
 def data_spec_problems(spec: Any) -> list[str]:
     """Why a ``data_spec`` is not release data. OrientNet records carry a dewarp-schema
     spec (``flattener-dewarp-data-1``) naming every source that fed the build, so the
@@ -801,102 +770,31 @@ def data_sources_problems(sources: Any) -> list[str]:
     return problems
 
 
-def release_problems(record: dict[str, Any], *, specs: Any = ()) -> list[str]:
-    """Why a checkpoint or export record is not shippable (empty when it is).
-
-    Release track, a scratch-rooted lineage of release training steps, a release
-    ``data_spec`` whose sha256 is ``data_spec_sha256`` and the last training step's, and a
-    release license manifest (``data_sources``). The record then goes through the
-    scanner's ship gate (``flattener.scan.shippable.shippable``), which also needs the
-    data spec of every parent training step: carried by the parent's lineage entry
-    (``data_spec``), found in the parent's sidecar at its recorded path, or given in
-    ``specs``. Its reason codes come back as ``ship gate: <code>``.
-    """
-    problems = []
-    if record.get("track") != "release":
-        problems.append(f"track {record.get('track')!r}")
-    lineage = record.get("lineage")
-    problems.extend(lineage_problems(lineage))
-    spec = record.get("data_spec")
-    problems.extend(data_spec_problems(spec))
-    try:
-        digest = DataSpec.from_dict(spec).sha256
-    except (FlattenerError, TypeError, ValueError):
-        digest = None  # reported by data_spec_problems
-    if digest is not None:
-        steps = [e for e in lineage or [] if isinstance(e, dict) and e.get("kind") == "train"]
-        if record.get("data_spec_sha256") != digest:
-            problems.append("data_spec does not hash to data_spec_sha256")
-        elif not steps or steps[-1].get("data_spec_sha256") != digest:
-            problems.append("the last training step names another data spec")
-    problems.extend(data_sources_problems(record.get("data_sources")))
-    if not problems:
-        parents = list(parent_sidecars(lineage))
-        verdict = shippable(record, specs=[*parents, *specs])
-        problems.extend(f"ship gate: {reason}" for reason in verdict.reasons)
-    return problems
-
-
 # ----------------------------------------------------------------------------- checkpoints
 
 
 def code_record() -> dict[str, Any]:
-    """sha256 of the OrientNet sources (per file and combined)."""
-    here = Path(__file__).parent
-    files = {
-        name: sha256_file(here / name)
-        for name in ("orient.py", "orient_train.py")
-        if (here / name).is_file()
-    }
-    combined = hashlib.sha256(json.dumps(files, sort_keys=True).encode()).hexdigest()
-    return {"sha256": combined, "files": files}
+    return code_version()
 
 
 def save_checkpoint(path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
-    """Atomically save ``payload`` and its ``.pt.json`` sidecar; return the sidecar."""
+    """Save model and training state atomically."""
     path = Path(path)
     if payload.get("schema") != CHECKPOINT_SCHEMA:
         raise _error(Status.IO_ERROR, "invalid_checkpoint", f"schema must be {CHECKPOINT_SCHEMA}")
     atomic_write(path, lambda stream: torch.save(payload, stream))
-    sidecar = {key: value for key, value in payload.items() if key not in STATE_KEYS}
-    sidecar.update(
-        schema=SIDECAR_SCHEMA,
-        checkpoint_schema=CHECKPOINT_SCHEMA,
-        file=path.name,
-        sha256=sha256_file(path),
-        bytes=path.stat().st_size,
-    )
-    write_json(sidecar_path(path), sidecar)
-    return sidecar
+    return {"file": path.name, "step": payload.get("step")}
 
 
-def load_checkpoint(path: str | Path, *, verify: bool = True) -> dict[str, Any]:
-    """An OrientNet checkpoint; with ``verify`` its sidecar must exist and match."""
-    path = Path(path)
-    if verify and not sidecar_path(path).is_file():
-        raise _error(Status.IO_ERROR, "missing_sidecar", f"{sidecar_path(path)} is missing")
-    payload = read_checkpoint(path, verify=verify)
+def load_checkpoint(path: str | Path) -> dict[str, Any]:
+    payload = read_checkpoint(Path(path))
     if not isinstance(payload, dict) or payload.get("schema") != CHECKPOINT_SCHEMA:
         raise _error(Status.IO_ERROR, "invalid_checkpoint", f"{path} is not {CHECKPOINT_SCHEMA}")
     return payload
 
 
-def model_record(payload: dict[str, Any], sha256: str | None) -> dict[str, Any]:
-    """The ``info`` of a loaded model: provenance, lineage, track and ship status."""
-    problems = release_problems(payload)
-    return {
-        "model_id": MODEL_ID,
-        "kind": "checkpoint",
-        "provenance": "own_checkpoint",
-        "sha256": sha256,
-        "step": payload.get("step"),
-        "track": payload.get("track"),
-        "lineage": payload.get("lineage"),
-        "data_spec_sha256": payload.get("data_spec_sha256"),
-        "code_sha256": (payload.get("code") or {}).get("sha256"),
-        "shippable": not problems,
-        "release_problems": problems,
-    }
+def model_record(payload: dict[str, Any]) -> dict[str, Any]:
+    return {"model_id": MODEL_ID, "kind": "checkpoint", "step": payload.get("step")}
 
 
 def operating_threshold(calibration: dict[str, Any] | None) -> float:
@@ -937,30 +835,21 @@ class Orienter:
         path: str | Path,
         *,
         device: str | torch.device = "cpu",
-        research: bool = False,
         temperature: float | None = None,
         threshold: float | None = None,
     ) -> Orienter:
-        """Load a checkpoint; weights outside the release lineage need ``research=True``. A
-        given ``threshold`` (measured on real photos) replaces ``operating_threshold``."""
+        """Load weights and calibration from a checkpoint."""
         path = Path(path)
         payload = load_checkpoint(path)
-        sha256 = json.loads(sidecar_path(path).read_text(encoding="utf-8"))["sha256"]
-        info = model_record(payload, sha256)
-        if not info["shippable"] and not research:
-            raise _error(
-                Status.MODEL_ERROR,
-                "not_shippable",
-                f"{path} is outside the release lineage ({'; '.join(info['release_problems'])}); "
-                "pass research=True to use it as a research reference",
-            )
-        info["research"] = bool(research)
+        info = model_record(payload)
         model = OrientNet(OrientConfig.from_dict(payload["model_config"]))
         model.load_state_dict(payload["model_state"])
         calibration = payload.get("calibration") or {}
         if temperature is None:
             temperature = calibration.get("temperature") or DEFAULT_TEMPERATURE
-        info.update(path=str(path), calibration=calibration, threshold_given=threshold is not None)
+        info.update(
+            path=str(path.resolve()), calibration=calibration, threshold_given=threshold is not None
+        )
         return cls(
             model,
             temperature=temperature,
@@ -1006,18 +895,15 @@ def export_onnx(
     checkpoint: str | Path,
     output: str | Path,
     *,
-    research: bool = False,
     opset: int = 18,
     temperature: float | None = None,
     threshold: float | None = None,
 ) -> dict[str, Any]:
     """Write ``output`` (ONNX, dynamic batch) and ``output.json`` describing inputs,
-    preprocessing, calibration, lineage and ship status. Needs the ``onnx`` and
+    preprocessing and calibration. Needs the ``onnx`` and
     ``onnxscript`` packages; with ``onnxruntime`` installed the export is checked
     against the torch model."""
-    orienter = Orienter.load(
-        checkpoint, research=research, temperature=temperature, threshold=threshold
-    )
+    orienter = Orienter.load(checkpoint, temperature=temperature, threshold=threshold)
     module = exportable(orienter)
     config = orienter.config
     inputs = example_inputs(config, 2)
@@ -1056,18 +942,9 @@ def export_onnx(
         "schema": EXPORT_SCHEMA,
         "model_id": MODEL_ID,
         "file": output.name,
-        "sha256": sha256_file(output),
         "bytes": output.stat().st_size,
         "opset": opset,
         "checkpoint": {**orienter.info, "path": str(checkpoint)},
-        "track": payload.get("track"),
-        "lineage": payload.get("lineage"),
-        "data_spec": payload.get("data_spec"),
-        "data_spec_sha256": payload.get("data_spec_sha256"),
-        "data_sources": payload.get("data_sources"),
-        "orient_data_sha256": payload.get("orient_data_sha256"),
-        "shippable": orienter.info["shippable"],
-        "research": research,
         "temperature": orienter.temperature,
         "threshold": orienter.threshold,
         "calibration": payload.get("calibration"),
@@ -1132,12 +1009,10 @@ def _parser() -> argparse.ArgumentParser:
     predict = commands.add_parser("predict", help="orientation of page crops (JSON lines)")
     predict.add_argument("images", nargs="+")
     predict.add_argument("--checkpoint", required=True)
-    predict.add_argument("--research", action="store_true", help="allow non-release weights")
     predict.add_argument("--device", default="cpu")
     export = commands.add_parser("export", help="ONNX export with a JSON sidecar")
     export.add_argument("--checkpoint", required=True)
     export.add_argument("--output", required=True)
-    export.add_argument("--research", action="store_true")
     export.add_argument("--opset", type=int, default=18)
     export.add_argument("--temperature", type=float, default=None)
     export.add_argument("--threshold", type=float, default=None)
@@ -1156,7 +1031,6 @@ def main(argv: list[str] | None = None) -> int:
             record = export_onnx(
                 args.checkpoint,
                 args.output,
-                research=args.research,
                 opset=args.opset,
                 temperature=args.temperature,
                 threshold=args.threshold,
@@ -1172,12 +1046,12 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
             return 2
-        print(json.dumps({k: record[k] for k in ("file", "sha256", "shippable", "parity")}))
+        print(json.dumps({k: record[k] for k in ("file", "parity")}))
         return 0
     from ..image_io import load_image
 
     try:
-        orienter = Orienter.load(args.checkpoint, device=args.device, research=args.research)
+        orienter = Orienter.load(args.checkpoint, device=args.device)
     except FlattenerError as error:
         print(
             json.dumps(

@@ -1,33 +1,27 @@
 # Flattener in the browser
 
-A static TypeScript + Vite application that runs Flattener's page gate, orientation
-model, and dewarper in a dedicated Web Worker using ONNX Runtime Web. It tries
-WebGPU first and falls back to WASM on the CPU. Photos stay in browser memory;
-there is no processing server, upload endpoint, telemetry, or third-party CDN.
+A TypeScript + Vite app for scanning document photos locally.
+ONNX Runtime Web runs the page detector, orientation model and dewarper in a Web Worker, using WebGPU or a CPU/WASM fallback.
+Photos stay in browser memory.
 
 ## Run locally
 
-Use Node.js 22.12 or newer and the repository's Python 3.12 environment.
+Use Node.js 22.12 or newer and Python 3.12.
+The exporter downloads the default [scanner models](https://huggingface.co/DevWorld/flattener) on first use.
+
 From the repository root:
 
 ```sh
-uv sync --locked --group web-export
-uv run --locked --group web-export python tools/export_web.py --bundle /path/to/bundle-v9.json
+uv sync --group web-export
+uv run --group web-export python tools/models/export_onnx.py
 cd web
 npm ci
 npm run dev
 ```
 
-In this development workspace the verified bundle is at
-`~/.cache/flattener/scan-weights/bundle-v9.json`. Checkpoints and generated ONNX
-files are not committed. A fresh clone needs a compatible release bundle before
-it can process photos. Public weight hosting is not configured by this change.
-
-The exporter verifies the source bundle and release checks, exports FP32 models,
-runs the ONNX checker, and compares each model with PyTorch on varying input.
-It writes `manifest.json` and three self-contained `.onnx` files to `public/models/`.
-The release used here exports to 35,637,392 bytes total (about 35.6 MB).
-The unused training 3D head is omitted from the dewarper export.
+The exporter writes `manifest.json` and three FP32 ONNX models to `public/models/`.
+Model files are generated locally and excluded from Git.
+Pass `--bundle /path/to/bundle.json` to export a custom bundle.
 
 ## Build and host
 
@@ -36,136 +30,90 @@ npm run build
 npm run preview
 ```
 
-Deploy the complete `web/dist/` directory to a static host over HTTPS. Relative
-asset paths support hosting beneath a subdirectory. The build includes the model
-files present in `public/models/`, fonts, the sample, worker, and WASM runtime.
-Keep `runtime/*.mjs` served as JavaScript and `runtime/*.wasm` as
-`application/wasm`. Localhost is also a secure context. Plain HTTP on a remote
-host cannot provide the secure APIs used by the scanner.
+Deploy `web/dist/` to a static host over HTTPS.
+The build includes the models, fonts, sample image, workers and WASM runtime.
+Relative asset paths support hosting beneath a subdirectory.
+Serve `runtime/*.mjs` as JavaScript and `runtime/*.wasm` as `application/wasm`.
+Enable WASM multithreading by serving the app and worker scripts with these response headers:
 
-No cross-origin isolation headers are needed: the WASM fallback uses one thread.
-The first scan downloads about 36 MB of models plus roughly 25 MB of runtime
-(before HTTP compression). Subsequent model loads use a hash-verified Cache API
-entry where browser storage is available. This is not an installable offline PWA;
-reopening the page still requires its application assets and manifest.
+```text
+Cross-Origin-Opener-Policy: same-origin
+Cross-Origin-Embedder-Policy: require-corp
+```
 
-## Current capabilities
+The development and preview servers set these headers automatically.
+Use localhost during development.
 
-- Open one JPEG, PNG, or WebP by file picker, drop, or paste.
-- Detect the dominant page and correct perspective and paper curvature.
-- Choose Quick (one prediction) or Refined (flip TTA and two tight crop passes).
-- Estimate text direction before and after correction; rotate the result manually.
-- Watch real page masks, predicted surface meshes, crop refinements, the flattened
-  page, estimated paper lighting, and color correction as they are computed.
-  Revisit these images under **See processing steps** after scanning.
-- Balance paper color and reduce smooth lighting variation with **Clean color**;
-  switch to **Original color** to preserve the uncorrected scan's colors.
-- Propose possible fingers near page edges; review and edit the red selection
-  with an add/erase brush before filling it with surrounding paper color.
-- Undo brush strokes, undo applied edits, or reset color, removal, and rotation.
-- Compare the source and scan, inspect at 100%, and download a PNG.
-- Cancel a scan by terminating its worker; cached models are reusable afterward.
-- Reject non-finite, folded, or substantially out-of-frame predicted geometry.
+The first scan downloads about 36 MB of models and 25 MB of runtime before compression.
+Models are cached in browser storage when available.
+Reopening the app loads its application assets and manifest from the host.
+The WASM fallback uses up to four threads according to the device's logical core count.
+Browsers without cross-origin isolation or WASM thread support use one thread.
 
-The workspace shows one primary action at a time: choose a photo, flatten it,
-then save the result. Refined correction and automatic orientation are selected
-by default. Open **Scan settings** to change options, scan again, or inspect image
-dimensions and processing details. Interface text stays at least 16px on mobile
-and desktop.
+## Scanning and editing
+
+- Open **Camera** for a live page outline. Taking a photo starts flattening automatically.
+  The scanner loads and warms up while you frame the page, then stays ready for the next photo.
+  You can take a photo while it prepares; processing starts as soon as it is ready.
+  Camera access requires HTTPS or localhost and browser permission.
+  The camera closes after capture, on leaving the page, or when the tab is hidden.
+- Open a JPEG, PNG or WebP by file picker, drop or paste.
+- Scans start with Quick processing and automatic orientation.
+  Choose **Refine scan** on the result to run flip averaging and two crop refinement passes.
+  The current scan stays visible and can be saved while refinement runs.
+  Canceling or failing refinement keeps that scan and its edits; completing refinement replaces them.
+- Follow page detection, geometry and color correction under **See processing steps**.
+- Use **Clean color** to balance paper color and smooth lighting variation.
+- Review suggested fingers near page edges, then adjust the selection with the brush.
+- Undo edits, rotate the result, compare it with the source, inspect at 100% and save a PNG.
+- Use **Scan settings** to change options and scan again.
+
+The browser processes one page at a time.
+Inputs are limited to 40 MB and 20 megapixels, with at least 64 pixels on each side.
+Output is capped at four megapixels and the selected long edge, subject to the source's sampling density.
+The browser handles EXIF orientation, color profiles and decoding.
+Processing time starts after model download and setup.
+
+For book splitting, batches and the full rendering options, use the [Python scanner](../README.md#scan).
 
 ## Color and finger cleanup
 
-All cleanup runs locally. A second worker recalculates edits from the retained,
-unedited flattened image, so repeated toggles and rotations do not accumulate
-resampling or color loss. The editor supports pointer, touch, and keyboard input.
-Arrow keys move the brush; Space paints; Shift gives smaller movements. The mask
-uses at most 512 pixels on its longest side, with up to 20 brush undo states and
-20 applied edit states. Removal is limited to 20% of the page. Canceling an edit
-or failing to start its worker keeps the previous downloadable result.
+Edits are recalculated from the original flattened image.
+The editor supports mouse, touch and keyboard input: arrows move the brush, Space paints and Shift gives smaller movements.
+Masks use up to 512 pixels on the longest side.
+Brush strokes and applied edits each have 20 undo states.
+Removal covers up to 20% of the page.
+Canceling or failing an edit keeps the previous result.
 
-Finger suggestions reuse the existing page model, whose training masks exclude
-synthetic thumbs (`tools/gate/scenes.py`). Its probabilities are mapped through
-the final dewarp grid, then filtered for localized edge intrusions and appearance
-that differs from the surrounding paper. This is **not a dedicated hand model**:
-it can miss fingertips, gloves, low-chroma hands, and fingers in the middle of a
-page, or confuse colored edge artwork with a finger. Suggestions are never applied
-without review. The brush can add missed areas or protect content. Fill restores
-paper background only; **it cannot recover covered writing or illustrations**.
+Finger suggestions use the page detector's mask and the appearance of regions near the page edge.
+Review the selection before applying it; gloves, fingers within the page and colored edge artwork may need brush adjustments.
+Filling replaces selected pixels with surrounding paper color, including any writing or illustrations inside the selection.
 
-Color correction estimates a smooth RGB paper field from bright, low-chroma
-samples in local tiles and applies bounded per-channel gains to the original
-pixels. This follows the general background-estimation principle described by
-[Bako et al., Removing Shadows from Images of Documents](https://civc.ucsb.edu/graphics/Papers/ACCV2016_DocShadow/),
-with an independent lightweight implementation rather than a reproduction of the
-paper or a neural shadow-removal model. Strong shadow boundaries, textured or
-colored paper, and large illustrations may need **Original color**. Cleanup has
-synthetic regression coverage, not a real-world quality benchmark.
+Color correction estimates paper brightness and color from local patches, then adjusts the image toward that estimate.
+For strong shadow boundaries, textured or colored paper and large illustrations, compare with **Original color**.
+See [Bako et al., Removing Shadows from Images of Documents](https://civc.ucsb.edu/graphics/Papers/ACCV2016_DocShadow/) for background-estimation methods.
 
-Processing previews come directly from the gate tensor, accepted dewarp grids,
-actual resampled image, and paper estimate. There are no simulated intermediate
-results or artificial delays. Downloads have byte-based progress; inference uses
-stage names and intermediate images because the runtime does not expose a reliable
-completion percentage. The history describes the initial scan, before manual edits.
+Processing previews show the initial scan before manual edits.
+Canceling a scan stops its worker; cached models remain available for the next scan.
 
-Input limits are 40 MB and 20 megapixels, with at least 64 pixels on each side.
-Output is capped at the selected long edge and four megapixels without upscaling
-past the estimated page sampling density. The displayed processing time excludes
-the initial model download and session setup. EXIF orientation follows the browser's
-image decoder; ICC handling and resizing can differ between browsers.
-
-This is a browser implementation for **single pages**. It does not reproduce the
-full Python scanner's candidate search, perspective fallback, content checks,
-adaptive settle pass, focal-length aspect correction, sharpening, or book split.
-Its page gate is a largest-component crop hint. Browser decoding can also differ
-from Pillow. The Python release's SOTA benchmark scores are not browser benchmark
-results. HEIC, PDF, OCR, batches, and automatic book splitting are not implemented.
-
-## Verification
+## Development
 
 ```sh
 npm test
 npm run build
 ```
 
-The 20 tests compare preprocessing, antialiasing, crop placement, text patch selection,
-grid composition, output sizing, quarter turns, and rendering against fixtures
-generated by the existing Python implementation. They also exercise geometry
-rejection, component selection, flip TTA disagreement, paper color and shadow
-correction, colored-ink preservation, exact no-op/reset behavior, mask-only pixel
-changes, selection limits, finger proposal false positives, and rotated masks.
-Regenerate the geometry fixture
-from the repository root with `uv run python tools/web_reference.py`.
+Tests cover geometry against Python fixtures, color correction, removal masks and rotations.
+Regenerate the fixtures with `uv run python tools/web/generate_fixtures.py`.
 
-The browser checks used headless Chromium 154 on Linux. On 2026-10-05, before adding
-cleanup and processing previews, the synthetic sample completed Refined processing
-on WASM in approximately 6.1 seconds and Quick processing in 1.4 seconds after model
-setup. Those timings exclude the new preview and cleanup work. Comparison, rotation, 100% view, PNG
-download, cancellation, retry with cached models, invalid-image recovery, and
-worker-start failure recovery were checked. Layouts were checked from 320px to
-1440px wide. A plain static server also completed a scan from a subdirectory URL.
-Only same-origin asset GET requests were observed; photos were never sent.
-The cleanup extension was also checked with the original sample and a procedural
-thumb generated by the existing gate augmentation. Actual intermediate events,
-color changes, pixel-exact undo/reset, automatic suggestions, brush and keyboard
-editing, erase/undo, PNG saving, and 320–1440px layouts were verified. Worker-start
-failure, edit cancellation/retry, scan cancellation/retry, and persistence of a
-cleared removal selection were also checked. The original
-sample produced no finger proposal after the appearance filter was added. Browser
-checks are smoke tests; synthetic thumb detection does not establish accuracy on
-real hands.
-With previews and cleanup enabled, a Refined pass of the original sample took
-approximately 6.8 seconds on this same WASM setup after model initialization.
-The environment did not expose a usable GPU adapter, so hardware WebGPU speed
-and parity still need testing on an actual supported device. This measurement is
-a smoke check, not a benchmark or a promised latency.
+Browser checks used Chromium on Linux with WASM.
+Testing on hardware WebGPU devices is pending.
 
-`public/sample.png` is original synthetic material, visibly labeled in the app;
-regenerate it with `uv run python tools/make_web_sample.py`. Manrope is self-hosted
-under [SIL OFL 1.1](public/fonts/OFL.txt), sourced from
-[Google Fonts](https://github.com/google/fonts/tree/main/ofl/manrope).
-Font SHA-256: `3ae11c49db0455a3cc33e37d380f20fdb8c7f8b41dc07625c177e3d87a9d6ae6`.
-ONNX Runtime Web is MIT licensed and incorporates components under MPL-2.0,
-BSD and other licenses. The build copies the repository's [LICENSE](../LICENSE),
-including component notices and MPL source links, to `dist/LICENSE`; the footer
-links to it. The build pins the reviewed runtime version so an upgrade requires
-updating those notices. Font licenses cover the font files, not the raster sample.
+## Assets and licenses
+
+Generate `public/sample.png` with `uv run python tools/web/generate_sample.py`.
+The sample is a synthetic document.
+Manrope comes from [Google Fonts](https://github.com/google/fonts/tree/main/ofl/manrope) under [SIL OFL 1.1](public/fonts/OFL.txt).
+
+The build copies [LICENSE](../LICENSE) to `dist/LICENSE` and links it from the footer.
+Update its component notices when upgrading ONNX Runtime.

@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from flattener.benchmark import matlab, metrics
+from tools.benchmark import matlab, metrics
 
 
 def _krylov_solution(matrix: np.ndarray, target: np.ndarray, iterations: int) -> np.ndarray:

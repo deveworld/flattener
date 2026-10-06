@@ -55,7 +55,6 @@ def _new_metadata(config: RenderConfig, *, timing_scope: str = "render") -> dict
         "actual_output_size": None,
         "coarse_grid_size": None,
         "model_id": None,
-        "model_sha256": None,
         "versions": {
             "flattener": __version__,
             "python": platform.python_version(),
@@ -164,9 +163,7 @@ def render(
 
         stage = "render"
         stage_started = perf_counter()
-        # Keep owned source storage. A source-borrowing experiment reduced
-        # copy time but increased measured whole-pipeline peak RSS; retaining
-        # this buffer also normalizes read-only and unusual-stride inputs.
+        # Own a contiguous buffer for read-only and unusual-stride inputs.
         source = np.array(image, order="C", copy=True)
         all_valid = bool(valid_mask.all())
         # grid_sample reads its grid. A fully valid contiguous writable grid

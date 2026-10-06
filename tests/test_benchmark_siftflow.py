@@ -6,7 +6,7 @@ import os
 import numpy as np
 import pytest
 
-from flattener.benchmark import metrics, siftflow
+from tools.benchmark import metrics, siftflow
 
 
 def test_level_offsets_follow_siftflowc2f_and_the_scan_pyramid_is_reused_only_when_equal():

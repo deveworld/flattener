@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from flattener.benchmark import ocr
+from tools.benchmark import ocr
 
 
 def _dp_distance(first: str, second: str) -> int:
@@ -104,8 +104,6 @@ def test_tesseract_is_called_like_pytesseract(monkeypatch, tmp_path):
 def _build_metadata(name, builds=ocr.CALIBRATED_TESSERACT_BUILDS):
     build = builds[name]
     return {
-        "executable_sha256": build["executable_sha256"],
-        "traineddata": {"eng.traineddata": {"sha256": build["eng_traineddata_sha256"]}},
         "version": f"{build['version_first_line']}\n leptonica-{build['leptonica_version']}\n",
         "version_first_line": build["version_first_line"],
     }
@@ -119,7 +117,7 @@ def test_report_is_comparable_only_with_a_calibrated_build(tmp_path, monkeypatch
         Image.new("L", (6, 8), 100).save(scans / f"docunet-reference-{k}.png")
         for m in (1, 2):
             Image.new("L", (5, 7), 100).save(predictions / f"{k}_{m}.png")
-    monkeypatch.setattr(ocr, "hash_references", lambda *args, **kwargs: {})
+    monkeypatch.setattr(ocr, "reference_paths", lambda *args, **kwargs: {})
     name = sorted(ocr.CALIBRATED_TESSERACT_BUILDS)[0]
 
     class Calibrated(_FakeEngine):
@@ -131,14 +129,13 @@ def test_report_is_comparable_only_with_a_calibrated_build(tmp_path, monkeypatch
     )
     assert report["comparable"] is True
     assert report["comparability"]["tesseract_build"] == name
-    same_version = {**_build_metadata(name), "executable_sha256": "0" * 64}
+    same_version = {**_build_metadata(name), "version": "tesseract 5.0.1\n leptonica-0.1\n"}
     Calibrated.metadata = lambda self: same_version
     other = ocr.evaluate_ocr(
         predictions, pattern="{k}_{m}.png", engine=Calibrated(), references_dir=scans, workers=1
     )
     assert other["comparable"] is False
     assert other["comparability"]["tesseract_build"] is None
-    assert other["comparability"]["tesseract_build_failed_calibration"] is None
     assert other["comparability"]["tesseract_version_matches"] is True
 
 
@@ -176,7 +173,6 @@ def test_evaluate_ocr_report_with_fake_engine(tmp_path):
         protocols=["doctr", "uvdoc"],
         engine=engine,
         references_dir=scans,
-        verify_references=False,
         crop_dir=crops,
         workers=2,
     )
@@ -195,7 +191,7 @@ def test_evaluate_ocr_report_with_fake_engine(tmp_path):
     assert report["texts"]["doctr"]["reference"]["1"] == reference
     assert report["comparable"] is False
     assert report["config"]["tesseract_config"] == {"doctr": "", "uvdoc": "--oem 1"}
-    assert len(report["inputs"]["crops"]) == 50
+    assert report["inputs"]["crops_dir"] == str(crops.resolve())
     assert doctr["setting1_doctr_60"]["prediction_failures"] is None  # no predictions.json
     items = [
         {"output": f"{k}_{m}.png", "action": "written", "status": "success"}
@@ -208,7 +204,7 @@ def test_evaluate_ocr_report_with_fake_engine(tmp_path):
     (predictions / "predictions.json").write_text(json.dumps(record))
     counted = ocr.evaluate_ocr(
         predictions, pattern="{k}_{m}.png", engine=engine, references_dir=scans,
-        verify_references=False, workers=1,
+         workers=1,
     )["summary"]["doctr"]  # fmt: skip
     assert counted["setting1_doctr_60"]["prediction_failures"] == 2  # documents 1 and 2
     assert counted["setting1_doctr_60"]["prediction_unrecorded"] == 1
@@ -218,7 +214,7 @@ def test_evaluate_ocr_report_with_fake_engine(tmp_path):
     with pytest.raises(FileNotFoundError):
         ocr.evaluate_ocr(
             predictions, pattern="{k}_{m}.png", protocols=["uvdoc"], engine=engine,
-            references_dir=scans, verify_references=False, crop_dir=crops,
+            references_dir=scans,  crop_dir=crops,
         )  # fmt: skip
     with pytest.raises(ValueError):
         ocr.evaluate_ocr(predictions, pattern="{k}_{m}.png", protocols=["tesseract"])

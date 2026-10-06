@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from flattener.benchmark import matlab
+from tools.benchmark import matlab
 
 
 def _round_half_away(value: float) -> float:

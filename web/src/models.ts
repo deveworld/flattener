@@ -19,6 +19,8 @@ export async function readManifest(base: string): Promise<Manifest> {
   }
   if (
     manifest.schema !== 'flattener-web-bundle-1' ||
+    typeof manifest.version !== 'string' ||
+    !manifest.version ||
     manifest.models?.dewarp?.grid_convention !== 'flattener'
   ) {
     throw new Error('This model bundle is not compatible with the web scanner.');
@@ -28,7 +30,6 @@ export async function readManifest(base: string): Promise<Manifest> {
     if (
       !model ||
       !/^[\w.-]+\.onnx$/.test(model.file) ||
-      !/^[a-f0-9]{64}$/.test(model.sha256) ||
       !Number.isInteger(model.bytes) ||
       model.bytes < 1
     ) {
@@ -38,18 +39,14 @@ export async function readManifest(base: string): Promise<Manifest> {
   return manifest;
 }
 
-async function verified(data: ArrayBuffer, model: ModelSpec): Promise<boolean> {
-  if (data.byteLength !== model.bytes) return false;
-  const hash = await crypto.subtle.digest('SHA-256', data);
-  return (
-    Array.from(new Uint8Array(hash), (b) => b.toString(16).padStart(2, '0')).join('') ===
-    model.sha256
-  );
-}
-
-async function modelBytes(base: string, model: ModelSpec, report: Report): Promise<ArrayBuffer> {
+async function modelBytes(
+  base: string,
+  model: ModelSpec,
+  version: string,
+  report: Report,
+): Promise<ArrayBuffer> {
   const url = new URL(`models/${model.file}`, base);
-  url.searchParams.set('v', model.sha256);
+  url.searchParams.set('v', version);
   let cache: Cache | undefined;
   try {
     cache = await caches.open('flattener-models-v1');
@@ -59,7 +56,7 @@ async function modelBytes(base: string, model: ModelSpec, report: Report): Promi
   const cached = await cache?.match(url);
   if (cached) {
     const data = await cached.arrayBuffer();
-    if (await verified(data, model)) return data;
+    if (data.byteLength === model.bytes) return data;
     await cache?.delete(url);
   }
   const response = await fetch(url);
@@ -98,8 +95,8 @@ async function modelBytes(base: string, model: ModelSpec, report: Report): Promi
     data.set(chunk, offset);
     offset += chunk.length;
   }
-  if (!(await verified(data.buffer, model)))
-    throw new Error('A model download failed its integrity check. Please reload and try again.');
+  if (data.byteLength !== model.bytes)
+    throw new Error('A model download has an unexpected size. Please reload and try again.');
   try {
     await cache?.put(
       url,
@@ -114,6 +111,7 @@ async function modelBytes(base: string, model: ModelSpec, report: Report): Promi
 export class Models {
   private sessions: Partial<Record<Role, ort.InferenceSession>> = {};
   private bytes: Partial<Record<Role, ArrayBuffer>> = {};
+  private activeRoles: Role[] = roles;
   constructor(
     readonly manifest: Manifest,
     private base: string,
@@ -121,10 +119,9 @@ export class Models {
     public backend: Backend = 'wasm',
   ) {}
 
-  async load(preferred?: Backend) {
-    if (!crypto.subtle)
-      throw new Error('Open this app over HTTPS or localhost so the scanner can load securely.');
-    ort.env.wasm.numThreads = 1; // Works on static hosts without COOP/COEP headers.
+  async load(preferred?: Backend, selected: Role[] = roles) {
+    this.activeRoles = selected;
+    ort.env.wasm.numThreads = 0; // Let the runtime choose up to four threads when supported.
     ort.env.wasm.proxy = false; // This code is already in a dedicated worker.
     ort.env.wasm.wasmPaths = new URL('runtime/', this.base).href;
     const gpu = (navigator as Navigator & { gpu?: { requestAdapter: () => Promise<unknown> } }).gpu;
@@ -137,8 +134,13 @@ export class Models {
       }
     }
     this.backend = useGPU ? 'webgpu' : 'wasm';
-    for (const role of roles)
-      this.bytes[role] = await modelBytes(this.base, this.manifest.models[role], this.report);
+    for (const role of this.activeRoles)
+      this.bytes[role] = await modelBytes(
+        this.base,
+        this.manifest.models[role],
+        this.manifest.version,
+        this.report,
+      );
     try {
       await this.createSessions();
     } catch (error) {
@@ -149,7 +151,7 @@ export class Models {
 
   private async createSessions() {
     this.report({ type: 'backend', backend: this.backend });
-    for (const role of roles) {
+    for (const role of this.activeRoles) {
       this.report({
         type: 'progress',
         stage: 'Preparing scanner',
@@ -171,6 +173,18 @@ export class Models {
       detail: 'Your graphics device could not run the scanner. Processing will continue locally.',
     });
     await this.createSessions();
+  }
+
+  async warmup() {
+    for (const role of this.activeRoles) {
+      const inputs = Object.fromEntries(
+        Object.entries(this.manifest.models[role].inputs).map(([name, shape]) => [
+          name,
+          new Float32Array(shape.reduce((size, dimension) => size * dimension, 1)).fill(0.5),
+        ]),
+      );
+      await this.run(role, inputs);
+    }
   }
 
   async run(

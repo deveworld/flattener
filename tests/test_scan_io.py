@@ -1,6 +1,5 @@
 """Scan source decoding (EXIF, draft decode, ICC) and atomic image/record writes."""
 
-import hashlib
 import io
 import os
 
@@ -44,8 +43,7 @@ def test_jpegs_decode_whole_or_draft_with_exif_and_icc(tmp_path):
     info = source.info
     assert (info.size, info.full_size, info.scale, info.format) == ((80, 60), (80, 60), 1, "JPEG")
     assert (info.exif_orientation, info.focal_length_35mm) == (6, 26.0)
-    assert info.file_sha256 == hashlib.sha256(path.read_bytes()).hexdigest()
-    assert source.icc_profile == ICC and info.icc_sha256 == hashlib.sha256(ICC).hexdigest()
+    assert source.icc_profile == ICC
     assert source.reasons == () and source.path == str(path)
     # A photo over the input limit is draft-decoded at a reduced scale.
     pixels = smooth_rgb(480, 640)

@@ -13,7 +13,6 @@ import torch.nn.functional as F
 from PIL import Image
 
 from flattener import FlattenerError, RenderConfig
-from flattener.benchmark.reporting import prediction_record, report_evidence
 from flattener.contracts import Status
 from flattener.dewarp import predict
 from flattener.dewarp.checkpoint import CHECKPOINT_SCHEMA, save_checkpoint
@@ -48,6 +47,7 @@ from flattener.dewarp.predict import (
     with_tta,
 )
 from flattener.renderer import render
+from tools.benchmark.reporting import prediction_record, report_evidence
 
 TINY = DewarpModelConfig(input_size=(64, 48), grid_size=(5, 4), num_filter=4)
 
@@ -95,8 +95,6 @@ def _checkpoint(path, seed=0):
             "track": "release",
             "model_config": TINY.to_dict(),
             "lineage": [{"kind": "scratch"}],
-            "data_spec_sha256": "0" * 64,
-            "code": {"sha256": "1" * 64},
             "model_state": model.state_dict(),
         },
     )
@@ -148,7 +146,7 @@ def test_a_checkpoint_predicts_what_its_model_gives_on_the_resized_image(tmp_pat
     path = tmp_path / "model.pt"
     model = _checkpoint(path)
     dewarper = load_dewarper(path)
-    assert dewarper.info["track"] == "release" and dewarper.info["kind"] == "checkpoint"
+    assert dewarper.info["kind"] == "checkpoint"
     image = np.random.default_rng(1).integers(0, 256, (40, 30, 3), dtype=np.uint8)
     tensor = F.interpolate(
         torch.from_numpy(image).permute(2, 0, 1)[None].float() / 255,
@@ -171,7 +169,7 @@ def _identity_grid(dewarper, image):
     return _identity(*dewarper.config.grid_size)
 
 
-def test_docunet_batch_writes_crop_sized_outputs_and_keeps_only_matching_ones(
+def test_docunet_batch_renders_crop_sized_outputs_and_checks_existing_runs(
     tmp_path, capsys, monkeypatch
 ):
     # A random tiny model folds its map; an identity grid passes the render checks.
@@ -204,14 +202,14 @@ def test_docunet_batch_writes_crop_sized_outputs_and_keeps_only_matching_ones(
             assert written.size == size[::-1]
     report = json.loads((output / "predictions.json").read_text())
     assert [item["output"] for item in report["items"]] == ["1_1.png", "10_2.png"]
-    assert report["model"]["track"] == "release" and report["inputs"] == "docunet_crop"
-    assert report["evidence"]["evidence_kind"] == "smoke_training"  # a 3-step checkpoint
+    assert report["inputs"] == "docunet_crop"
+    assert report["evidence"]["checkpoint_step"] == 3
     assert report["evidence"]["measurement"] == "predictions"
-    assert main(arguments) == 0 and json.loads(capsys.readouterr().out)["written"] == 0
+    assert main(arguments) == 0 and json.loads(capsys.readouterr().out)["written"] == 2
     kept = json.loads((output / "predictions.json").read_text())["items"]
     assert [(item["action"], item["status"], item["size"]) for item in kept] == [
-        ("kept", "success", [45, 33]),
-        ("kept", "success", [30, 52]),
+        ("written", "success", [45, 33]),
+        ("written", "success", [30, 52]),
     ]
     other = tmp_path / "other.pt"
     _checkpoint(other, seed=1)
@@ -221,7 +219,7 @@ def test_docunet_batch_writes_crop_sized_outputs_and_keeps_only_matching_ones(
     report = json.loads((output / "predictions.json").read_text())
     report["items"] = report["items"][:1]
     (output / "predictions.json").write_text(json.dumps(report))
-    assert main(arguments) == 0 and json.loads(capsys.readouterr().out)["written"] == 1
+    assert main(arguments) == 0 and json.loads(capsys.readouterr().out)["written"] == 2
     # Outputs of unknown provenance (no report) are refused unless --overwrite.
     (output / "predictions.json").unlink()
     with pytest.raises(FlattenerError, match="without predictions.json"):
@@ -239,12 +237,12 @@ def test_docunet_batch_writes_crop_sized_outputs_and_keeps_only_matching_ones(
         return counts["written"], counts["kept"]
 
     assert run("truncate") == (2, 0)  # the rounded images are not kept for truncation
-    assert run("truncate") == (0, 2)
+    assert run("truncate") == (2, 0)
     found = prediction_record(output)
     assert found["quantize"] == report_evidence(found)["quantize"] == "truncate"
     assert run("round") == (2, 0)
     # A record without the field predates the option; its images were rounded.
-    for quantize, expected in (("round", (0, 2)), ("truncate", (2, 0))):
+    for quantize, expected in (("round", (2, 0)), ("truncate", (2, 0))):
         record = json.loads(record_path.read_text())
         del record["quantize"]
         record_path.write_text(json.dumps(record))
@@ -494,7 +492,7 @@ class Tilted(torch.nn.Module):
 
 def _tilted_dewarper():
     config = DewarpModelConfig(input_size=(96, 72), grid_size=(9, 7), num_filter=4)
-    info = {"sha256": "seeded-uvdocnet", "kind": "checkpoint", "step": 1, "track": "release"}
+    info = {"path": "seeded-uvdocnet", "kind": "checkpoint", "step": 1, "track": "release"}
     return Dewarper(Tilted(config).eval(), config, torch.device("cpu"), info)
 
 
@@ -608,11 +606,11 @@ def test_the_batch_writes_what_rectify_renders_and_refuses_another_pipeline(tmp_
     assert len(calls) == 2 and report["pipeline"] == other
     assert [item["outcome"] for item in report["items"]] == ["rectified", "rectified"]
     assert all(item["status"] != "ignored" for item in report["items"])
-    # The same pipeline keeps its outputs; the default pipeline is now the other one.
+    # Repeating the pipeline renders the inputs again.
     again = rectify_batch(
         dewarper, inputs, tmp_path, rectifier=_pipeline_rectifier(dewarper, calls), pipeline=other
     )
-    assert len(calls) == 2 and again["counts"]["kept"] == 2
+    assert len(calls) == 4 and again["counts"]["written"] == 2
     with pytest.raises(FlattenerError, match="another pipeline"):
         rectify_batch(dewarper, inputs, tmp_path)
     assert prediction_record(tmp_path)["pipeline"] == other

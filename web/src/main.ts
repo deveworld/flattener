@@ -1,4 +1,5 @@
 import './style.css';
+import { Camera } from './camera';
 import { emptyMask, maskCount } from './cleanup';
 import { MaskEditor } from './mask-editor';
 import type {
@@ -8,6 +9,7 @@ import type {
   Mask,
   Options,
   ProcessingStep,
+  PreparationState,
   ScanMetadata,
   WorkerReply,
   WorkerRequest,
@@ -25,8 +27,12 @@ let originalURL = '',
   metadata: ScanMetadata | undefined;
 let busy = false,
   editing = false,
-  photoReady = false;
+  photoReady = false,
+  flattenOnLoad = false;
 let focusAction = false;
+let refining = false;
+let activeOptions: Options | undefined, resultOptions: Options | undefined;
+let preparationState: PreparationState = 'idle';
 let rawBlob: Blob | undefined, suggestion: Mask | undefined, settings: EditSettings | undefined;
 let editWorker: Worker | undefined,
   editId = 0,
@@ -35,10 +41,48 @@ let pendingEdit: { settings: EditSettings; history: 'push' | 'pop' | 'reset' } |
 const editHistory: EditSettings[] = [];
 const steps = new Map<string, ProcessingStep & { url: string; button: HTMLButtonElement }>();
 const maskEditor = new MaskEditor();
+const camera = new Camera(
+  (file) => chooseFile(file, { flatten: true }),
+  () => fileInput.click(),
+);
 const cloneSettings = (s: EditSettings): EditSettings => ({
   ...s,
   mask: { ...s.mask, data: s.mask.data.slice() },
 });
+
+function preparationStatus(state: PreparationState) {
+  preparationState = state;
+  const labels = {
+    idle: 'Scanner will prepare when needed.',
+    loading: 'Preparing scanner…',
+    ready: 'Ready to flatten',
+    error: 'Scanner could not load.',
+  };
+  for (const element of document.querySelectorAll<HTMLElement>('.scanner-preparation')) {
+    element.dataset.state = state;
+    element.querySelector('[data-scanner-status]')!.textContent = labels[state];
+    element.querySelector<HTMLButtonElement>('[data-prepare-retry]')!.hidden = state !== 'error';
+  }
+}
+
+function prepareScanner() {
+  if (preparationState === 'loading' || preparationState === 'ready' || busy) return;
+  preparationStatus('loading');
+  try {
+    scannerWorker().postMessage({
+      type: 'prepare',
+      base: new URL('.', document.baseURI).href,
+    } satisfies WorkerRequest);
+  } catch {
+    worker?.terminate();
+    worker = undefined;
+    preparationStatus('error');
+  }
+}
+
+for (const button of document.querySelectorAll<HTMLButtonElement>('[data-prepare-retry]'))
+  button.onclick = prepareScanner;
+window.setTimeout(prepareScanner, 250);
 
 function showError(message: string) {
   $('error').textContent = message;
@@ -55,9 +99,9 @@ function busyState(value: boolean) {
   scanButton.disabled = locked || !selected || !photoReady;
   scanButton.hidden = value || !!resultBlob;
   $('cancel').hidden = !value && !editing;
-  $('cancel').textContent = editing ? 'Cancel edit' : 'Cancel scan';
+  $('cancel').textContent = editing ? 'Cancel edit' : refining ? 'Cancel refinement' : 'Cancel scan';
   $<HTMLFieldSetElement>('settings-fields').disabled = locked;
-  for (const id of ['choose', 'rescan', 'rotate', 'zoom', 'remove-fingers'])
+  for (const id of ['choose', 'camera-new', 'rescan', 'refine', 'rotate', 'zoom', 'remove-fingers'])
     $<HTMLButtonElement>(id).disabled = locked;
   $<HTMLSelectElement>('color-mode').disabled = locked;
   $<HTMLButtonElement>('undo-edit').disabled = locked || !editHistory.length;
@@ -68,7 +112,11 @@ function busyState(value: boolean) {
     !settings || (settings.cleanColor && !settings.rotation && !maskCount(settings.mask));
   $('progress').hidden = !value && !editing;
   $('work-controls').hidden = !selected || editorOpen;
-  $('result-actions').hidden = !resultBlob || locked;
+  $('result-actions').hidden = !resultBlob || editing || editorOpen;
+  $('refine-controls').hidden = !resultBlob || resultOptions?.quality !== 'fast' || locked;
+  $('refine-help').textContent = editHistory.length
+    ? 'Takes longer and replaces your color, rotation and removal edits.'
+    : 'Take more time to refine the page shape.';
   $('edit-controls').hidden = !resultBlob || busy || editorOpen;
   $('adjustments').hidden = !resultBlob || busy || editorOpen;
   $('view-controls').hidden = !resultBlob || locked || !$('process-view').hidden;
@@ -126,9 +174,9 @@ function addStep(step: ProcessingStep) {
   }
   steps.set(step.id, { ...step, url, button });
   $('process-history').hidden = false;
-  displayStep(step.id);
+  if (!refining) displayStep(step.id);
 }
-function clearResult() {
+function clearEdits() {
   editWorker?.terminate();
   editWorker = undefined;
   ++editId;
@@ -141,6 +189,11 @@ function clearResult() {
   suggestion = undefined;
   settings = undefined;
   editHistory.length = 0;
+}
+function clearResult() {
+  clearEdits();
+  resultOptions = undefined;
+  refining = false;
   clearSteps();
   if (resultURL) URL.revokeObjectURL(resultURL);
   resultURL = '';
@@ -149,6 +202,7 @@ function clearResult() {
   scanImage.hidden = true;
   scanImage.removeAttribute('src');
   $('result-actions').hidden = true;
+  $('refine-controls').hidden = true;
   $('edit-controls').hidden = true;
   $('rescan-controls').hidden = true;
   $('scan-details').hidden = true;
@@ -170,6 +224,7 @@ function scrollTo(element: HTMLElement, block: ScrollLogicalPosition = 'start') 
 function rejectPhoto(detail: string) {
   selected = undefined;
   photoReady = false;
+  flattenOnLoad = false;
   originalImage.hidden = true;
   originalImage.removeAttribute('src');
   URL.revokeObjectURL(originalURL);
@@ -189,12 +244,20 @@ function rejectPhoto(detail: string) {
 function scanFailed(detail: string) {
   worker?.terminate();
   worker = undefined;
+  preparationStatus('idle');
+  const keepResult = refining && !!resultBlob;
+  refining = false;
   busyState(false);
-  view('original');
+  view(keepResult ? 'scan' : 'original');
   showError(detail);
-  message('The scan could not be completed.', 'Adjust the settings or try a different photo.');
+  message(
+    keepResult ? 'Refinement could not be completed.' : 'The scan could not be completed.',
+    keepResult
+      ? 'Your previous scan is still available. You can retry refinement.'
+      : 'Adjust the settings or try a different photo.',
+  );
   scanButton.textContent = 'Try again';
-  if (focusAction) scanButton.focus({ preventScroll: true });
+  if (focusAction) (keepResult ? $('refine') : scanButton).focus({ preventScroll: true });
 }
 function view(mode: 'original' | 'scan' | 'compare') {
   $('images').hidden = false;
@@ -207,8 +270,8 @@ function view(mode: 'original' | 'scan' | 'compare') {
   for (const name of ['original', 'scan', 'compare'])
     $(`show-${name}`).setAttribute('aria-pressed', String(name === mode));
 }
-function chooseFile(file: File, sample = false) {
-  if (busy || editing || editorOpen) return;
+function chooseFile(file: File, { sample = false, flatten = false } = {}) {
+  if (busy || editing || editorOpen || camera.isOpen) return;
   if (file.size > 40 * 1024 * 1024) {
     showError('This photo is larger than 40 MB. Choose a smaller image.');
     return;
@@ -217,8 +280,10 @@ function chooseFile(file: File, sample = false) {
     showError('Choose a JPEG, PNG, or WebP photo. HEIC and PDF files are not supported yet.');
     return;
   }
+  prepareScanner();
   selected = file;
   photoReady = false;
+  flattenOnLoad = flatten;
   $('error').hidden = true;
   clearResult();
   if (originalURL) URL.revokeObjectURL(originalURL);
@@ -257,19 +322,24 @@ originalImage.onload = () => {
   busyState(false);
   message('Ready to flatten.');
   if (matchMedia('(max-width: 700px)').matches) scrollTo($('work-controls'), 'end');
+  if (flattenOnLoad) {
+    flattenOnLoad = false;
+    scanButton.click();
+  }
 };
 originalImage.onerror = () =>
   rejectPhoto('This image could not be opened. Save it as JPEG or PNG and try again.');
 $('choose').onclick = $('drop-choose').onclick = () => fileInput.click();
+for (const id of ['open-camera', 'camera-new']) {
+  $(id).onclick = () => {
+    if (busy || editing || editorOpen) return;
+    prepareScanner();
+    camera.open($(id));
+  };
+}
 fileInput.onchange = () => {
   if (fileInput.files?.[0]) chooseFile(fileInput.files[0]);
   fileInput.value = '';
-};
-$<HTMLSelectElement>('quality').onchange = () => {
-  $('quality-help').textContent =
-    $<HTMLSelectElement>('quality').value === 'refined'
-      ? 'A closer fit to the page.'
-      : 'A faster preview.';
 };
 
 let dragDepth = 0;
@@ -315,7 +385,7 @@ $('sample').onclick = async () => {
     if (!response.ok)
       throw new Error('The sample could not be loaded. Choose your own photo or try again.');
     const blob = await response.blob();
-    chooseFile(new File([blob], 'sample-document.png', { type: 'image/png' }), true);
+    chooseFile(new File([blob], 'sample-document.png', { type: 'image/png' }), { sample: true });
   } catch (error) {
     showError(String(error instanceof Error ? error.message : error));
   } finally {
@@ -334,37 +404,16 @@ function installResult(blob: Blob) {
   download.download = `${(selected?.name ?? 'document').replace(/\.[^.]*$/, '')}-scan.png`;
 }
 
-scanButton.onclick = () => {
-  if (!selected || !photoReady || busy || editing || editorOpen) return;
-  if (!window.isSecureContext) {
-    showError('Open this app over HTTPS or localhost so the scanner can load securely.');
-    return;
-  }
-  if (!window.Worker || !window.OffscreenCanvas || !window.createImageBitmap) {
-    showError(
-      'This browser does not support the scanner. Try a current version of Chrome, Edge, Firefox, or Safari.',
-    );
-    return;
-  }
-  focusAction = scanButton.matches(':focus-visible') || $('rescan').matches(':focus-visible');
-  $('error').hidden = true;
-  clearResult();
-  view('original');
-  $<HTMLDetailsElement>('scan-settings').open = false;
-  busyState(true);
-  if (focusAction) $('cancel').focus({ preventScroll: true });
-  message('Starting your scan…');
-  $<HTMLProgressElement>('progress').removeAttribute('value');
+function scannerWorker(): Worker {
   if (!worker) {
-    try {
-      worker = new Worker(new URL('./scan.worker.ts', import.meta.url), { type: 'module' });
-    } catch {
-      scanFailed('The scanner could not start. Reload this page or try a current desktop browser.');
-      return;
-    }
+    worker = new Worker(new URL('./scan.worker.ts', import.meta.url), { type: 'module' });
+    const active = worker;
     worker.onmessage = (event: MessageEvent<WorkerReply>) => {
+      if (worker !== active) return;
       const data = event.data;
-      if (data.type === 'progress') {
+      if (data.type === 'preparation') {
+        preparationStatus(data.state);
+      } else if (data.type === 'progress') {
         message(data.stage, data.detail);
         const progress = $<HTMLProgressElement>('progress');
         if (data.fraction === undefined) progress.removeAttribute('value');
@@ -379,10 +428,13 @@ scanButton.onclick = () => {
         addStep(data);
       } else if (data.type === 'reset-steps') {
         clearSteps();
-        view('original');
+        view(refining ? 'scan' : 'original');
       } else if (data.type === 'error') {
         scanFailed(data.message);
       } else if (data.type === 'result') {
+        clearEdits();
+        resultOptions = activeOptions;
+        refining = false;
         metadata = data.metadata;
         rawBlob = data.raw;
         suggestion = data.suggestion;
@@ -408,7 +460,7 @@ scanButton.onclick = () => {
         scanButton.textContent = 'Scan again';
         view('scan');
         message(
-          'Your scan is ready.',
+          resultOptions?.quality === 'refined' ? 'Your refined scan is ready.' : 'Your scan is ready.',
           maskCount(suggestion)
             ? 'Possible fingers found. Open Remove fingers to review.'
             : 'Paper lighting and color corrected.',
@@ -418,16 +470,60 @@ scanButton.onclick = () => {
       }
     };
     worker.onerror = () => {
+      if (worker !== active) return;
+      if (!busy) {
+        active.terminate();
+        worker = undefined;
+        preparationStatus('error');
+        return;
+      }
       scanFailed(
         'The scanner stopped unexpectedly. Try again with a smaller image, or reload this page.',
       );
     };
   }
-  const options: Options = {
-    quality: $<HTMLSelectElement>('quality').value as Options['quality'],
-    orient: $<HTMLInputElement>('orient').checked,
-    maxSide: Number($<HTMLSelectElement>('resolution').value),
-  };
+  return worker;
+}
+
+function startScan(quality: Options['quality'] = 'fast') {
+  if (!selected || !photoReady || busy || editing || editorOpen) return;
+  if (quality === 'refined' && (!resultBlob || !resultOptions)) return;
+  if (!window.isSecureContext) {
+    showError('Open this app over HTTPS or localhost so the scanner can load securely.');
+    return;
+  }
+  if (!window.Worker || !window.OffscreenCanvas || !window.createImageBitmap) {
+    showError(
+      'This browser does not support the scanner. Try a current version of Chrome, Edge, Firefox, or Safari.',
+    );
+    return;
+  }
+  focusAction = [scanButton, $('rescan'), $('refine')].some((button) =>
+    button.matches(':focus-visible'),
+  );
+  $('error').hidden = true;
+  const options: Options =
+    quality === 'refined'
+      ? { ...resultOptions!, quality }
+      : {
+          quality,
+          orient: $<HTMLInputElement>('orient').checked,
+          maxSide: Number($<HTMLSelectElement>('resolution').value),
+        };
+  if (quality === 'refined') {
+    refining = true;
+    clearSteps();
+    view('scan');
+  } else {
+    clearResult();
+    view('original');
+  }
+  activeOptions = options;
+  $<HTMLDetailsElement>('scan-settings').open = false;
+  busyState(true);
+  if (focusAction) $('cancel').focus({ preventScroll: true });
+  message(refining ? 'Refining your scan…' : 'Starting your scan…');
+  $<HTMLProgressElement>('progress').removeAttribute('value');
   const request: WorkerRequest = {
     type: 'scan',
     file: selected,
@@ -435,13 +531,15 @@ scanButton.onclick = () => {
     base: new URL('.', document.baseURI).href,
   };
   try {
-    worker.postMessage(request);
+    scannerWorker().postMessage(request);
   } catch {
     scanFailed(
       'The photo could not be opened by the scanner. Choose it again or reload this page.',
     );
   }
-};
+}
+scanButton.onclick = () => startScan();
+$('refine').onclick = () => startScan('refined');
 $('rescan').onclick = () => scanButton.click();
 $('cancel').onclick = () => {
   const restoreFocus = $('cancel').matches(':focus-visible');
@@ -461,10 +559,16 @@ $('cancel').onclick = () => {
   }
   worker?.terminate();
   worker = undefined;
+  preparationStatus('idle');
+  const keepResult = refining && !!resultBlob;
+  refining = false;
   busyState(false);
-  view('original');
-  message('Scan cancelled.', 'Your photo is ready to try again.');
-  if (restoreFocus) scanButton.focus({ preventScroll: true });
+  view(keepResult ? 'scan' : 'original');
+  message(
+    keepResult ? 'Refinement cancelled.' : 'Scan cancelled.',
+    keepResult ? 'Your previous scan is still available.' : 'Your photo is ready to try again.',
+  );
+  if (restoreFocus) (keepResult ? $('refine') : scanButton).focus({ preventScroll: true });
 };
 for (const mode of ['original', 'scan', 'compare'] as const)
   $(`show-${mode}`).onclick = () => view(mode);
@@ -627,11 +731,15 @@ window.addEventListener('pagehide', () => {
 window.addEventListener('pageshow', () => {
   if (editing && !editWorker) editFailed('The edit was interrupted. Try applying it again.');
   if (busy && !worker) {
+    const keepResult = refining && !!resultBlob;
+    refining = false;
     busyState(false);
-    view('original');
+    view(keepResult ? 'scan' : 'original');
     message(
-      'Scan interrupted.',
-      'The page was left during processing. Start the scan again to continue.',
+      keepResult ? 'Refinement interrupted.' : 'Scan interrupted.',
+      keepResult
+        ? 'Your previous scan is still available.'
+        : 'The page was left during processing. Start the scan again to continue.',
     );
   }
 });

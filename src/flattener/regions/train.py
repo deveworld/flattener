@@ -1,19 +1,8 @@
-"""Page gate trainer: ``python -m flattener.regions.train --config run.json``.
+"""Train page detection from scene images and masks.
 
-Reads a data directory written by ``tools/gate/build_data.py``: ``gate-data.json`` (sources,
-tracks, licenses, counts) and ``manifest.jsonl`` (one scene JPEG and page mask PNG per
-row). Training items are drawn per source by ``source_weights`` (a source's rows share its
-weight), turned by a random quarter turn, mirrored at random and colour-jittered, then
-go through the gate's own preprocessing (``regions.segmentation``: the whole image
-resized to ``input_size``, masks nearest-exact).
-
-Loss: per-image BCE plus soft Dice (smooth 1). AdamW, warmup and cosine decay, AMP fp16
-on CUDA. Validation scores each val row: IoU at 0.5, or for a row without page one minus
-the share of the frame called page; the selection score is the mean over sources of each
-source's mean. ``best.pt`` keeps the best score and ``last.pt`` the last step, both
-``region-context-1`` checkpoints with the provenance the ship gate reads
-(``scan.shippable.gate_verdict``): track, a scratch lineage and its training step, the
-build's dewarp-schema ``data_spec`` and the license manifest ``data_sources``.
+Data comes from tools/data/pages/build_data.py.
+Training uses BCE and Dice losses with AdamW; validation measures page IoU.
+The best and final weights are saved as best.pt and last.pt.
 """
 
 from __future__ import annotations
@@ -32,7 +21,7 @@ from PIL import Image
 from torch.nn import functional as F
 
 from ..dewarp.checkpoint import environment, utc_now, write_json
-from ..dewarp.data import canonical_json, expand_path
+from ..dewarp.data import expand_path
 from .context import (
     MODEL_VERSION,
     ContextPageSegmenter,
@@ -218,9 +207,7 @@ def provenance(config: TrainConfig, summary: dict[str, Any], step: int, metrics)
             {"kind": "train", "track": config.track, "data": summary["name"], "steps": step},
         ],
         "data_spec": summary["data_spec"],
-        "data_spec_sha256": summary["build_spec_sha256"],
         "data_sources": summary["data_sources"],
-        "data_records_sha256": summary["records_sha256"],
         "training": {
             "config": config.to_dict(),
             "step": step,
@@ -275,7 +262,7 @@ def train(config: TrainConfig) -> dict[str, Any]:
 
     record({"kind": "start", "parameters": parameter_count(model_config),
             "train_rows": len(train_rows), "val_rows": len(val_rows),
-            "data": summary["name"], "config_sha256": _sha(config.to_dict())})  # fmt: skip
+            "data": summary["name"], "config": config.to_dict()})  # fmt: skip
     best, started, seen, total = None, time.perf_counter(), 0, 0.0
     model.train()
     step = 0
@@ -324,12 +311,6 @@ def train(config: TrainConfig) -> dict[str, Any]:
             "seconds": time.perf_counter() - started})  # fmt: skip
     log.close()
     return best or {}
-
-
-def _sha(value: Any) -> str:
-    import hashlib
-
-    return hashlib.sha256(canonical_json(value)).hexdigest()
 
 
 def main(argv: list[str] | None = None) -> int:

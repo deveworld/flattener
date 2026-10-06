@@ -4,7 +4,6 @@ It covers page location, orientation, dewarp and output files.
 
 Modules:
 
-- ``shippable``: the ship gate for model weights.
 - ``placement``: where each model view lies in the source, and quarter turns of result grids.
 - ``views``: model inputs of placed views, and one dewarp pass placed in the source.
 - ``locate``: the page gate's decision, the consensus rule with the pass-0 outline and the

@@ -10,9 +10,9 @@ default; ``--pages 1`` keeps one image, ``--page-order rtl`` numbers the right p
 first). An output name that is one of the input photos is a usage error, so a scan never
 replaces a photo it reads.
 
-Weights: ``--bundle B`` (a ``flattener-scan-bundle-1`` JSON file) or ``--weights W`` with
-optional ``--gate G`` and ``--orient-weights O``. Weights that fail the ship gate load only
-with ``--research``, and every record then says ``research: true``.
+The default models are downloaded from Hugging Face on first use and cached locally.
+Use ``--bundle B`` for a local bundle or ``--weights W`` with optional ``--gate G``
+and ``--orient-weights O`` for individual checkpoints.
 
 ``--long-side``, ``--output-size`` and ``--aspect`` are manual corrections
 (``ScanOverrides``), recorded as ``manual`` provenance.
@@ -135,7 +135,9 @@ def parser() -> argparse.ArgumentParser:
     parser.add_argument("images", nargs="+", type=Path, help="JPEG or PNG photos")
     parser.add_argument("--out", required=True, type=Path, help="output directory")
     weights = parser.add_argument_group("weights")
-    weights.add_argument("--bundle", type=Path, help="flattener-scan-bundle-1 JSON file")
+    weights.add_argument(
+        "--bundle", type=Path, help="local bundle JSON; default: download models from Hugging Face"
+    )
     weights.add_argument("--weights", type=Path, help="dewarp checkpoint (without --bundle)")
     weights.add_argument("--gate", type=Path, help="page gate checkpoint (with --weights)")
     weights.add_argument(
@@ -148,11 +150,6 @@ def parser() -> argparse.ArgumentParser:
     )
     weights.add_argument("--device", default="cpu")
     weights.add_argument("--threads", type=int, help="torch CPU threads")
-    weights.add_argument(
-        "--research",
-        action="store_true",
-        help="load weights that fail the ship gate; records say research: true",
-    )
     manual = parser.add_argument_group(
         "manual corrections",
         "Coordinates use EXIF-oriented decoded image pixels. For a JPEG decoded at reduced "
@@ -332,20 +329,17 @@ def _check_inputs_kept(args: argparse.Namespace, stems: list[str], fmt: str) -> 
 
 
 def _load(args: argparse.Namespace) -> Scanner:
-    if (args.bundle is None) == (args.weights is None):
-        raise FlattenerError(
-            Status.INPUT_ERROR, "usage", "give exactly one of --bundle or --weights"
-        )
-    if args.bundle is not None and (args.gate is not None or args.orient_weights is not None):
+    if args.bundle is not None and args.weights is not None:
+        raise FlattenerError(Status.INPUT_ERROR, "usage", "use either --bundle or --weights")
+    if args.weights is None and (args.gate is not None or args.orient_weights is not None):
         raise FlattenerError(
             Status.INPUT_ERROR, "usage", "--gate and --orient-weights go with --weights"
         )
     cache_size = 0 if args.no_cache else CACHE_SIZE
-    if args.bundle is not None:
+    if args.weights is None:
         return Scanner.load(
             args.bundle,
             device=args.device,
-            research=args.research,
             cache_size=cache_size,
             orient_threshold=args.orient_threshold,
         )
@@ -355,7 +349,6 @@ def _load(args: argparse.Namespace) -> Scanner:
         orient=args.orient_weights,
         orient_threshold=args.orient_threshold,
         device=args.device,
-        research=args.research,
         cache_size=cache_size,
     )
 
@@ -502,7 +495,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 status=result.status.value,
                 reason_code=result.reason_code,
                 reasons=[item.code for item in result.reasons],
-                research=result.research,
                 files=written,
                 seconds=result.timings.get("total"),
             )

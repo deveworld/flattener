@@ -1,6 +1,5 @@
-"""regions.context: the ported context U-Net, its checkpoints and the page gate decision."""
+"""Page detector architecture, checkpoints, preprocessing and region decisions."""
 
-import hashlib
 from dataclasses import asdict
 
 import numpy as np
@@ -12,7 +11,6 @@ from flattener import FlattenerError, Status
 from flattener.regions.context import (
     CHECKPOINT_SCHEMA,
     MODEL_VERSION,
-    PILOT_SCHEMA,
     ContextPageSegmenter,
     ContextSegmenterConfig,
     gate_page_region,
@@ -36,23 +34,6 @@ def _model():
         return ContextPageSegmenter(SMALL).eval()
 
 
-def _pilot(path, model):
-    payload = {
-        "schema": PILOT_SCHEMA,
-        "model_config": asdict(SMALL),
-        "epoch": 3,
-        "best_epoch": 2,
-        "best_score": 0.5,
-        "model_state": model.state_dict(),
-        "protocol": {"seed": 1, "epochs": 3, "device": {"device": "xpu:0"}},
-    }
-    torch.save(payload, path)
-    path.with_name(path.name + ".sha256").write_text(
-        hashlib.sha256(path.read_bytes()).hexdigest() + "\n"
-    )
-    return path
-
-
 def _reason(call):
     with pytest.raises(FlattenerError) as caught:
         call()
@@ -67,14 +48,15 @@ def _probability(box, shape=(96, 72), value=0.98):
     return probability
 
 
-def test_architecture_has_the_recorded_size_and_operation_order():
-    config = ContextSegmenterConfig(input_size=(192, 144))
+def test_default_architecture_and_operation_order():
+    config = ContextSegmenterConfig()
+    assert config.input_size == (192, 144) and config.channels == (16, 32, 64, 128)
     model = ContextPageSegmenter(config)
-    assert parameter_count(config) == sum(p.numel() for p in model.parameters()) == 140_545
+    assert parameter_count(config) == sum(p.numel() for p in model.parameters()) == 561_025
     assert asdict(config)["model_version"] == MODEL_VERSION == "region-context-unet-2.0"
     assert all(p.dtype == torch.float32 and p.device.type == "cpu" for p in model.parameters())
 
-    # The forward pass follows the archived operation order and leaves the RNG alone.
+    # The forward pass leaves the RNG alone.
     model = _model()
     image = torch.rand(2, 3, *SMALL.input_size)
     rng = torch.get_rng_state().clone()
@@ -121,14 +103,12 @@ def test_region_context_checkpoint_round_trip(tmp_path):
     model = _model()
     provenance = {"name": "test", "initialization": "scratch", "lineage": [{"kind": "scratch"}]}
     path = tmp_path / "gate.pt"
-    digest = save_context_checkpoint(path, model.state_dict(), SMALL, provenance)
-    assert (tmp_path / "gate.pt.sha256").read_text() == digest + "\n"
+    save_context_checkpoint(path, model.state_dict(), SMALL, provenance)
     rng = torch.get_rng_state().clone()
     loaded = load_context_segmenter(path)
     assert torch.equal(rng, torch.get_rng_state())
     assert loaded.config == SMALL
-    assert loaded.model_sha256 == digest
-    assert loaded.model_id == f"{MODEL_VERSION}:{digest[:12]}"
+    assert loaded.model_id == str(path.resolve())
     assert loaded.metadata["checkpoint_schema"] == CHECKPOINT_SCHEMA
     assert loaded.metadata["provenance"] == provenance
     image = np.random.default_rng(1).integers(0, 256, (40, 30, 3), dtype=np.uint8)
@@ -141,20 +121,21 @@ def test_region_context_checkpoint_round_trip(tmp_path):
     np.testing.assert_array_equal(logits.sigmoid().numpy(), probability)
 
 
-def test_pilot_checkpoint_has_an_unknown_initialization_and_needs_its_sidecar(tmp_path):
-    path = _pilot(tmp_path / "best.pt", _model())
-    loaded = load_context_segmenter(path)
-    assert loaded.metadata["checkpoint_schema"] == PILOT_SCHEMA
-    assert (loaded.metadata["epoch"], loaded.metadata["best_epoch"]) == (3, 2)
-    assert loaded.metadata["provenance"]["initialization"] == "unknown"
-    assert loaded.metadata["provenance"]["device"] == {"device": "xpu:0"}
-
-    sidecar = tmp_path / "best.pt.sha256"
-    sidecar.write_text("0" * 64 + "\n")
-    assert _reason(lambda: load_context_segmenter(path)) == "checkpoint_hash_mismatch"
-    sidecar.unlink()
-    assert _reason(lambda: load_context_segmenter(path)) == "missing_sidecar"
+def test_checkpoint_requires_an_existing_file(tmp_path):
     assert _reason(lambda: load_context_segmenter(tmp_path / "none.pt")) == "missing_checkpoint"
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [("schema", "unsupported-schema"), ("preprocess_version", "unknown"), ("provenance", None)],
+)
+def test_checkpoint_requires_current_schema_and_metadata(tmp_path, field, value):
+    path = tmp_path / "gate.pt"
+    save_context_checkpoint(path, _model().state_dict(), SMALL, {"initialization": "scratch"})
+    payload = torch.load(path, weights_only=True)
+    payload[field] = value
+    torch.save(payload, path)
+    assert _reason(lambda: load_context_segmenter(path)) == "invalid_checkpoint"
 
 
 def test_centered_page_keeps_the_detected_box():

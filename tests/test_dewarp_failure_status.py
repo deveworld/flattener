@@ -50,8 +50,6 @@ def _degenerate_checkpoint(path):
             "track": "release",
             "model_config": TINY.to_dict(),
             "lineage": [{"kind": "scratch"}],
-            "data_spec_sha256": "0" * 64,
-            "code": {"sha256": "1" * 64},
             "model_state": model.state_dict(),
         },
     )
@@ -133,7 +131,7 @@ def _folds_dark_inputs(dewarper, image):
     return np.stack(np.meshgrid(columns, edge_positions(5)), -1).astype(np.float32)
 
 
-def test_a_kept_output_must_come_from_the_same_input(tmp_path, capsys, monkeypatch):
+def test_repeated_batches_render_the_current_input(tmp_path, capsys, monkeypatch):
     monkeypatch.setattr(predict, "predict_grid", _folds_dark_inputs)
     argv, output = _docunet_args(tmp_path)
     crop, image = tmp_path / "crop" / "1_1 copy.png", output / "1_1.png"
@@ -144,7 +142,7 @@ def test_a_kept_output_must_come_from_the_same_input(tmp_path, capsys, monkeypat
 
     Image.new("RGB", (30, 40), (200, 200, 200)).save(crop)
     assert run() == (0, {"items": 1, "written": 1, "kept": 0, "failed": 0, "forced": 0})
-    assert run()[1]["kept"] == 1
+    assert run()[1]["written"] == 1
     Image.new("RGB", (30, 40), (20, 20, 20)).save(crop)  # same size and name, now failing
     code, counts = run()
     assert code == EXIT_FAILED and counts["kept"] == 0 and counts["failed"] == 1
@@ -153,8 +151,8 @@ def test_a_kept_output_must_come_from_the_same_input(tmp_path, capsys, monkeypat
     assert record["complete"] is True
     [item] = record["items"]
     assert item["status"] == Status.INVALID_TRANSFORM.value and item["action"] == "not_written"
-    # A forced image is kept only by a run that forces too.
+    # A run without force removes the previous forced output.
     assert run("--force-render")[1]["forced"] == 1 and image.is_file()
-    assert run("--force-render")[1]["kept"] == 1
+    assert run("--force-render")[1]["written"] == 1
     code, counts = run()
     assert code == EXIT_FAILED and counts["kept"] == 0 and not image.exists()

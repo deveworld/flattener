@@ -28,10 +28,8 @@ def make_plan(**changes):
         full_size=(6000, 8000),
         scale=2,
         format="JPEG",
-        file_sha256="ab" * 32,
         exif_orientation=6,
         focal_length_35mm=26.0,
-        icc_sha256="cd" * 32,
     )
     fields = dict(
         source=source,
@@ -41,12 +39,10 @@ def make_plan(**changes):
         angle_deg=-3.25,
         quarter=1,
         orientation_probs=(0.01, 0.97, 0.015, 0.005),
-        views=({"pass": "A", "box": (100, 50, 3900, 2950), "angle_deg": 86.75},),
+        views=({"pass": "initial", "box": (100, 50, 3900, 2950), "angle_deg": 86.75},),
         inset=(0.0, 0.0),
-        models=(
-            {"id": "scratch-409k", "sha256": "ef" * 32, "track": "release", "shippable": True},
-        ),
-        thresholds={"version": "v0", "coverage": 0.95, "drift": 0.04},
+        models=({"id": "dewarp", "path": "dewarp.pt"},),
+        thresholds={"version": "test", "coverage": 0.95, "drift": 0.04},
         provenance={"region": "auto", "orientation": "manual"},
     )
     fields.update(changes)
@@ -57,15 +53,12 @@ def test_plans_round_trip_exactly_and_refuse_changes():
     plan = make_plan()
     data = json_round_trip(plan.to_dict())
     again = rec.ScanPlan.from_dict(data)
-    assert again == plan and again.plan_sha256 == plan.plan_sha256
+    assert again == plan
     assert again.to_dict() == plan.to_dict()
     assert np.array_equal(again.grid.astype(np.float32), make_grid())
     assert again.grid.dtype == np.float64 and not again.grid.flags.writeable
     assert again.region["dominance"] == float(np.float32(0.97))
     assert again.views[0]["box"] == [100, 50, 3900, 2950]
-    assert data["plan_sha256"] == plan.plan_sha256
-    body = rec.canonical_json(plan.body())
-    assert plan.plan_sha256 == __import__("hashlib").sha256(body).hexdigest()
     assert (plan.nodes, plan.fill_rgb) == ("flattener", (255, 255, 255))
     uvdoc = make_plan(nodes="uvdoc", fill_rgb=[10, 20, 30])
     again = rec.ScanPlan.from_dict(json_round_trip(uvdoc.to_dict()))
@@ -77,32 +70,16 @@ def test_plans_round_trip_exactly_and_refuse_changes():
     assert again == perspective and np.array_equal(again.homography, homography)
     with pytest.raises(FlattenerError):
         rec.ScanPlan.from_dict({**perspective.to_dict(), "schema": "other"})
-    # plan_sha256 follows every value, and a changed plan is refused.
-    grid = make_grid().astype(np.float64)
-    grid[7, 9, 0] = np.nextafter(grid[7, 9, 0], np.inf)
-    assert make_plan(grid=grid).plan_sha256 != plan.plan_sha256
-    assert make_plan(quarter=2).plan_sha256 != plan.plan_sha256
-    assert make_plan(quantize="truncate").plan_sha256 != plan.plan_sha256
-    assert make_plan(nodes="uvdoc").plan_sha256 != plan.plan_sha256
-    assert make_plan(fill_rgb=(0, 0, 0)).plan_sha256 != plan.plan_sha256
-    assert make_plan(sharpen=1.0).plan_sha256 != plan.plan_sha256
-    reordered = {"drift": 0.04, "coverage": 0.95, "version": "v0"}
-    assert make_plan(thresholds=reordered).plan_sha256 == plan.plan_sha256
-    assert hash(make_plan()) == hash(plan)
-    data = json_round_trip(make_plan().to_dict())
-    data["grid"][0][0][0] += 1e-9
-    with pytest.raises(FlattenerError) as caught:
-        rec.ScanPlan.from_dict(data)
-    assert (caught.value.status, caught.value.reason_code) == (
-        Status.INPUT_ERROR,
-        "plan_sha256_mismatch",
-    )
-    assert rec.ScanPlan.from_dict(data, verify=False).plan_sha256 != data["plan_sha256"]
-    extra = {**make_plan().to_dict(), "note": "unhashed"}
+    assert make_plan(quarter=2) != plan
+    assert make_plan(quantize="truncate") != plan
+    data = json_round_trip(plan.to_dict())
+    data["grid"][0][0][0] += 0.01
+    assert rec.ScanPlan.from_dict(data) != plan
+    extra = {**make_plan().to_dict(), "note": "extra"}
     with pytest.raises(FlattenerError) as caught:
         rec.ScanPlan.from_dict(extra)
     assert caught.value.reason_code == "invalid_plan"
-    # A plan without sharpening stores no sharpen key, so older plans keep their hash.
+    # Optional sharpening round-trips.
     assert set(make_plan().to_dict()) == rec.PLAN_KEYS - {"sharpen"}
     sharpened = make_plan(sharpen=1.5)
     assert set(sharpened.to_dict()) == rec.PLAN_KEYS
@@ -138,9 +115,7 @@ def make_result(plan):
         qa={"coverage": np.float64(0.991), "drift": 0.012, "orientation_margin": math.nan},
         timings={"read": 0.05, "infer": np.float32(0.19)},
         metadata={"validation": {"checked_cells": np.int64(1320), "fold_check": "passed"}},
-        models=[{"id": "scratch-409k", "sha256": "ef" * 32, "shippable": True}],
-        shippable=True,
-        evidence={"evidence_kind": "predictions"},
+        models=[{"id": "dewarp", "path": "dewarp.pt"}],
         input="photo.jpg",
     )
 
@@ -152,7 +127,7 @@ def test_results_round_trip_through_json_with_their_outcome():
     again = rec.ScanResult.from_dict(json.loads(text))
     assert again.to_dict() == data
     assert again.outcome == rec.Outcome.RECTIFIED_WITH_WARNINGS
-    assert again.plan == result.plan and data["plan_sha256"] == result.plan.plan_sha256
+    assert again.plan == result.plan
     assert again.image is None and again.valid_mask is None
     assert data["qa"]["orientation_margin"] is None
     assert data["metadata"]["validation"]["checked_cells"] == 1320
@@ -169,7 +144,7 @@ def test_results_round_trip_through_json_with_their_outcome():
         "status": "success",
         "detail": {"scale": 2, "full_size": [6000, 8000]},
     }
-    assert data["quality_status"] == "not_evaluated" and data["research"] is False
+    assert data["quality_status"] == "not_evaluated"
     # The outcome follows the path taken and the worst reason.
     info = rec.reason("page_fills_frame")
     warning = rec.reason("possible_occlusion", solidity=0.8)
@@ -190,7 +165,6 @@ def test_results_round_trip_through_json_with_their_outcome():
         used_fallback=True,
         reasons=[rec.reason("page_not_found")],
         guidance=rec.collect_guidance([rec.reason("page_not_found")]),
-        research=True,
     )
     data = json_round_trip(failure.to_dict())
     assert rec.ScanResult.from_dict(data).to_dict() == failure.to_dict()

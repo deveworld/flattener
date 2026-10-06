@@ -19,8 +19,8 @@ reports:
 A model that handles perspective keeps the tilted numbers close to the page-view
 numbers. Grids must use the flattener convention (checkpoints of this package).
 
-    python -m flattener.dewarp.probe --checkpoint runs/P1 \\
-        --data-spec data-release.json --samples 400 --output probe.json
+    python -m flattener.dewarp.probe --checkpoint checkpoint.pt \\
+        --data-spec path/to/data-spec.json --samples 400 --output probe.json
 """
 
 from __future__ import annotations
@@ -160,9 +160,7 @@ def tilt_probe(
     return {
         "measurement": "tilt_probe",
         "checkpoint": dewarper.info.get("path"),
-        "checkpoint_sha256": dewarper.info.get("sha256"),
         "data_spec": spec.name,
-        "data_spec_sha256": spec.sha256,
         "split": split,
         "samples_requested": samples,
         "tilt": tilt,

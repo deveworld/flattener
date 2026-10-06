@@ -1,4 +1,4 @@
-"""tools/uvdoc/retexture.py on a synthetic capture: a flat page under a known affine map."""
+"""tools/data/uvdoc/retexture.py on a synthetic capture: a flat page under a known affine map."""
 
 import importlib.util
 import sys
@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def _tool():
     spec = importlib.util.spec_from_file_location(
-        "uvdoc_retexture", ROOT / "tools/uvdoc/retexture.py"
+        "uvdoc_retexture", ROOT / "tools/data/uvdoc/retexture.py"
     )
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module

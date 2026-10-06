@@ -8,14 +8,13 @@ import torch
 from PIL import Image
 from torch.nn import functional as F
 
-from flattener.benchmark import __main__ as cli
-from flattener.benchmark import metrics, uvdoc
-from flattener.benchmark.reporting import prediction_record, report_evidence
 from flattener.dewarp import predict
 from flattener.dewarp.checkpoint import CHECKPOINT_SCHEMA, save_checkpoint
 from flattener.dewarp.coords import edge_positions
 from flattener.dewarp.model import DewarpModelConfig, UVDocNet
-from flattener.evidence import SMOKE_STEPS
+from tools.benchmark import __main__ as cli
+from tools.benchmark import metrics, uvdoc
+from tools.benchmark.reporting import prediction_record, report_evidence
 
 TINY = DewarpModelConfig(input_size=(64, 48), grid_size=(5, 4), num_filter=4)
 FOLDERS = ("img", "warped_textures", "texture_sample")
@@ -32,20 +31,11 @@ def _tiny_images(root):
             Image.fromarray(pixels).save(root / folder / f"{sample}.png")
 
 
-def _pin_sets(root, monkeypatch):
-    sets = {
-        folder: uvdoc.set_sha256(uvdoc.hash_folder(root, folder, verify=False))
-        for folder in FOLDERS
-    }
-    monkeypatch.setattr(uvdoc, "SET_SHA256", sets)
-
-
 @pytest.fixture
 def tiny_root(tmp_path, monkeypatch):
     monkeypatch.setattr(metrics, "METRIC_AREA", 300)
     root = tmp_path / "bench"
     _tiny_images(root)
-    _pin_sets(root, monkeypatch)
     return root
 
 
@@ -62,12 +52,10 @@ def _tiny_weights(tmp_path):
         weights,
         {
             "schema": CHECKPOINT_SCHEMA,
-            "step": SMOKE_STEPS,
+            "step": 40000,
             "track": "release",
             "model_config": TINY.to_dict(),
             "lineage": [{"kind": "scratch"}],
-            "data_spec_sha256": "0" * 64,
-            "code": {"sha256": "1" * 64},
             "model_state": UVDocNet(TINY).state_dict(),
         },
     )
@@ -117,7 +105,8 @@ def test_predict_writes_textures_and_photos_and_applies_the_inset(tiny_root, tmp
     stored = prediction_record(output)
     assert stored["inputs"] == "uvdoc_benchmark" and stored["failures"] == {}
     assert "uwp_texture/00049.png" in stored["outputs"]
-    assert report_evidence(stored)["evidence_kind"] == "new_model_real_photo"
+    assert report_evidence(stored)["measurement"] == "uvdoc_benchmark"
+    assert report_evidence(stored)["checkpoint_step"] == 40000
     preset = "syntheticdoc_half_cell"
     inset = uvdoc.predict_uvdoc(dewarper, tmp_path / "inset", root=tiny_root, inset=preset)
     assert inset["inset"] == inset["evidence"]["inset"] == predict.inset_record(preset)
@@ -136,7 +125,7 @@ def test_predict_writes_textures_and_photos_and_applies_the_inset(tiny_root, tmp
     with pytest.raises(FileExistsError):
         uvdoc.predict_uvdoc(dewarper, output, root=tiny_root)
     (tiny_root / "img" / "00003.png").write_bytes(b"changed")
-    with pytest.raises(ValueError, match="differs"):
+    with pytest.raises(OSError, match="cannot identify image"):
         uvdoc.predict_uvdoc(dewarper, output, root=tiny_root, overwrite=True)
 
 
@@ -173,9 +162,6 @@ def test_evaluate_scores_all_samples_against_the_flat_textures(tiny_root, tmp_pa
     (predictions / "uwp_texture" / "00049.png").unlink()
     with pytest.raises(FileNotFoundError, match="1 predictions missing"):
         uvdoc.evaluate_uvdoc(predictions, build=None, root=tiny_root)
-    (tiny_root / "texture_sample" / "00000.png").write_bytes(b"changed")
-    with pytest.raises(ValueError, match="differs"):
-        uvdoc.evaluate_uvdoc(predictions, build=None, root=tiny_root)
 
 
 def test_cli_predicts_and_scores(tiny_root, tmp_path, monkeypatch, capsys):
@@ -200,7 +186,7 @@ def test_cli_predicts_and_scores(tiny_root, tmp_path, monkeypatch, capsys):
 
 def test_process_pool_runs_a_custom_score_function(tmp_path):
     """docunet.run_tasks spawns workers that call the given module-level score function."""
-    from flattener.benchmark import docunet
+    from tools.benchmark import docunet
 
     rng = np.random.default_rng(9)
     tasks = []

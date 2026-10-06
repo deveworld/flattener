@@ -1,95 +1,21 @@
-"""The single-page scanner.
+"""Document scanning with page detection, orientation and dewarping.
 
-``Scanner.load(bundle)`` loads the dewarp weights through the ship gate
-(``scan.shippable``), the page gate (``regions.context``) and OrientNet (``scan.orient``)
-when the bundle names them. ``plan(source, options, overrides)`` runs the stages up to the
-plan and checks the plan's map; ``render(source, planned)`` makes the image of a plan;
-``scan`` is both. Stages (``scan.timing.StageClock``):
+Scanner.load reads the model paths in a bundle.
+Scanner.plan estimates page geometry; Scanner.render applies a stored plan.
+Scanner.scan combines both operations, and Scanner.scan_pages handles book spreads.
 
-* ``read``: ``scan.io.read_source`` (EXIF once, draft decode above 16 MP, ICC kept).
-* ``detect``: ``scan.locate.locate_page`` on the gate's probability grid; pass 0 (one
-  dewarp pass on the whole photo) runs only when a rule needs its outline.
-* ``orient``: OrientNet on the deskewed view gives the quarter turn k. Without a model
-  the scan goes on with k = 0 (the EXIF-oriented photo) and ``orientation_uncertain``;
-  ``orient="none"`` skips the question, ``"oracle"`` takes k from the overrides.
-* ``infer``: pass A on the view (box B, angle theta + 90 k), then ``passes`` crop passes
-  whose box is the previous grid's outline plus 4 % and whose angle is that outline's
-  angle (``dewarp.predict.rerun_box`` without the 45 degree limit, since k is already in
-  the grid). With ``passes="auto"`` a crop pass that moved the median node by more than
-  4 % of the page diagonal gets one more (``settle``), so a pass A that saw more than the
-  page (the neighbouring page in a wide gate box) does not decide the drift check alone.
-  Every pass is placed in the source (``scan.placement``) and timed on its own
-  (``infer_pass_A``, ``infer_pass_1``, ...).
-* ``orient_post`` and ``verify``: OrientNet on a flat 768-pixel preview of the grid: 180
-  degrees flips the grid nodes; 90 or 270 degrees re-runs the passes once with the
-  corrected k. A quarter turn settled this way carries over to the later candidates. Then
-  the checks. The grid's outline is the page; the gate mask M is a hint. When
-  ``page_coverage(G, M) < 0.95`` the mask reaches past the page: a neighbouring page, the
-  book edge or the paper under the page leave mask past some sides and the result goes on
-  with ``page_region_larger``; mask past every side by more than 5 % of the page area
-  (``locate.region_excess``) means the grid holds only a piece of the page and fails.
-  Such a grid must also look like paper on a 384-pixel flat preview (``scan.look``:
-  median saturation at most 0.28, at most 35 % dark pixels); otherwise the photo holds no
-  page (a keyboard or a desk the gate took for one) and the grid fails with
-  ``page_not_found``. When blank paper of the page's colour runs along an edge of the
-  first crop and the whole-photo pass holds the mask and adds mostly page-coloured area
-  no larger than the page, the crop cut the page (the gate missed white margins): the
-  grid fails (``unstable_geometry``, check ``page_continues``) and the chain goes on to
-  the whole-photo outline. A grid whose preview shows a few large text lines cut by two
-  or more of its edges is a close-up whose page runs out of the photo: ``page_cut_off``
-  ends the chain. So does a grid holding less than 45 % of a gate page that fills the
-  frame (the page runs past the photo on every side the grid does not reach), and a plan
-  with more than 5 % of its output outside the photo, unless at most 25 % lies outside and
-  OrientNet settled the quarter twice (accepted before the dewarp, upright on the flat
-  preview): that page is flattened with a ``page_cut_off`` warning (evidence
-  ``outside``). The gate's own ``page_cut_off`` warning (mask along a photo side) stays
-  only for the sides the accepted page comes within 1 % of (a facing page cut by the frame
-  leaves the mask there while the page itself is whole). Against a manual quad, coverage
-  below 0.95 fails. The median node drift between the last two
-  passes must stay within 4 % of the page diagonal.
-* ``plan``: ``scan.output_policy.plan_output`` (auto size, standard-ratio snap) and a
-  ``ScanPlan`` with its ``plan_sha256``.
-* ``render``: the dense map of the plan (``render_map``; the grid nodes placed as the
-  weights place them, ``ScanPlan.nodes``) through ``flattener.render`` once, with all of
-  its checks and failure records (``render_check``, ``render_sample`` from the renderer's
-  own timings). With ``fast_check`` a dewarp plan is checked by ``scan.fast_check`` in
-  ``plan`` (the renderer's decisions from the grid; ``flattener.render`` runs on a proxy
-  of at most 2 MP and 1/16 of the output) and ``render`` samples the full size once.
-  The plan's ``sharpen`` amount then runs ``scan.sharpen`` on the image
-  (``render_sharpen``); the original photo given back on failure is never sharpened.
-* ``preview``: the preview image, sampled from the plan's map on a source level.
-
-Stage names that extend another (``infer_pass_*``, ``render_*``) time parts of that
-stage, whose seconds include them. ``metadata["timing_stages"]`` keeps every stage record.
-
-Candidates, first one to pass wins: ``default`` (the full path), ``no_deskew``,
-``other_box`` (the other localizer's box: gate and outline swapped) and ``whole_photo``
-(the current ``rectify``: whole photo, one pass) with its nodes re-indexed by the quarter
-turn k (``quarter_turn_grid``), so its page is upright as well. Duplicates are skipped. A
-candidate passes when its render succeeds and the checks hold; when only its crop passes
-fail, its pass A is used (``rerun_discarded``). A later candidate that passes adds
-``candidate_fallback`` with the first candidate's failure. When every candidate fails:
-with ``fallback="perspective"`` and a quad known for sure, the page quad is flattened by a
-homography (``curvature_not_corrected``); otherwise the original comes back with the
-reason and guidance (``on_error="original"``, the default; ``"return"`` gives no image
-and ``"raise"`` raises the failure). A plan or check that raises counts as that grid's failure.
-
-Overrides (``ScanOverrides``: region, quad, quarter, skip_dewarp, output size, aspect) go
-through the same stages and are recorded as ``manual`` provenance; ``skip_dewarp`` without
-a quarter or quad still asks OrientNet. Model outputs are cached per input sha256
-(``cache_size`` inputs; 0 turns the cache off), so an override re-runs only the stages
-after it.
+ScanOptions controls output size, refinement, preview and fallback behavior.
+ScanOverrides supplies a manual region, quad or orientation.
+The stage cache retains model outputs for recent images so edits can reuse inference.
 """
 
 from __future__ import annotations
 
 import copy
-import hashlib
 import json
 import math
 import os
 import time
-from collections import OrderedDict
 from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
@@ -100,7 +26,6 @@ from numpy.typing import NDArray
 from PIL import Image
 
 from ..contracts import FlattenerError, RenderConfig, RenderResult, Status
-from ..dewarp.model import sha256_file
 from ..dewarp.predict import (
     DESKEW_MIN_AGREEMENT,
     RERUN_MARGIN,
@@ -109,6 +34,7 @@ from ..dewarp.predict import (
     Inset,
     estimate_page_angle,
     inset_record,
+    load_dewarper,
     outline_points,
     render_unchecked,
     rerun_box,
@@ -117,13 +43,13 @@ from ..dewarp.predict import (
     source_inside,
     with_tta,
 )
-from ..evidence import evidence
 from ..regions.context import GateConfig, LoadedContextSegmenter, load_context_segmenter
 from ..renderer import render as flattener_render
 from ..validation import validate_image
 from . import locate as locating
 from . import look
 from . import sharpen as sharpening
+from .download import download_bundle
 from .fast_check import FastCheck, fast_check
 from .io import SourceImage, read_source
 from .orient import Orienter, OrientResult, ViewGeometry
@@ -148,18 +74,17 @@ from .records import (
     json_plain,
     reason,
 )
-from .shippable import gate_verdict, load_weights, shippable
 from .timing import StageClock
 from .views import VIEW_SOURCES, crop_placement, run_view
 
 BUNDLE_SCHEMA = "flattener-scan-bundle-1"
 BUNDLE_KEYS = {
-    "dewarp": {"path", "sha256", "tta"},
-    "gate": {"path", "sha256"},
-    "orient": {"path", "sha256", "threshold"},
+    "dewarp": {"path", "tta"},
+    "gate": {"path"},
+    "orient": {"path", "threshold"},
 }
 PIPELINE_NAME = "flattener.scan"
-PIPELINE_VERSION = 3  # 2: the gate is a hint, settle pass; 3: page evidence (scan.look)
+PIPELINE_VERSION = 3
 AUTO_PASSES = 1
 PASS_CHOICES = ("auto", 0, 1, 2)
 ORIENT_MODES = ("model", "none", "oracle")
@@ -175,18 +100,17 @@ VERIFY: dict[str, Any] = {
     # whose page runs out of the photo (the grid is a piece of it).
     "close_up_min_coverage": 0.45,
     # A plan with more of its output outside the photo than this: the page runs out of
-    # the photo there (set on KR-Real dev photos: cut pages 0.10-0.12, others <= 0.006).
+    # the photo there.
     "cut_off_outside": 0.05,
     # Such a page is flattened anyway, with a warning, when at most this share of the
     # output lies outside and its orientation is settled twice (confident before the
     # dewarp, upright on the flat preview); otherwise the original comes back. On cut-off
-    # close-ups OrientNet alone was wrong with 0.99 confidence (KR-Real dev b05-031), and
+    # close-ups, orientation alone can have high confidence with the wrong result, and
     # its flat-preview check disagreed.
     "cut_off_flatten_outside": 0.25,
     # The gate's page_cut_off warning (mask along a photo side) stays only for the sides
     # the accepted page comes within this share of the side of: a neighbouring page cut by
     # the frame leaves the mask along a side while the flattened page lies well inside
-    # (KR-Real dev: cut sides <= -0.05, complete pages >= 0.04).
     "cut_off_edge_gap": 0.01,
     # A grid the gate mask reaches past must look like paper (scan.look.paper).
     "page_max_saturation": 0.28,
@@ -207,9 +131,8 @@ VERIFY: dict[str, Any] = {
     "look_photo_long_side": 768,
     "max_drift": 0.04,  # median node drift between passes, fraction of the page diagonal
     # A spread whose preview shows no blank gutter (a picture runs to the fold) is found by
-    # its outline: the top or bottom edge bends into the page at the fold by at least this
-    # many degrees over two grid columns either side (KR-Real dev: spread 15.5, single
-    # pages at most 3.4).
+    # its outline: the top or bottom edge bends at the spine by at least this many
+    # degrees over two grid columns on each side.
     "fold_min_bend_deg": 8.0,
     "low_resolution_density": 0.5,  # source pixels per output pixel below this warn
     "post_preview_long_side": 768,
@@ -230,7 +153,7 @@ def _option_error(message: str) -> FlattenerError:
 class ScanOptions:
     """How a scan runs.
 
-    ``passes``: crop passes after pass A (``"auto"`` is 1, plus a settle pass when it
+    ``passes``: crop passes after initial prediction (``"auto"`` is 1, plus a settle pass when it
     drifts). ``output``: ``"auto"``, a long side or (height, width). ``aspect``:
     ``"auto"``, ``"estimate"``, ``"snap"``, a paper name or width / height. ``inset``: as
     ``dewarp.predict --inset``; ``border`` moves each side out by border / 2 of the page
@@ -419,21 +342,21 @@ class ScanOverrides:
 
 
 class StageCache:
-    """Model outputs per input (sha256 key), least recently used inputs dropped first."""
+    """Model outputs for recent images, compared directly by their pixels."""
 
     def __init__(self, size: int = CACHE_SIZE) -> None:
         self.size = max(0, int(size))
-        self._entries: OrderedDict[str, dict[Any, Any]] = OrderedDict()
+        self._entries: list[tuple[NDArray, dict[Any, Any]]] = []
 
-    def entry(self, key: str) -> dict[Any, Any]:
-        if key in self._entries:
-            self._entries.move_to_end(key)
-            return self._entries[key]
+    def entry(self, image: NDArray) -> dict[Any, Any]:
+        for index, (stored, entry) in enumerate(self._entries):
+            if np.array_equal(stored, image):
+                self._entries.append(self._entries.pop(index))
+                return entry
         entry: dict[Any, Any] = {}
         if self.size:
-            self._entries[key] = entry
-            while len(self._entries) > self.size:
-                self._entries.popitem(last=False)
+            self._entries.append((image.copy(), entry))
+            self._entries = self._entries[-self.size :]
         return entry
 
     def clear(self) -> None:
@@ -616,28 +539,15 @@ def _angle_difference(first: float, second: float) -> float:
     return abs((first - second + 180.0) % 360.0 - 180.0)
 
 
-def source_key(source: SourceImage) -> str:
-    """The cache key of a decoded source: its file sha256 and draft scale, or the sha256
-    of its pixels."""
-    info = source.info
-    if info.file_sha256 is not None:
-        return f"file:{info.file_sha256}:{info.scale}"
-    if info.pixels_sha256 is not None:
-        return f"pixels:{info.pixels_sha256}"
-    digest = hashlib.sha256(np.ascontiguousarray(source.image).tobytes()).hexdigest()
-    return f"pixels:{digest}"
-
-
 def as_source(source: Any, *, config: RenderConfig | None = None) -> SourceImage:
-    """A path (``read_source``), a ``SourceImage`` or an RGB uint8 array as a source."""
+    """Load a path, SourceImage or RGB array."""
     if isinstance(source, SourceImage):
         return source
     if isinstance(source, (str, os.PathLike)):
         return read_source(source, config=config)
     if isinstance(source, np.ndarray):
         validate_image(source, config or RenderConfig())
-        digest = hashlib.sha256(np.ascontiguousarray(source).tobytes()).hexdigest()
-        info = SourceInfo(size=tuple(int(v) for v in source.shape[:2]), pixels_sha256=digest)
+        info = SourceInfo(size=tuple(int(v) for v in source.shape[:2]))
         return SourceImage(image=source, info=info)
     raise FlattenerError(
         Status.INPUT_ERROR, "invalid_image", "source must be a path, a SourceImage or an array"
@@ -850,59 +760,33 @@ def _with_border(
 
 
 def _gate_record(gate: LoadedContextSegmenter) -> dict[str, Any]:
-    """The page gate's model record; ``scan.shippable.gate_verdict`` decides whether it
-    ships (release track, a scratch-rooted release lineage, release data)."""
-    provenance = gate.metadata.get("provenance") or {}
-    verdict = gate_verdict(provenance, sha256=gate.model_sha256)
     return {
         "role": "gate",
-        "sha256": gate.model_sha256,
+        "path": gate.model_id,
         "model_version": gate.metadata.get("model_version"),
         "parameters": gate.metadata.get("parameter_count"),
-        "track": provenance.get("track"),
-        "initialization": verdict.initialization,
-        "shippable": verdict.shippable,
-        "category": verdict.category,
-        "gate_reasons": list(verdict.reasons),
     }
 
 
 def _dewarp_record(dewarper: Dewarper) -> dict[str, Any]:
-    info = dewarper.info
-    verdict = info.get("ship_gate")
-    if not isinstance(verdict, dict):
-        try:
-            verdict = shippable(info).to_dict()
-        except FlattenerError:
-            verdict = {"shippable": False, "category": "unknown", "reasons": ["invalid_record"]}
-    record = {
+    return {
         "role": "dewarp",
-        "sha256": info.get("sha256"),
-        "kind": info.get("kind"),
-        "track": info.get("track"),
-        "step": info.get("step"),
-        "parameters": info.get("parameters"),
+        "path": dewarper.info.get("path"),
+        "kind": dewarper.info.get("kind"),
+        "step": dewarper.info.get("step"),
+        "parameters": dewarper.info.get("parameters"),
         "grid_convention": dewarper.config.grid_convention,
-        "shippable": bool(verdict.get("shippable")),
-        "category": verdict.get("category"),
-        "gate_reasons": list(verdict.get("reasons") or []),
+        "tta": dewarper.tta,
     }
-    if dewarper.tta != "none":  # records made without it keep their shape
-        record["tta"] = dewarper.tta
-    return record
 
 
 def _orient_record(orienter: Orienter) -> dict[str, Any]:
-    info = orienter.info
     return {
         "role": "orient",
-        "sha256": info.get("sha256"),
-        "model_id": info.get("model_id"),
-        "track": info.get("track"),
+        "path": orienter.info.get("path"),
+        "model_id": orienter.info.get("model_id"),
         "temperature": orienter.temperature,
         "threshold": orienter.threshold,
-        "threshold_given": bool(info.get("threshold_given")),
-        "shippable": bool(info.get("shippable")),
     }
 
 
@@ -918,7 +802,6 @@ class Scanner:
         *,
         gate: LoadedContextSegmenter | None = None,
         orienter: Orienter | None = None,
-        research: bool = False,
         gate_config: GateConfig | None = None,
         cache_size: int = CACHE_SIZE,
         info: dict[str, Any] | None = None,
@@ -936,38 +819,34 @@ class Scanner:
             self.models.append(_gate_record(gate))
         if orienter is not None:
             self.models.append(_orient_record(orienter))
-        self.shippable = all(model["shippable"] for model in self.models)
-        # research=True allows loading models that fail the ship gate; the stamp follows
-        # the models themselves.
-        self.research = not self.shippable
-        self.info["research_allowed"] = bool(research)
 
     # -- loading
 
     @classmethod
     def load(
         cls,
-        bundle: str | os.PathLike[str] | dict[str, Any],
+        bundle: str | os.PathLike[str] | dict[str, Any] | None = None,
         *,
         device: str = "cpu",
         backend: str = "torch",
-        research: bool = False,
         cache_size: int = CACHE_SIZE,
         orient_threshold: float | None = None,
     ) -> Scanner:
-        """Load a bundle: a ``flattener-scan-bundle-1`` JSON file (or dict) naming
-        ``dewarp`` and optionally ``gate`` and ``orient`` weights, each a path (relative
-        to the bundle file) or ``{"path", "sha256"}``. The ``dewarp`` entry may also hold
-        ``tta`` (``dewarp.predict.TTA_MODES``, default ``"none"``) for every model call; the
-        ``orient`` entry may hold the ``threshold`` measured on real photos, which
-        ``orient_threshold`` replaces. Any other key is an error. Weights that fail the
-        ship gate need ``research=True`` (results are then stamped research)."""
+        """Load a local bundle or download the default models from Hugging Face.
+
+        A bundle file or dict names ``dewarp`` and optional ``gate`` and ``orient``
+        weights. File paths are relative to the bundle. The ``dewarp`` entry can set
+        ``tta``; ``orient`` can set ``threshold``, replaced by ``orient_threshold``.
+        Downloaded models are cached for later use, including offline scans.
+        """
         if backend not in BACKENDS:
             raise FlattenerError(
                 Status.INPUT_ERROR,
                 "unsupported_backend",
                 f"backend must be one of {BACKENDS}; the scanner runs on torch",
             )
+        if bundle is None:
+            bundle = download_bundle()
         if isinstance(bundle, dict):
             data, base = bundle, Path.cwd()
         else:
@@ -1009,14 +888,6 @@ class Scanner:
             entries[role] = entry
             resolved = Path(entry["path"]).expanduser()
             resolved = resolved if resolved.is_absolute() else base / resolved
-            expected = entry.get("sha256")
-            if expected is not None:
-                if not resolved.is_file() or sha256_file(resolved) != expected:
-                    raise FlattenerError(
-                        Status.IO_ERROR,
-                        "checksum_mismatch",
-                        f"{resolved} does not match the bundle's sha256 for {role}",
-                    )
             paths[role] = resolved
         if "dewarp" not in paths:
             raise FlattenerError(Status.INPUT_ERROR, "invalid_bundle", "bundle needs dewarp")
@@ -1033,7 +904,6 @@ class Scanner:
             orient=paths.get("orient"),
             orient_threshold=orient_threshold,
             device=device,
-            research=research,
             cache_size=cache_size,
             info={"bundle": None if isinstance(bundle, dict) else str(bundle)},
             tta=tta,
@@ -1048,30 +918,20 @@ class Scanner:
         orient: str | os.PathLike[str] | None = None,
         orient_threshold: float | None = None,
         device: str = "cpu",
-        research: bool = False,
         cache_size: int = CACHE_SIZE,
         info: dict[str, Any] | None = None,
         tta: str = "none",
     ) -> Scanner:
-        """Load dewarp weights through the ship gate (with test-time augmentation ``tta``),
-        and the optional page gate and OrientNet (with ``orient_threshold``, a threshold
-        measured on real photos, in place of the checkpoint's); non-shippable models need
-        ``research=True``."""
+        """Validate and load the dewarper, page detector and orientation model.
+
+        ``tta`` selects test-time augmentation; ``orient_threshold`` sets the minimum
+        confidence for orientation correction.
+        """
         started = time.perf_counter()
-        dewarper = with_tta(load_weights(weights, research=research, device=device), tta)
+        dewarper = with_tta(load_dewarper(weights, device=device), tta)
         segmenter = None
         if gate is not None:
             segmenter = load_context_segmenter(gate, device=device)
-            record = _gate_record(segmenter)
-            if not record["shippable"] and not research:
-                raise FlattenerError(
-                    Status.MODEL_ERROR,
-                    "not_shippable",
-                    f"{gate}: the page gate fails the ship gate "
-                    f"({', '.join(record['gate_reasons'])}); "
-                    "load it with research=True for comparisons",
-                    metadata={"ship_gate": record},
-                )
         orienter = None
         if orient is None and orient_threshold is not None:
             raise FlattenerError(
@@ -1086,15 +946,12 @@ class Scanner:
                 raise FlattenerError(
                     Status.INPUT_ERROR, "invalid_bundle", "the orient threshold must be a number"
                 )
-            orienter = Orienter.load(
-                orient, device=device, research=research, threshold=orient_threshold
-            )
+            orienter = Orienter.load(orient, device=device, threshold=orient_threshold)
         load = {"seconds": time.perf_counter() - started, "device": device}
         return cls(
             dewarper,
             gate=segmenter,
             orienter=orienter,
-            research=research,
             cache_size=cache_size,
             info={**(info or {}), "load": load},
         )
@@ -1130,7 +987,7 @@ class Scanner:
             "options": settings,
             "protocol": protocol,
             "models": [
-                {key: m[key] for key in ("role", "sha256", "tta") if key in m} for m in self.models
+                {key: m[key] for key in ("role", "path", "tta") if key in m} for m in self.models
             ],
         }
 
@@ -1362,7 +1219,6 @@ class Scanner:
                 batch_item={
                     "outcome": result.outcome.value,
                     "reasons": [item.code for item in result.reasons],
-                    "plan_sha256": None if result.plan is None else result.plan.plan_sha256,
                 },
             )
             return rendered
@@ -1372,7 +1228,7 @@ class Scanner:
     # -- stages
 
     def _memo(self, src: SourceImage) -> _Memo:
-        return _Memo(self.cache.entry(source_key(src)))
+        return _Memo(self.cache.entry(src.image))
 
     def _pass(
         self,
@@ -1383,7 +1239,7 @@ class Scanner:
         options: ScanOptions,
     ) -> tuple[NDArray[np.float64], dict[str, Any]]:
         key = (
-            self.dewarper.info.get("sha256"),
+            self.dewarper.info.get("path"),
             json.dumps(placement.record(), sort_keys=True),
             box,
             options.view_source,
@@ -1413,7 +1269,7 @@ class Scanner:
             return None
         return memo.get(
             "detect",
-            ("gate", self.gate.model_sha256),
+            ("gate", self.gate.model_id),
             lambda: self.gate.predict_probability(src.image),
         )
 
@@ -1437,7 +1293,7 @@ class Scanner:
         )
 
     def _orient_view(self, src: SourceImage, memo: _Memo, placement: Placement) -> OrientResult:
-        key = (self.orienter.info.get("sha256"), json.dumps(placement.record(), sort_keys=True))
+        key = (self.orienter.info.get("path"), json.dumps(placement.record(), sort_keys=True))
         return memo.get(
             "orient", key, lambda: self.orienter.predict(src.image, view_geometry(placement))
         )
@@ -1484,8 +1340,11 @@ class Scanner:
         located: locating.Localization,
         options: ScanOptions,
     ) -> Iterator[_Candidate]:
-        """The candidates, made one at a time: the other box (which may need pass 0) is
-        looked up only when ``default`` and ``no_deskew`` have failed."""
+        """Try each candidate in order.
+
+        Look up the other box after ``default`` and ``no_deskew`` fail.
+        This may require a whole-photo prediction.
+        """
         rerun = options.rerun
         yield _Candidate(
             "default", located.box, located.angle_deg, options.deskew, True, located.method, rerun
@@ -1513,7 +1372,7 @@ class Scanner:
         *,
         first: bool = False,
     ) -> tuple[Placement, tuple[int, int, int, int] | None]:
-        """The placement of a pass (and its whole-pixel crop box). Pass A on the whole
+        """The placement of a pass (and its whole-pixel crop box). Initial prediction on the whole
         image at no angle is ``Placement.whole``, as ``rectify``'s first prediction; crop
         passes keep their box so they match ``crop_pass``."""
         size = src.info.size
@@ -1535,10 +1394,10 @@ class Scanner:
         options: ScanOptions,
         clock: StageClock,
     ) -> list[tuple[NDArray[np.float64], dict[str, Any]]]:
-        """Pass A and the crop passes of one candidate, each placed in the source. With
+        """Initial prediction and the crop passes of one candidate, each placed in the source. With
         ``passes="auto"`` a crop pass that moved the page by more than ``max_drift`` gets
         one more crop pass (``settle``): when that one stays within the limit, the page has
-        settled on the crop passes (pass A saw more than the page, such as the
+        settled on the crop passes (initial prediction saw more than the page, such as the
         neighbouring page). A ``nodes`` candidate runs on the unturned view and re-indexes
         every grid by the quarter turn (``quarter_turn_grid``)."""
         size = src.info.size
@@ -1546,9 +1405,9 @@ class Scanner:
         in_view = candidate.orient and candidate.turn == "view"
         angle = theta + 90.0 * quarter if in_view else theta
         placement, box = self._view(src, candidate.box, angle, options, first=True)
-        with clock.stage("infer_pass_A"):
+        with clock.stage("infer_pass_initial"):
             grid, record = self._pass(src, memo, placement, box, options)
-        passes = [(grid, {"pass": "A", **record})]
+        passes = [(grid, {"pass": "initial", **record})]
         settle = options.passes == "auto" and candidate.rerun > 0
         for number in range(1, candidate.rerun + 1 + int(settle)):
             if number > candidate.rerun and not _drifted(passes, size):
@@ -1667,10 +1526,10 @@ class Scanner:
         """For a grid the gate mask reaches past: the failure when the first crop ``box``
         cut the page, else ``None``. The crop cut the page when blank paper of the grid's
         colour fills at least ``crop_edge_paper`` of a strip along a box edge inside the
-        photo, and the whole-photo pass G0 holds the gate mask (coverage at least
+        photo, and the whole-photo prediction holds the gate mask (coverage at least
         ``min_coverage``) and adds at most the grid's own area, at least
         ``continue_min_paper`` of it page-coloured (as when the gate misses white page
-        margins). The chain then goes on to the candidates whose box is G0's outline or
+        margins). The chain then goes on to the candidates whose box is the whole-photo outline or
         the whole photo. The measures go to ``checks["beyond"]``."""
         photo = self._small_photo(src)
         shape = photo.shape[:2]
@@ -1851,9 +1710,11 @@ class Scanner:
         source_size: tuple[int, int],
         quarter: int | None = None,
     ) -> NDArray[np.float64] | None:
-        """The page quad (source pixels, reading order) when it is known for sure: a
-        manual quad (re-ordered by a ``quarter`` override), or the corner nodes of the first
-        candidate's pass A when the gate mask agrees with them (coverage and precision)."""
+        """Return the page quad in source pixels and reading order.
+
+        Use a manual quad, reordered by a ``quarter`` override, or the initial
+        prediction's corners when the gate mask agrees with their coverage and precision.
+        """
         if located.quad is not None:
             if quarter is None or located.quarter is None:
                 return located.quad
@@ -1909,9 +1770,6 @@ class Scanner:
             outcome=Outcome.RECTIFIED,
             source=src.info,
             models=list(self.models),
-            shippable=self.shippable,
-            research=self.research,
-            evidence=evidence("predictions", self.dewarper.info),
             input=src.path,
             metadata=metadata,
         )
@@ -1952,7 +1810,7 @@ class Scanner:
         failed: list[str] = []
         chain = self._chain(src, memo, located, options)
         while True:
-            with clock.stage("detect"):  # the other box may need pass 0
+            with clock.stage("detect"):  # the other box may need whole-photo prediction
                 candidate = next(chain, None)
             if candidate is None:
                 break
@@ -2009,7 +1867,7 @@ class Scanner:
         reasons: list[Reason],
     ) -> dict[str, Any]:
         """Infer, verify, plan and check one candidate. Returns ``checked`` when a grid
-        passes (the last pass, else pass A), otherwise ``failure`` (the first one). A
+        passes (the last pass, else initial prediction), otherwise ``failure`` (the first one). A
         ``FlattenerError`` from the plan or the check is that grid's failure."""
         src, clock = planned.source, planned.clock
         size = src.info.size
@@ -2037,7 +1895,9 @@ class Scanner:
         entry["passes"] = [record for _, record in passes]
         grids = [("final", passes[-1][0], len(passes))]
         if len(passes) > 1:
-            grids.append(("A", passes[0][0], 1))  # pass A when the crop passes fail
+            grids.append(
+                ("initial", passes[0][0], 1)
+            )  # initial prediction when the crop passes fail
         result: dict[str, Any] = {
             "first_grid": passes[0][0],
             "first_quarter": quarter,
@@ -2086,7 +1946,8 @@ class Scanner:
             if bad is not None:
                 failures.append((bad, {"grid": label, "checks": checks}))
                 if bad.code == "page_cut_off":
-                    break  # a close-up: pass A and the other candidates see the same photo
+                    # All candidates see the same cropped photo.
+                    break
                 continue
             views = [record for _, record in passes[:count]]
             try:
@@ -2342,65 +2203,26 @@ class Scanner:
         return planned
 
     def _check_source(self, src: SourceImage, plan: ScanPlan) -> None:
-        """Refuse a plan made from another source: same size, and a file or pixel sha256
-        that both sides can give. A plan made from a file names no pixel sha256, so it
-        renders only from that file."""
+        """A stored geometry must match the input dimensions."""
         if tuple(src.info.size) != tuple(plan.source.size):
             raise FlattenerError(
                 Status.INPUT_ERROR,
                 "source_mismatch",
                 "the plan belongs to a source of another size",
             )
-        compared = False
-        mine, theirs = src.info.file_sha256, plan.source.file_sha256
-        if mine is not None and theirs is not None:
-            if mine != theirs:
-                raise FlattenerError(
-                    Status.INPUT_ERROR,
-                    "source_mismatch",
-                    "the plan belongs to another source (file_sha256)",
-                )
-            compared = True
-        theirs = plan.source.pixels_sha256
-        if theirs is not None:
-            mine = src.info.pixels_sha256
-            if mine is None:
-                mine = hashlib.sha256(np.ascontiguousarray(src.image).tobytes()).hexdigest()
-            if mine != theirs:
-                raise FlattenerError(
-                    Status.INPUT_ERROR,
-                    "source_mismatch",
-                    "the plan belongs to another source (pixels_sha256)",
-                )
-            compared = True
-        if not compared:
-            raise FlattenerError(
-                Status.INPUT_ERROR,
-                "source_mismatch",
-                "the plan was made from a file; render it from that file",
-            )
 
     def _planned_from_plan(
         self, src: SourceImage, plan: ScanPlan, options: ScanOptions, clock: StageClock
     ) -> PlannedScan:
         """A ``PlannedScan`` of a stored plan. The result carries the plan's own model
-        records (the weights that made its geometry), their ship verdict and evidence."""
+        records (the weights that made its geometry), their model settings."""
         self._check_source(src, plan)
         models = [dict(model) for model in plan.models]
-        shippable_plan = bool(models) and all(model.get("shippable") for model in models)
-        dewarp = next((model for model in models if model.get("role") == "dewarp"), None)
-        if dewarp is not None and dewarp.get("sha256") == self.dewarper.info.get("sha256"):
-            proof = evidence("predictions", self.dewarper.info)
-        else:
-            proof = evidence("predictions", dewarp)
         record = ScanResult(
             status=Status.SUCCESS,
             outcome=decide_outcome(plan.kind),
             source=src.info,
             models=models,
-            shippable=shippable_plan,
-            research=not shippable_plan,
-            evidence=proof,
             input=src.path,
             plan=plan,
             metadata={"pipeline": self.pipeline_record(options), "options": options.record()},

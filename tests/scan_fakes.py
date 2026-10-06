@@ -24,7 +24,7 @@ from flattener.scan.orient import OrientResult
 
 GRID = (9, 7)
 CONFIG = DewarpModelConfig(input_size=(96, 72), grid_size=GRID, num_filter=4)
-RELEASE_INFO = {"sha256": "fake-dewarp", "kind": "checkpoint", "step": 20000, "track": "release"}
+RELEASE_INFO = {"path": "fake-dewarp", "kind": "checkpoint", "step": 20000, "track": "release"}
 
 
 def rotation(angle_deg: float) -> np.ndarray:
@@ -165,7 +165,6 @@ class FakeGate:
     probability: float = 0.97
     low: float = 0.02
     config: _GateConfig = field(default_factory=_GateConfig)
-    model_sha256: str = "fake-gate"
     model_id: str = "fake-gate"
     load_seconds: float = 0.0
     calls: int = 0
@@ -200,7 +199,7 @@ class FakeOrienter:
         self.page, self.source_size = page, source_size
         self.pre, self.post, self.confidence = pre, post, confidence
         self.temperature, self.threshold = 1.0, 0.9
-        self.info = {"sha256": "fake-orient", "model_id": "fake", "shippable": True}
+        self.info = {"path": "fake-orient", "model_id": "fake"}
         self.calls = []
 
     def predict(self, image, geometry=None):

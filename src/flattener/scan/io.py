@@ -15,7 +15,7 @@
   ``load_image`` refuses such files as multi-frame.
 * The ICC profile bytes of the file are kept (``icc_profile``) for the output file;
   pixel values are used as stored.
-* ``SourceImage.info`` records the file sha256, the sizes, the EXIF orientation and the
+* ``SourceImage.info`` records the sizes, the EXIF orientation and the
   35 mm equivalent focal length.
 * ``SourceImage.level(f)`` is the image reduced by f (2, 4 or 8) with a box filter over
   the full extent, so flattener coordinates are the same on every level.
@@ -35,7 +35,6 @@ written. A result without an image removes an earlier image of the same name (wi
 
 from __future__ import annotations
 
-import hashlib
 import io
 import json
 import os
@@ -269,10 +268,8 @@ def read_source(
         full_size=full_size,
         scale=scale,
         format=None if header is None else header.format,
-        file_sha256=hashlib.sha256(data).hexdigest(),
         exif_orientation=None if header is None else header.orientation,
         focal_length_35mm=None if header is None else header.focal_35mm,
-        icc_sha256=None if icc is None else hashlib.sha256(icc).hexdigest(),
     )
     return SourceImage(image=image, info=info, icc_profile=icc, path=str(source))
 

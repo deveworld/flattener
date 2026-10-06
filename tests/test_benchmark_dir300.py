@@ -8,12 +8,12 @@ import pytest
 import torch
 from PIL import Image
 
-from flattener.benchmark import __main__ as cli
-from flattener.benchmark import dir300, matlab, metrics
-from flattener.benchmark.reporting import PREDICTIONS_SCHEMA
 from flattener.dewarp.checkpoint import CHECKPOINT_SCHEMA, save_checkpoint
 from flattener.dewarp.model import DewarpModelConfig, UVDocNet
 from flattener.dewarp.predict import load_dewarper
+from tools.benchmark import __main__ as cli
+from tools.benchmark import dir300, matlab, metrics
+from tools.benchmark.reporting import PREDICTIONS_SCHEMA
 
 TINY = DewarpModelConfig(input_size=(64, 48), grid_size=(5, 4), num_filter=4)
 
@@ -47,7 +47,7 @@ def test_evaluate_pairs_by_id_counts_recorded_failures_and_refuses_gaps(tmp_path
     assert np.array_equal(prepared.image, metrics.prepare_reference(page).image)
 
     references, predictions = _folders(tmp_path)
-    arguments = dict(build=None, references_dir=references, verify_references=False, workers=1)
+    arguments = dict(build=None, references_dir=references, workers=1)
     report = dir300.evaluate_dir300(predictions, documents=(248, 1, 2), **arguments)
     assert report["benchmark"] == "dir300" and report["comparable"] is False
     assert [row["id"] for row in report["rows"]] == ["1", "2", "248"]
@@ -75,7 +75,9 @@ def test_evaluate_pairs_by_id_counts_recorded_failures_and_refuses_gaps(tmp_path
     (predictions / "predictions.json").write_text(json.dumps(record))
     report = dir300.evaluate_dir300(predictions, documents=(1, 2), **arguments)
     assert report["summary"]["prediction_failures"] == 1
-    assert report["evidence"]["new_model_real_photo"] is True
+    assert report["evidence"]["model_provenance"] == "own_checkpoint"
+    assert report["evidence"]["checkpoint_step"] == 46880
+    assert report["evidence"]["initialization"] == "scratch"
     assert report["evidence"]["quantize"] == "truncate"
     (predictions / "2.png").unlink()
     with pytest.raises(FileNotFoundError, match="2.png"):
@@ -104,7 +106,6 @@ def test_ocr_reads_the_subset_at_stored_size_and_divides_by_the_reference_length
         predictions,
         engine=engine,
         references_dir=references,
-        verify_references=False,
         documents=(7, 5),
         workers=1,
     )
@@ -118,7 +119,7 @@ def test_ocr_reads_the_subset_at_stored_size_and_divides_by_the_reference_length
     assert report["evidence"]["measurement"] == "dir300_standard"
     with pytest.raises(ValueError, match="not DIR300 documents"):
         dir300.evaluate_dir300_ocr(
-            predictions, engine=engine, references_dir=references, verify_references=False,
+            predictions, engine=engine, references_dir=references,
             documents=(1,), workers=1,
         )  # fmt: skip
     # CER divides by the reference length; an empty reference has no CER.
@@ -140,8 +141,6 @@ def tiny_weights(tmp_path):
             "track": "release",
             "model_config": TINY.to_dict(),
             "lineage": [{"kind": "scratch"}],
-            "data_spec_sha256": "0" * 64,
-            "code": {"sha256": "1" * 64},
             "model_state": UVDocNet(TINY).state_dict(),
         },
     )
@@ -158,13 +157,13 @@ def test_predict_writes_each_photo_at_its_own_size_and_records_rerun_settings(
     Image.fromarray(_page(1, (36, 27))).save(photos / "1.png")
     Image.fromarray(_page(2, (30, 40))).save(photos / "2.PNG")
     dewarper = load_dewarper(tiny_weights)
-    arguments = dict(inputs_dir=photos, verify_inputs=False, force_render=True)
+    arguments = dict(inputs_dir=photos, force_render=True)
     output = tmp_path / "out"
     record = dir300.predict_dir300(
         dewarper, output, documents=(1, 2), quantize="truncate", **arguments
     )
     assert record["inputs"] == dir300.PREDICTION_INPUTS and record["quantize"] == "truncate"
-    assert record["inputs_verified"] is False and set(record["input_files_sha256"]) == {"1", "2"}
+    assert record["input_dir"] == str(photos.resolve())
     assert [item["input"] for item in record["items"]] == ["1.png", "2.PNG"]
     assert record["render_config"]["max_input_pixels"] == dir300.MAX_PHOTO_PIXELS > 3472 * 4624
     with Image.open(output / "2.png") as image:
@@ -180,7 +179,5 @@ def test_predict_writes_each_photo_at_its_own_size_and_records_rerun_settings(
     for argv in ([*base, "--deskew"], [*base, "--rerun", "-1"]):
         with pytest.raises(SystemExit):
             cli.main(argv)
-    with pytest.raises(ValueError, match="differs from the official DIR300 files"):
-        for k in range(3, 301):
-            Image.fromarray(_page(k, (4, 3))).save(photos / f"{k}.png")
+    with pytest.raises(FileNotFoundError, match="missing DIR300 image"):
         dir300.predict_dir300(dewarper, output, inputs_dir=photos)

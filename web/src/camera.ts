@@ -1,0 +1,323 @@
+import { containVideo, smoothOutline } from './camera-outline';
+import type { CameraReply, CameraRequest, PageOutline } from './types';
+
+const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
+
+export class Camera {
+  private dialog = $<HTMLDialogElement>('camera');
+  private video = $<HTMLVideoElement>('camera-video');
+  private overlay = document.getElementById('camera-outline') as unknown as SVGSVGElement;
+  private path = document.getElementById('camera-path') as unknown as SVGPathElement;
+  private shutter = $<HTMLButtonElement>('camera-shutter');
+  private flip = $<HTMLButtonElement>('camera-flip');
+  private frame = document.createElement('canvas');
+  private context = this.frame.getContext('2d', { willReadFrequently: true })!;
+  private stream?: MediaStream;
+  private detector?: Worker;
+  private timer = 0;
+  private expiry = 0;
+  private watchdog = 0;
+  private generation = 0;
+  private facing: 'environment' | 'user' = 'environment';
+  private outline: PageOutline | null = null;
+  private trigger?: HTMLElement;
+  private capturing = false;
+
+  constructor(
+    private captured: (file: File) => void,
+    private choosePhoto: () => void,
+  ) {
+    $('camera-close').onclick = () => this.close();
+    $('camera-retry').onclick = () => void this.start();
+    $('camera-gallery').onclick = () => {
+      this.close();
+      this.choosePhoto();
+    };
+    this.shutter.onclick = () => void this.capture();
+    this.flip.onclick = () => {
+      this.facing = this.facing === 'environment' ? 'user' : 'environment';
+      void this.start();
+    };
+    this.dialog.addEventListener('cancel', (event) => {
+      event.preventDefault();
+      this.close();
+    });
+    this.dialog.addEventListener('close', () => {
+      if (this.dialog.open) return;
+      this.stop();
+      document.body.classList.remove('camera-open');
+    });
+    this.video.addEventListener('resize', () => {
+      this.clearOutline();
+      this.resize();
+    });
+    new ResizeObserver(() => this.resize()).observe($('camera-viewfinder'));
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden && this.dialog.open) this.close();
+    });
+    window.addEventListener('pagehide', () => this.close());
+  }
+
+  get isOpen() {
+    return this.dialog.open;
+  }
+
+  open(trigger: HTMLElement) {
+    if (this.dialog.open) return;
+    this.trigger = trigger;
+    this.dialog.showModal();
+    document.body.classList.add('camera-open');
+    void this.start();
+  }
+
+  close() {
+    const wasOpen = this.dialog.open;
+    this.stop();
+    if (this.dialog.open) this.dialog.close();
+    document.body.classList.remove('camera-open');
+    if (wasOpen) this.trigger?.focus({ preventScroll: true });
+  }
+
+  private stop() {
+    ++this.generation;
+    window.clearTimeout(this.timer);
+    window.clearTimeout(this.watchdog);
+    this.detector?.terminate();
+    this.detector = undefined;
+    this.stream?.getTracks().forEach((track) => track.stop());
+    this.stream = undefined;
+    this.video.pause();
+    this.video.srcObject = null;
+    this.shutter.disabled = true;
+    this.capturing = false;
+    this.clearOutline();
+  }
+
+  private status(text: string) {
+    if ($('camera-status').textContent !== text) $('camera-status').textContent = text;
+  }
+
+  private async start() {
+    this.stop();
+    const generation = this.generation;
+    $('camera-error').hidden = true;
+    this.video.hidden = true;
+    this.flip.disabled = true;
+    this.status('Opening camera…');
+    $('camera-hint').textContent = 'Allow camera access to frame your page.';
+    try {
+      if (!window.isSecureContext)
+        throw new Error('Open this page over HTTPS to use the camera, or choose a photo.');
+      if (!navigator.mediaDevices?.getUserMedia)
+        throw new Error('This browser cannot open the camera. Choose a photo to continue.');
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: {
+          facingMode: { ideal: this.facing },
+          width: { ideal: 2560 },
+          height: { ideal: 1920 },
+          frameRate: { ideal: 24, max: 30 },
+        },
+      });
+      if (generation !== this.generation) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
+      this.stream = stream;
+      this.video.srcObject = stream;
+      await this.video.play();
+      if (generation !== this.generation) return;
+      this.video.hidden = false;
+      this.shutter.disabled = false;
+      this.resize();
+      this.status('Finding the page…');
+      $('camera-hint').textContent = 'Keep the whole page in view.';
+      stream.getVideoTracks()[0].addEventListener('ended', () => {
+        if (generation === this.generation)
+          this.fail('The camera disconnected. Try opening it again.');
+      });
+      void navigator.mediaDevices
+        .enumerateDevices()
+        .then((devices) => {
+          if (generation !== this.generation) return;
+          this.flip.hidden = devices.filter((device) => device.kind === 'videoinput').length < 2;
+          this.flip.disabled = false;
+        })
+        .catch(() => {
+          /* Camera switching is optional. */
+        });
+      this.loadDetector(generation);
+    } catch (error) {
+      if (generation !== this.generation) return;
+      const name = error instanceof DOMException ? error.name : '';
+      this.fail(
+        name === 'NotAllowedError'
+          ? 'Camera access is blocked. Allow it in your browser settings, or choose a photo.'
+          : name === 'NotFoundError'
+            ? 'No camera was found. Connect one or choose a photo.'
+            : name === 'NotReadableError'
+              ? 'The camera is in use. Close other camera apps and try again.'
+              : error instanceof Error
+                ? error.message
+                : 'The camera could not open. Try again.',
+      );
+    }
+  }
+
+  private fail(message: string) {
+    this.stop();
+    this.video.hidden = true;
+    this.flip.disabled = true;
+    $('camera-error').hidden = false;
+    $('camera-error-message').textContent = message;
+    this.status('Camera unavailable');
+    $('camera-hint').textContent = 'You can also choose a photo from your library.';
+  }
+
+  private loadDetector(generation: number) {
+    const unavailable = () => {
+      if (generation !== this.generation) return;
+      window.clearTimeout(this.watchdog);
+      window.clearTimeout(this.timer);
+      this.detector?.terminate();
+      this.detector = undefined;
+      this.clearOutline();
+      this.status('Camera ready');
+      $('camera-hint').textContent = 'Live outline unavailable. You can still take a photo.';
+    };
+    try {
+      this.detector = new Worker(new URL('./camera.worker.ts', import.meta.url), {
+        type: 'module',
+      });
+      this.detector.onerror = unavailable;
+      this.watchdog = window.setTimeout(unavailable, 60000);
+      this.detector.onmessage = ({ data }: MessageEvent<CameraReply>) => {
+        if (generation !== this.generation || this.capturing) return;
+        if (data.type === 'progress') {
+          this.status('Loading page detection…');
+        } else if (data.type === 'ready') {
+          window.clearTimeout(this.watchdog);
+          this.sendFrame(generation, unavailable);
+        } else if (data.type === 'outline') {
+          window.clearTimeout(this.watchdog);
+          if (data.width === this.video.videoWidth && data.height === this.video.videoHeight)
+            this.drawOutline(data.outline);
+          this.timer = window.setTimeout(() => this.sendFrame(generation, unavailable), 160);
+        } else unavailable();
+      };
+      this.detector.postMessage({
+        type: 'load',
+        base: new URL('.', document.baseURI).href,
+      } satisfies CameraRequest);
+    } catch {
+      unavailable();
+    }
+  }
+
+  private sendFrame(generation: number, unavailable: () => void) {
+    if (generation !== this.generation || !this.detector || this.capturing) return;
+    if (this.video.readyState < 2 || !this.video.videoWidth) {
+      this.timer = window.setTimeout(() => this.sendFrame(generation, unavailable), 100);
+      return;
+    }
+    try {
+      const width = this.video.videoWidth,
+        height = this.video.videoHeight;
+      const scale = Math.min(1, 480 / Math.max(width, height));
+      this.frame.width = Math.max(1, Math.round(width * scale));
+      this.frame.height = Math.max(1, Math.round(height * scale));
+      this.context.drawImage(this.video, 0, 0, this.frame.width, this.frame.height);
+      const image = this.context.getImageData(0, 0, this.frame.width, this.frame.height);
+      this.detector.postMessage({ type: 'frame', image, width, height } satisfies CameraRequest, [
+        image.data.buffer,
+      ]);
+      this.watchdog = window.setTimeout(unavailable, 15000);
+    } catch {
+      unavailable();
+    }
+  }
+
+  private clearOutline() {
+    window.clearTimeout(this.expiry);
+    this.outline = null;
+    this.path.setAttribute('d', '');
+    this.dialog.classList.remove('page-found', 'page-clipped');
+  }
+
+  private drawOutline(outline: PageOutline | null) {
+    window.clearTimeout(this.expiry);
+    if (!outline) {
+      this.clearOutline();
+      this.status('Finding the page…');
+      return;
+    }
+    this.outline = smoothOutline(this.outline, outline);
+    this.path.setAttribute(
+      'd',
+      this.outline.points.map(([x, y], i) => `${i ? 'L' : 'M'}${x} ${y}`).join(' ') + 'Z',
+    );
+    this.dialog.classList.toggle('page-found', !outline.clipped);
+    this.dialog.classList.toggle('page-clipped', outline.clipped);
+    this.status(outline.clipped ? 'Move back to fit the page' : 'Page found');
+    this.expiry = window.setTimeout(() => {
+      this.clearOutline();
+      this.status('Finding the page…');
+    }, 1200);
+  }
+
+  private resize() {
+    if (!this.video.videoWidth || !this.video.videoHeight) return;
+    const frame = $('camera-viewfinder');
+    const box = containVideo(
+      frame.clientWidth,
+      frame.clientHeight,
+      this.video.videoWidth,
+      this.video.videoHeight,
+    );
+    Object.assign(this.overlay.style, {
+      width: `${box.width}px`,
+      height: `${box.height}px`,
+      left: `${box.left}px`,
+      top: `${box.top}px`,
+    });
+  }
+
+  private async capture() {
+    if (!this.stream || this.shutter.disabled || this.capturing) return;
+    const generation = this.generation;
+    this.capturing = true;
+    this.shutter.disabled = true;
+    this.flip.disabled = true;
+    this.status('Taking photo…');
+    window.clearTimeout(this.timer);
+    window.clearTimeout(this.watchdog);
+    window.clearTimeout(this.expiry);
+    try {
+      const canvas = document.createElement('canvas');
+      const scale = Math.min(
+        1,
+        Math.sqrt(20_000_000 / (this.video.videoWidth * this.video.videoHeight)),
+      );
+      canvas.width = Math.floor(this.video.videoWidth * scale);
+      canvas.height = Math.floor(this.video.videoHeight * scale);
+      canvas.getContext('2d')!.drawImage(this.video, 0, 0, canvas.width, canvas.height);
+      const blob = await new Promise<Blob | null>((resolve) =>
+        canvas.toBlob(resolve, 'image/jpeg', 0.96),
+      );
+      if (generation !== this.generation) return;
+      if (!blob) throw new Error('The photo could not be saved. Try taking it again.');
+      this.close();
+      this.captured(new File([blob], `document-${Date.now()}.jpg`, { type: 'image/jpeg' }));
+    } catch {
+      if (generation !== this.generation) return;
+      this.capturing = false;
+      this.shutter.disabled = false;
+      this.flip.disabled = this.flip.hidden;
+      this.status('Could not take photo. Try again.');
+      this.detector?.terminate();
+      this.detector = undefined;
+      this.clearOutline();
+      this.loadDetector(generation);
+    }
+  }
+}

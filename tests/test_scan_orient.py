@@ -1,4 +1,4 @@
-"""OrientNet-1 runtime: network, views, decision, calibration, ship gate and export."""
+"""OrientNet-1 runtime: network, views, decision, calibration, release validation and export."""
 
 import json
 
@@ -6,9 +6,7 @@ import numpy as np
 import pytest
 import torch
 
-from flattener import FlattenerError, Status
-from flattener.dewarp.data import DataSpec
-from flattener.evidence import evidence, initialization
+from flattener import FlattenerError
 from flattener.scan import orient
 from flattener.scan.orient import (
     CHECKPOINT_SCHEMA,
@@ -21,10 +19,8 @@ from flattener.scan.orient import (
     decide,
     prepare_views,
     quantize,
-    release_problems,
     save_checkpoint,
 )
-from flattener.scan.shippable import shippable
 
 
 def _textured_page(height=300, width=210, seed=0):
@@ -39,7 +35,7 @@ def _textured_page(height=300, width=210, seed=0):
 
 
 def _data_spec(track="release", kind="converted"):
-    """A dewarp-schema spec like the one ``tools/orient/build_data.py`` records."""
+    """A dewarp-schema spec like the one ``tools/data/orientation/build_data.py`` records."""
     source = {
         "name": "own/train",
         "kind": kind,
@@ -56,17 +52,13 @@ def _data_spec(track="release", kind="converted"):
     }
 
 
-SPEC_SHA256 = DataSpec.from_dict(_data_spec()).sha256
-
-
 def _sources(classes=None, track="release"):
     source = {"name": "own", "kind": "documents", "track": track, "license": "Apache-2.0"}
     return {"train": [{**source, "samples": 3, "license_classes": classes or {"own": 3}}]}
 
 
-def _lineage(start=None, train_track="release", digest=SPEC_SHA256):
-    start = start or {"kind": "scratch", "seed": 0}
-    return [start, {"kind": "train", "track": train_track, "data_spec_sha256": digest}]
+def _lineage():
+    return [{"kind": "scratch", "seed": 0}, {"kind": "train", "track": "release"}]
 
 
 def _record(**changes):
@@ -74,7 +66,6 @@ def _record(**changes):
         "track": "release",
         "lineage": _lineage(),
         "data_spec": _data_spec(),
-        "data_spec_sha256": SPEC_SHA256,
         "data_sources": _sources(),
     }
     return {**record, **changes}
@@ -175,83 +166,24 @@ def test_the_threshold_is_chosen_within_the_bound_and_decides_acceptance():
     assert not none["feasible"] and none["threshold"] == 1.0
 
 
-def test_release_problems_follow_the_whole_lineage(tmp_path):
-    assert release_problems(_record()) == []
-    assert release_problems(_record(track="research"))
-    uvdoc = {"kind": "uvdoc", "sha256_matches_upstream": True}
-    assert "uvdoc" in " ".join(release_problems(_record(lineage=_lineage(uvdoc))))
-    assert release_problems(_record(lineage=_lineage(train_track="research")))
-    parent_ok = {"kind": "checkpoint", "track": "release", "lineage": _lineage()}
-    assert release_problems(_record(lineage=_lineage(parent_ok))) == []
-    parent_uvdoc = {"kind": "checkpoint", "track": "release", "lineage": _lineage(uvdoc)}
-    assert release_problems(_record(lineage=_lineage(parent_uvdoc)))
-    parent_research = {**parent_ok, "track": "research"}
-    assert release_problems(_record(lineage=_lineage(parent_research)))
-    assert release_problems(_record(lineage=None))
-    research = _data_spec(track="research", kind="uvdoc")
-    digest = DataSpec.from_dict(research).sha256
-    assert release_problems(
-        _record(data_spec=research, data_spec_sha256=digest, lineage=_lineage(digest=digest))
-    )
-    assert release_problems(_record(data_spec={"schema": "flattener-orient-data-1"}))
-    assert release_problems(_record(data_spec_sha256="0" * 64))
-    assert release_problems(_record(lineage=_lineage(digest="0" * 64)))
-    assert release_problems(_record(data_sources=_sources({"CC BY-NC 4.0": 1})))
-    assert release_problems(_record(data_sources=_sources(track="research")))
-    assert release_problems(_record(data_sources=None))
-
-    # A fine-tune needs the data spec of every parent training step.
-    parent_spec = {**_data_spec(), "name": "orient-parent"}
-    digest = DataSpec.from_dict(parent_spec).sha256
-    parent = {"kind": "checkpoint", "track": "release", "lineage": _lineage(digest=digest)}
-    child = _record(lineage=_lineage(parent))
-    assert release_problems(child) == ["ship gate: unverified_data_spec"]
-    assert shippable(child).reasons == ("unverified_data_spec",)  # the scanner's verdict
-    carried = _record(lineage=_lineage({**parent, "data_spec": parent_spec}))
-    assert release_problems(carried) == [] and shippable(carried).shippable
-    assert release_problems(child, specs=[parent_spec]) == []
-    sidecar = tmp_path / "parent.pt.json"  # the parent's sidecar at its recorded path
-    sidecar.write_text(json.dumps({"data_spec": parent_spec}), encoding="utf-8")
-    found = _record(lineage=_lineage({**parent, "path": str(tmp_path / "parent.pt")}))
-    assert release_problems(found) == []
-
-
-def test_checkpoint_loads_only_inside_the_release_lineage(tmp_path):
+def test_checkpoint_loads_weights_and_calibration(tmp_path):
     torch.manual_seed(0)
     model = OrientNet()
-    calibration = {"temperature": 1.7, "threshold": 0.8, "source": "kr_real_dev"}
-    path = tmp_path / "release.pt"
-    sidecar = save_checkpoint(path, _payload(model, calibration=calibration))
-    synthetic = tmp_path / "synthetic.pt"
-    save_checkpoint(
-        synthetic, _payload(model, calibration={**calibration, "source": "synthetic_val"})
-    )
-    assert Orienter.load(synthetic).threshold == orient.DEFAULT_THRESHOLD
-    given = Orienter.load(synthetic, threshold=0.0)  # a threshold measured on real photos
-    assert given.threshold == 0.0 and given.info["threshold_given"]
-    assert sidecar["schema"] == orient.SIDECAR_SCHEMA and "model_state" not in sidecar
-    assert json.loads((tmp_path / "release.pt.json").read_text())["track"] == "release"
+    calibration = {"temperature": 1.7, "threshold": 0.8, "source": "validation_photos"}
+    path = tmp_path / "orient.pt"
+    save_checkpoint(path, _payload(model, calibration=calibration))
     orienter = Orienter.load(path)
-    assert orienter.info["shippable"] and not orienter.info["research"]
     assert (orienter.temperature, orienter.threshold) == (1.7, 0.8)
-    assert initialization(orienter.info) == "scratch"
-    assert evidence("gt_crop_validation", orienter.info)["model_provenance"] == "own_checkpoint"
+    for name, value in model.state_dict().items():
+        assert torch.equal(value, orienter.model.state_dict()[name])
     result = orienter.predict(_textured_page())
     assert 0 <= result.k < 4 and result.temperature == 1.7
-
-    research = tmp_path / "research.pt"
-    save_checkpoint(research, _payload(model, track="research"))
-    with pytest.raises(FlattenerError) as caught:
-        Orienter.load(research)
-    assert caught.value.status == Status.MODEL_ERROR
-    assert caught.value.reason_code == "not_shippable"
-    loaded = Orienter.load(research, research=True)
-    assert loaded.info["research"] and not loaded.info["shippable"]
-
-    path.write_bytes(path.read_bytes() + b"x")
-    with pytest.raises(FlattenerError) as caught:
+    save_checkpoint(path, _payload(model, calibration={**calibration, "source": "synthetic_val"}))
+    assert Orienter.load(path).threshold == orient.DEFAULT_THRESHOLD
+    assert Orienter.load(path, threshold=0.0).threshold == 0.0
+    torch.save({"schema": "unsupported"}, path)
+    with pytest.raises(FlattenerError, match="not flattener-orient"):
         Orienter.load(path)
-    assert caught.value.reason_code == "checksum_mismatch"
 
 
 def test_cli_predict_and_cost(tmp_path, capsys):
@@ -274,6 +206,6 @@ def test_cli_predict_and_cost(tmp_path, capsys):
     lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert code == 1 and lines[0]["status"] == "success" and lines[1]["status"] == "input_error"
     code = orient.main(["predict", missing, "--checkpoint", str(tmp_path / "research.pt")])
-    assert code == 2 and json.loads(capsys.readouterr().out)["reason_code"] == "not_shippable"
+    assert code == 1 and json.loads(capsys.readouterr().out)["reason_code"] == "decode_failed"
     assert orient.main(["cost"]) == 0
     assert json.loads(capsys.readouterr().out)["parameters"] > 0

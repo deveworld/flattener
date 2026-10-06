@@ -17,10 +17,18 @@ export type Placement = {
 };
 export type Options = { quality: 'fast' | 'refined'; orient: boolean; maxSide: number };
 export type Backend = 'webgpu' | 'wasm';
+export type Point = [number, number];
+export type PageOutline = { points: Point[]; area: number; clipped: boolean };
+export type CameraRequest =
+  { type: 'load'; base: string } | { type: 'frame'; image: Pixels; width: number; height: number };
+export type CameraReply =
+  | { type: 'ready' }
+  | { type: 'progress'; message: string }
+  | { type: 'outline'; outline: PageOutline | null; width: number; height: number }
+  | { type: 'error'; message: string };
 export type ModelSpec = {
   file: string;
   bytes: number;
-  sha256: string;
   inputs: Record<string, number[]>;
   outputs: string[];
 };
@@ -34,6 +42,7 @@ export type OrientConfig = {
 };
 export type Manifest = {
   schema: 'flattener-web-bundle-1';
+  version: string;
   precision: 'float32';
   models: {
     dewarp: ModelSpec & {
@@ -57,14 +66,18 @@ export type ScanMetadata = {
   source: { width: number; height: number };
   model: string;
 };
-export type WorkerRequest = {
-  type: 'scan';
-  file: File;
-  options: Options;
-  base: string;
-  backend?: Backend;
-};
+export type PreparationState = 'idle' | 'loading' | 'ready' | 'error';
+export type WorkerRequest =
+  | { type: 'prepare'; base: string; backend?: Backend }
+  | {
+      type: 'scan';
+      file: File;
+      options: Options;
+      base: string;
+      backend?: Backend;
+    };
 export type WorkerReply =
+  | { type: 'preparation'; state: PreparationState }
   | { type: 'progress'; stage: string; detail: string; fraction?: number }
   | { type: 'reset-steps' }
   | ({ type: 'step' } & ProcessingStep)

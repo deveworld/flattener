@@ -13,30 +13,27 @@ export async function encode(image: Pixels): Promise<Blob> {
   return canvas.convertToBlob({ type: 'image/png' });
 }
 
-function canvasFor(image: Pixels, maxSide = 800) {
+async function canvasFor(image: Pixels, maxSide = 800) {
   const scale = Math.min(1, maxSide / Math.max(image.width, image.height));
   const canvas = new OffscreenCanvas(
     Math.max(1, Math.round(image.width * scale)),
     Math.max(1, Math.round(image.height * scale)),
   );
-  const ctx = canvas.getContext('2d')!,
-    data = ctx.createImageData(canvas.width, canvas.height);
-  for (let y = 0; y < canvas.height; y++)
-    for (let x = 0; x < canvas.width; x++) {
-      const i = (y * canvas.width + x) * 4;
-      for (let c = 0; c < 3; c++)
-        data.data[i + c] = bilinear(
-          image.data,
-          image.width,
-          image.height,
-          ((x + 0.5) * image.width) / canvas.width - 0.5,
-          ((y + 0.5) * image.height) / canvas.height - 0.5,
-          4,
-          c,
-        );
-      data.data[i + 3] = 255;
+  const ctx = canvas.getContext('2d')!;
+  const pixels = new ImageData(new Uint8ClampedArray(image.data), image.width, image.height);
+  if (scale === 1) ctx.putImageData(pixels, 0, 0);
+  else {
+    const bitmap = await createImageBitmap(pixels, {
+      resizeWidth: canvas.width,
+      resizeHeight: canvas.height,
+      resizeQuality: 'high',
+    });
+    try {
+      ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    } finally {
+      bitmap.close();
     }
-  ctx.putImageData(data, 0, 0);
+  }
   return { canvas, ctx };
 }
 
@@ -52,7 +49,7 @@ export function createSteps(report: (reply: WorkerReply) => void) {
   }
   return {
     async page(image: Pixels, probability: Float32Array, width: number, height: number) {
-      const { canvas, ctx } = canvasFor(image);
+      const { canvas, ctx } = await canvasFor(image);
       const overlay = ctx.getImageData(0, 0, canvas.width, canvas.height);
       for (let y = 0; y < canvas.height; y++)
         for (let x = 0; x < canvas.width; x++) {
@@ -78,7 +75,7 @@ export function createSteps(report: (reply: WorkerReply) => void) {
       );
     },
     async mesh(image: Pixels, grid: Grid, pass: number) {
-      const { canvas, ctx } = canvasFor(image);
+      const { canvas, ctx } = await canvasFor(image);
       const point = (r: number, c: number) => {
         const i = (r * grid.cols + c) * 2;
         return [
@@ -112,10 +109,10 @@ export function createSteps(report: (reply: WorkerReply) => void) {
       );
     },
     async image(image: Pixels, id: string, title: string, detail: string) {
-      await send(id, title, detail, canvasFor(image).canvas);
+      await send(id, title, detail, (await canvasFor(image)).canvas);
     },
     async mask(image: Pixels, mask: Mask) {
-      const { canvas, ctx } = canvasFor(image),
+      const { canvas, ctx } = await canvasFor(image),
         overlay = ctx.getImageData(0, 0, canvas.width, canvas.height);
       for (let y = 0; y < canvas.height; y++)
         for (let x = 0; x < canvas.width; x++) {
@@ -149,7 +146,7 @@ export function createSteps(report: (reply: WorkerReply) => void) {
         'light',
         'Paper lighting estimated',
         'The estimated paper color and lighting, used to reduce shadows and color cast.',
-        canvasFor({ width, height, data }).canvas,
+        (await canvasFor({ width, height, data })).canvas,
       );
     },
   };

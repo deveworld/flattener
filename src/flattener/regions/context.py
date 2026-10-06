@@ -1,37 +1,27 @@
 """Region-context U-Net page gate (``region-context-unet-2.0``).
 
-The architecture is ported from the locator study (``outputs/models/locator.zip``,
-``source.tar:src/flattener/regions/context_segmentation.py``). Preprocessing is the pinned
-``regions.segmentation`` function: the full image extent, bilinear with antialiasing, as
+Preprocessing uses ``regions.segmentation``: the full image extent, bilinear with antialiasing, as
 float32 in [0, 1]. The model returns one page-mask logit map at ``config.input_size``.
 
-Checkpoints need a ``<file>.sha256`` sidecar. Two schemas load:
-
-* ``independent-locator-pilot-1.0``: the study's ``best.pt`` as it was saved.
-* ``region-context-1``: weights, config, preprocessing version and a provenance record,
-  written by ``save_context_checkpoint``.
+``region-context-1`` checkpoints contain weights, config, preprocessing version and
+training metadata.
+Write them with ``save_context_checkpoint``.
 
 ``gate_page_region`` turns a probability grid into a page box. It runs ``detect_region``
 with ``max_area_fraction=1.0``. A page whose mask covers more than 90% of the frame, or
 touches at least three image borders, fills the frame: the box is the whole image and the
 reason ``page_fills_frame`` is informational. Rejections from ``detect_region`` keep their
 status and reason code.
-
-``smartdoc_exposure`` reads which SmartDoc templates the v0 checkpoint saw in training
-(``locator_v0_smartdoc.json``); evaluations of v0 exclude them.
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 import math
 import os
 import pickle
 import time
 from dataclasses import asdict, dataclass, field
-from functools import cache
-from importlib import resources
 from pathlib import Path
 from typing import Any
 
@@ -48,12 +38,9 @@ from .segmentation import preprocess_mask as _preprocess_mask
 
 MODEL_VERSION = "region-context-unet-2.0"
 MAX_PARAMETERS = 1_000_000
-PILOT_SCHEMA = "independent-locator-pilot-1.0"
 CHECKPOINT_SCHEMA = "region-context-1"
-CHECKPOINT_SCHEMAS = (PILOT_SCHEMA, CHECKPOINT_SCHEMA)
 MAX_CHECKPOINT_BYTES = 64 * 1024 * 1024
 GATE_VERSION = "page-gate-1"
-SMARTDOC_EXPOSURE_FILE = "locator_v0_smartdoc.json"
 BORDERS = ("top", "right", "bottom", "left")
 
 
@@ -79,8 +66,8 @@ def _parameter_count(channels):
 class ContextSegmenterConfig:
     """Input size (height, width), four encoder widths and the model version."""
 
-    input_size: tuple[int, int] = (128, 96)
-    channels: tuple[int, int, int, int] = (8, 16, 32, 64)
+    input_size: tuple[int, int] = (192, 144)
+    channels: tuple[int, int, int, int] = (16, 32, 64, 128)
     model_version: str = MODEL_VERSION
 
     def __post_init__(self):
@@ -114,13 +101,13 @@ def parameter_count(config: ContextSegmenterConfig | None = None) -> int:
 def preprocess_image(
     image: np.ndarray, config: ContextSegmenterConfig | None = None
 ) -> torch.Tensor:
-    """The pinned v1 RGB preprocessing at ``config.input_size`` (float32 CHW, CPU)."""
+    """RGB preprocessing at ``config.input_size`` (float32 CHW, CPU)."""
     config = _config(config)
     return _preprocess_image(image, SegmenterConfig(input_size=config.input_size))
 
 
 def preprocess_mask(mask: np.ndarray, config: ContextSegmenterConfig | None = None) -> torch.Tensor:
-    """The pinned v1 binary target preprocessing (nearest-exact) at ``config.input_size``."""
+    """Binary target preprocessing (nearest-exact) at ``config.input_size``."""
     config = _config(config)
     return _preprocess_mask(mask, SegmenterConfig(input_size=config.input_size))
 
@@ -214,25 +201,6 @@ def _error(reason: str, message: str) -> FlattenerError:
     return FlattenerError(Status.MODEL_ERROR, reason, message)
 
 
-def sha256(path: str | os.PathLike[str]) -> str:
-    """Hex sha256 of a file."""
-    with Path(path).open("rb") as stream:
-        return hashlib.file_digest(stream, "sha256").hexdigest()
-
-
-def sidecar_path(path: str | os.PathLike[str]) -> Path:
-    """``<file>.sha256``: 64 hex digits and a newline."""
-    path = Path(path)
-    return path.with_name(path.name + ".sha256")
-
-
-def write_sidecar(path: str | os.PathLike[str]) -> str:
-    """Write the sha256 sidecar of ``path`` and return the digest."""
-    digest = sha256(Path(path))
-    sidecar_path(path).write_text(digest + "\n", encoding="ascii")
-    return digest
-
-
 def _json_like(value) -> bool:
     if value is None or isinstance(value, (bool, int, str)):
         return True
@@ -256,27 +224,16 @@ def _model_config(raw) -> ContextSegmenterConfig:
 
 
 def read_context_checkpoint(path: str | os.PathLike[str]) -> dict:
-    """Read a context checkpoint after checking its sha256 sidecar.
-
-    A sidecar checks integrity only. ``weights_only=True`` loads tensors and plain data
-    and runs no pickled code. Load files from a trusted source.
-    """
+    """Load page detector tensors, configuration and training metadata."""
     path = Path(path)
     try:
         if not path.is_file():
             raise _error("missing_checkpoint", f"{path} does not exist")
         if path.stat().st_size > MAX_CHECKPOINT_BYTES:
             raise _error("checkpoint_size_limit", "context checkpoint exceeds 64 MiB")
-        sidecar = sidecar_path(path)
-        if not sidecar.is_file():
-            raise _error("missing_sidecar", f"{sidecar} is missing")
-        digest = sidecar.read_text(encoding="ascii").strip()
-        actual = sha256(path)
-        if len(digest) != 64 or actual != digest:
-            raise _error("checkpoint_hash_mismatch", "checkpoint differs from its sha256 sidecar")
         checkpoint = torch.load(path, map_location="cpu", weights_only=True)
-        if not isinstance(checkpoint, dict) or checkpoint.get("schema") not in CHECKPOINT_SCHEMAS:
-            raise _error("invalid_checkpoint", f"schema must be one of {CHECKPOINT_SCHEMAS}")
+        if not isinstance(checkpoint, dict) or checkpoint.get("schema") != CHECKPOINT_SCHEMA:
+            raise _error("invalid_checkpoint", f"schema must be {CHECKPOINT_SCHEMA}")
         config = _model_config(checkpoint.get("model_config"))
         state = checkpoint.get("model_state")
         if not isinstance(state, dict) or not state:
@@ -288,19 +245,13 @@ def read_context_checkpoint(path: str | os.PathLike[str]) -> dict:
                 or not bool(torch.isfinite(value).all())
             ):
                 raise _error("invalid_checkpoint", "model_state must hold finite float32 tensors")
-        if checkpoint["schema"] == PILOT_SCHEMA:
-            epoch, best = checkpoint.get("epoch"), checkpoint.get("best_epoch")
-            if type(epoch) is not int or type(best) is not int or not 0 <= best <= epoch:
-                raise _error("invalid_checkpoint", "pilot checkpoint epochs are invalid")
-        else:
-            if checkpoint.get("preprocess_version") != PREPROCESS_VERSION:
-                raise _error("invalid_checkpoint", "preprocess_version differs")
-            if not isinstance(checkpoint.get("provenance"), dict) or not _json_like(
-                checkpoint["provenance"]
-            ):
-                raise _error("invalid_checkpoint", "provenance must be a JSON-like dict")
+        if checkpoint.get("preprocess_version") != PREPROCESS_VERSION:
+            raise _error("invalid_checkpoint", "preprocess_version differs")
+        if not isinstance(checkpoint.get("provenance"), dict) or not _json_like(
+            checkpoint["provenance"]
+        ):
+            raise _error("invalid_checkpoint", "provenance must be a JSON-like dict")
         checkpoint["_config"] = config
-        checkpoint["_sha256"] = actual
         return checkpoint
     except FlattenerError:
         raise
@@ -313,8 +264,8 @@ def save_context_checkpoint(
     model_state: dict[str, torch.Tensor],
     config: ContextSegmenterConfig,
     provenance: dict[str, Any],
-) -> str:
-    """Write a ``region-context-1`` checkpoint and its sidecar; return its sha256.
+) -> None:
+    """Write a ``region-context-1`` checkpoint.
 
     ``provenance`` is a JSON-like record: where the weights came from, how they were
     trained (``lineage``, ``initialization``, ``track``) and on which data.
@@ -350,36 +301,11 @@ def save_context_checkpoint(
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
-    return write_sidecar(path)
-
-
-def _pilot_provenance(checkpoint: dict) -> dict:
-    protocol = checkpoint.get("protocol")
-    protocol = protocol if isinstance(protocol, dict) else {}
-    keys = (
-        "seed",
-        "epochs",
-        "batch_size",
-        "torch_version",
-        "train_counts",
-        "validation_counts",
-        "selection",
-        "limitations",
-        "no_page_negatives_evaluated",
-        "test_evaluated",
-    )
-    summary = {key: protocol[key] for key in keys if key in protocol and _json_like(protocol[key])}
-    device = protocol.get("device")
-    if isinstance(device, dict) and _json_like(device):
-        summary["device"] = device
-    # The pilot file itself records no lineage; region-context-1 exports carry one.
-    summary.update(initialization="unknown", source_schema=PILOT_SCHEMA)
-    return summary
 
 
 @dataclass(slots=True)
 class LoadedContextSegmenter:
-    """A loaded page gate. Duck-types ``regions.segmentation.LoadedSegmenter``."""
+    """A loaded page detector with training metadata."""
 
     model: ContextPageSegmenter
     config: ContextSegmenterConfig
@@ -388,12 +314,8 @@ class LoadedContextSegmenter:
     device: torch.device = field(default_factory=lambda: torch.device("cpu"))
 
     @property
-    def model_sha256(self) -> str:
-        return self.metadata["checkpoint_sha256"]
-
-    @property
     def model_id(self) -> str:
-        return f"{MODEL_VERSION}:{self.model_sha256[:12]}"
+        return self.metadata.get("path", MODEL_VERSION)
 
     def _logits(self, image: np.ndarray) -> torch.Tensor:
         self.model.eval()
@@ -435,7 +357,7 @@ def _device(device) -> torch.device:
 def load_context_segmenter(
     path: str | os.PathLike[str], *, device: str | torch.device = "cpu"
 ) -> LoadedContextSegmenter:
-    """Load a context checkpoint (either schema) with its sidecar onto ``device``."""
+    """Load a page detector onto ``device``."""
     started = time.perf_counter()
     device = _device(device)
     checkpoint = read_context_checkpoint(path)
@@ -453,23 +375,17 @@ def load_context_segmenter(
         model.to(device)
     except (KeyError, TypeError, ValueError, RuntimeError) as exc:
         raise _error("invalid_checkpoint", f"Cannot build the context segmenter: {exc}") from exc
-    schema = checkpoint["schema"]
-    provenance = (
-        checkpoint["provenance"] if schema == CHECKPOINT_SCHEMA else _pilot_provenance(checkpoint)
-    )
     metadata = {
-        "checkpoint_sha256": checkpoint["_sha256"],
-        "checkpoint_schema": schema,
+        "path": str(Path(path).resolve()),
+        "checkpoint_schema": CHECKPOINT_SCHEMA,
         "model_version": MODEL_VERSION,
         "model_config": asdict(config),
         "parameter_count": parameter_count(config),
         "preprocess_version": PREPROCESS_VERSION,
-        "provenance": provenance,
+        "provenance": checkpoint["provenance"],
         "device": str(device),
         "probability_grid": "whole original image extent at model_config.input_size",
     }
-    if schema == PILOT_SCHEMA:
-        metadata.update(epoch=checkpoint["epoch"], best_epoch=checkpoint["best_epoch"])
     return LoadedContextSegmenter(model, config, metadata, time.perf_counter() - started, device)
 
 
@@ -590,7 +506,7 @@ def gate_page_region(probability, source_size, *, config: GateConfig | None = No
 def gate_page(image: np.ndarray, segmenter, *, config: GateConfig | None = None) -> PageGate:
     """Run ``segmenter`` on ``image`` and decide its page box (see ``gate_page_region``).
 
-    Error metadata and the result's detection metadata name the segmenter and its sha256.
+    Error metadata and detection metadata name the model used.
     """
     from .inference import estimate_page_region  # inference may import this module later
 
@@ -599,28 +515,9 @@ def gate_page(image: np.ndarray, segmenter, *, config: GateConfig | None = None)
     return _decide(estimate, image.shape[:2], config)
 
 
-# SmartDoc exposure of the v0 checkpoint
-
-
-@cache
-def _smartdoc_exposure_text() -> str:
-    return resources.files(__package__).joinpath(SMARTDOC_EXPOSURE_FILE).read_text("utf-8")
-
-
-def smartdoc_exposure() -> dict:
-    """The v0 gate's SmartDoc template exposure record (a fresh copy per call).
-
-    ``exclude_from_evaluation`` lists the SmartDoc model names (for example
-    ``datasheet001``) whose frames trained v0. ``selection_exposed`` chose its epoch, and
-    ``unexposed`` never reached training or selection.
-    """
-    return json.loads(_smartdoc_exposure_text())
-
-
 __all__ = [
     "BORDERS",
     "CHECKPOINT_SCHEMA",
-    "CHECKPOINT_SCHEMAS",
     "ContextPageSegmenter",
     "ContextSegmenterConfig",
     "GATE_VERSION",
@@ -628,7 +525,6 @@ __all__ = [
     "LoadedContextSegmenter",
     "MAX_PARAMETERS",
     "MODEL_VERSION",
-    "PILOT_SCHEMA",
     "PREPROCESS_VERSION",
     "PageGate",
     "gate_page",
@@ -639,8 +535,5 @@ __all__ = [
     "preprocess_mask",
     "read_context_checkpoint",
     "save_context_checkpoint",
-    "sidecar_path",
-    "smartdoc_exposure",
     "touched_borders",
-    "write_sidecar",
 ]

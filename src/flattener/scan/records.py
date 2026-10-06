@@ -1,42 +1,17 @@
-"""Scan records: reason codes with guidance, outcomes, ``ScanPlan`` and ``ScanResult``.
+"""Serializable scan plans, results, reason codes and user guidance.
 
-``contracts.Status`` is fixed, so scan conditions are ``reason_code`` strings on the
-existing statuses. ``REASONS`` registers the scanner's reason codes, each with the
-status it carries, its severity, how the scanner handles it and, where the user can
-act, guidance in English:
-
-* ``info``: recorded; the scan goes on unchanged.
-* ``warning``: the scan goes on and the result is ``rectified_with_warnings``.
-* ``failure``: the scan falls back to a perspective result or returns the original.
-
-A code outside the registry keeps the status it came with; with the
-``invalid_transform`` status (the renderer's geometry checks) it takes the guidance of
-``invalid_transform``.
-
-``Outcome`` names the image a result holds: ``rectified``, ``rectified_with_warnings``,
-``perspective`` (page outline flattened, curl kept), ``original_returned``, or
-``failed`` when there is no image (the input could not be read). The CLI exit statuses
-are ``EXIT_SCANNED``, ``EXIT_FALLBACK`` and ``EXIT_USAGE`` (see ``flattener.scan``'s
-``__main__``).
-
-``ScanPlan`` holds what a render needs: the source record, the geometry (a grid of
-flattener values in source coordinates, or a homography), the output size and the
-settings. ``plan_sha256`` is the sha256 of its canonical JSON (sorted keys, no spaces,
-floats as Python ``repr``), so a preview and a saved image with the same plan_sha256
-share their geometry. ``ScanResult`` is the record of one scan. Its JSON holds everything
-except the pixel arrays, which ``scan.io`` writes as image files.
+A ScanPlan stores source dimensions, output settings and the geometry needed to render.
+A ScanResult holds the outcome, plan, model information and any warnings.
+Images and masks stay in memory and are omitted from JSON.
 """
 
 from __future__ import annotations
 
-import hashlib
-import json
 import math
 import os
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from enum import Enum, StrEnum
-from functools import cached_property
 from typing import Any
 
 import numpy as np
@@ -71,7 +46,6 @@ PLAN_KEYS = frozenset(
         "models",
         "thresholds",
         "provenance",
-        "plan_sha256",
     }
 )
 RENDER_KINDS = ("dewarp", "perspective", "original")
@@ -310,18 +284,6 @@ def json_plain(value: Any) -> Any:
     raise TypeError(f"{type(value).__name__} is not JSON data")
 
 
-def canonical_json(value: Any) -> bytes:
-    """Sorted keys, no spaces, UTF-8: the bytes behind ``plan_sha256``."""
-    text = json.dumps(
-        json_plain(value),
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-        allow_nan=False,
-    )
-    return text.encode("utf-8")
-
-
 def _plan_error(message: str) -> FlattenerError:
     return FlattenerError(Status.INPUT_ERROR, "invalid_plan", message)
 
@@ -492,11 +454,8 @@ class SourceInfo:
     full_size: tuple[int, int] | None = None
     scale: int = 1
     format: str | None = None
-    file_sha256: str | None = None
-    pixels_sha256: str | None = None
     exif_orientation: int | None = None
     focal_length_35mm: float | None = None
-    icc_sha256: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "size", _pair(self.size, "size"))
@@ -531,11 +490,8 @@ class SourceInfo:
             "full_size": list(self.full_size),
             "scale": self.scale,
             "format": self.format,
-            "file_sha256": self.file_sha256,
-            "pixels_sha256": self.pixels_sha256,
             "exif_orientation": self.exif_orientation,
             "focal_length_35mm": self.focal_length_35mm,
-            "icc_sha256": self.icc_sha256,
         }
 
     @classmethod
@@ -580,8 +536,7 @@ class ScanPlan:
     places the grid nodes (``scan.placement.dense_map``): ``flattener`` (edge-aligned) or
     ``uvdoc`` (align_corners=True, the upstream UVDoc weights). ``fill_rgb`` fills output
     pixels outside the source. ``sharpen`` is the amount of ``scan.sharpen`` on the
-    rendered image (0: none); the plan's JSON holds it only when it is above 0, so plans
-    stored before it existed keep their ``plan_sha256``.
+    rendered image (0: none). The JSON omits it when it is zero.
     """
 
     source: SourceInfo
@@ -671,7 +626,7 @@ class ScanPlan:
             raise _plan_error(f"provenance values must be one of {PROVENANCE_VALUES}")
 
     def body(self) -> dict[str, Any]:
-        """The plan as JSON data without ``plan_sha256``."""
+        """The plan as JSON data."""
         body = {
             "schema": PLAN_SCHEMA,
             "kind": self.kind,
@@ -699,16 +654,15 @@ class ScanPlan:
             body["sharpen"] = self.sharpen
         return body
 
-    @cached_property
-    def plan_sha256(self) -> str:
-        return hashlib.sha256(canonical_json(self.body())).hexdigest()
-
     def to_dict(self) -> dict[str, Any]:
-        return {**self.body(), "plan_sha256": self.plan_sha256}
+        return self.body()
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any], *, verify: bool = True) -> ScanPlan:
-        """Rebuild a plan; with ``verify`` a stored ``plan_sha256`` must match."""
+    def from_dict(
+        cls,
+        data: dict[str, Any],
+    ) -> ScanPlan:
+        """Rebuild a plan and validate its geometry and settings."""
         if not isinstance(data, dict) or data.get("schema") != PLAN_SCHEMA:
             raise _plan_error(f"plan schema must be {PLAN_SCHEMA}")
         unknown = set(data) - PLAN_KEYS
@@ -743,22 +697,12 @@ class ScanPlan:
             raise _plan_error(exc.message) from exc
         except (KeyError, TypeError, ValueError) as exc:
             raise _plan_error(f"malformed plan: {exc}") from exc
-        stored = data.get("plan_sha256")
-        if verify and stored is not None and stored != plan.plan_sha256:
-            raise FlattenerError(
-                Status.INPUT_ERROR,
-                "plan_sha256_mismatch",
-                f"plan_sha256 {stored} does not match the plan ({plan.plan_sha256})",
-            )
         return plan
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, ScanPlan):
             return NotImplemented
-        return self.plan_sha256 == other.plan_sha256
-
-    def __hash__(self) -> int:
-        return hash(self.plan_sha256)
+        return self.body() == other.body()
 
 
 @dataclass(eq=False)
@@ -789,9 +733,6 @@ class ScanResult:
     timings: dict[str, float] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
     models: list[dict[str, Any]] = field(default_factory=list)
-    shippable: bool | None = None
-    research: bool = False
-    evidence: dict[str, Any] | None = None
     quality_status: str = "not_evaluated"
     input: str | None = None
     artifacts: dict[str, str] = field(default_factory=dict)
@@ -816,12 +757,8 @@ class ScanResult:
             "timings": json_plain(self.timings),
             "input": self.input,
             "source": None if self.source is None else self.source.to_dict(),
-            "plan_sha256": None if self.plan is None else self.plan.plan_sha256,
             "plan": None if self.plan is None else self.plan.to_dict(),
             "models": json_plain(self.models),
-            "shippable": self.shippable,
-            "research": bool(self.research),
-            "evidence": json_plain(self.evidence),
             "quality_status": self.quality_status,
             "artifacts": json_plain(self.artifacts),
             "metadata": json_plain(self.metadata),
@@ -833,12 +770,6 @@ class ScanResult:
         if not isinstance(data, dict) or data.get("schema") != RECORD_SCHEMA:
             raise _record_error(f"record schema must be {RECORD_SCHEMA}")
         plan = None if data.get("plan") is None else ScanPlan.from_dict(data["plan"])
-        if plan is not None and data.get("plan_sha256") not in (None, plan.plan_sha256):
-            raise FlattenerError(
-                Status.INPUT_ERROR,
-                "plan_sha256_mismatch",
-                "the record's plan_sha256 does not match its plan",
-            )
         try:
             return cls(
                 status=data["status"],
@@ -855,9 +786,6 @@ class ScanResult:
                 timings=data.get("timings") or {},
                 metadata=data.get("metadata") or {},
                 models=data.get("models") or [],
-                shippable=data.get("shippable"),
-                research=bool(data.get("research", False)),
-                evidence=data.get("evidence"),
                 quality_status=data.get("quality_status", "not_evaluated"),
                 input=data.get("input"),
                 artifacts=data.get("artifacts") or {},

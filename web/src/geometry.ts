@@ -107,19 +107,37 @@ export function gateInput(image: Pixels, height: number, width: number): Float32
   const temp = new Float32Array(image.height * width * 3),
     out = new Float32Array(width * height * 3);
   for (let y = 0; y < image.height; y++)
-    for (let x = 0; x < width; x++)
-      for (let c = 0; c < 3; c++) {
-        let value = 0;
-        for (const [j, w] of xt[x]) value += (image.data[(y * image.width + j) * 4 + c] / 255) * w;
-        temp[(y * width + x) * 3 + c] = value;
+    for (let x = 0; x < width; x++) {
+      let red = 0,
+        green = 0,
+        blue = 0;
+      for (const [j, w] of xt[x]) {
+        const i = (y * image.width + j) * 4;
+        red += (image.data[i] / 255) * w;
+        green += (image.data[i + 1] / 255) * w;
+        blue += (image.data[i + 2] / 255) * w;
       }
+      const i = (y * width + x) * 3;
+      temp[i] = red;
+      temp[i + 1] = green;
+      temp[i + 2] = blue;
+    }
   for (let y = 0; y < height; y++)
-    for (let x = 0; x < width; x++)
-      for (let c = 0; c < 3; c++) {
-        let value = 0;
-        for (const [j, w] of yt[y]) value += temp[(j * width + x) * 3 + c] * w;
-        out[c * width * height + y * width + x] = value;
+    for (let x = 0; x < width; x++) {
+      let red = 0,
+        green = 0,
+        blue = 0;
+      for (const [j, w] of yt[y]) {
+        const i = (j * width + x) * 3;
+        red += temp[i] * w;
+        green += temp[i + 1] * w;
+        blue += temp[i + 2] * w;
       }
+      const i = y * width + x;
+      out[i] = red;
+      out[width * height + i] = green;
+      out[2 * width * height + i] = blue;
+    }
   return out;
 }
 

@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <meta name="theme-color" content="#f1f3f2" />
     <meta
       name="description"
@@ -12,251 +12,365 @@
     <title>Flattener — your page, straightened out.</title>
   </head>
   <body>
-    <!-- One photo workspace. Settings and scan details are available on demand.
-         Manrope, a quiet gray work surface, and green primary actions preserve the app's identity. -->
     <a class="skip-link" href="#workspace">Skip to workspace</a>
-    <header class="app-header">
-      <a class="brand" href="./" aria-label="Flattener home">
-        <svg viewBox="0 0 32 32" aria-hidden="true">
-          <path d="M5 8c6-6 16 6 22 0M5 16c6-3 16 3 22 0M5 24h22" />
-        </svg>
-        flattener<span class="brand-dot">.</span>
-      </a>
-      <div class="privacy">
-        <svg viewBox="0 0 20 20" aria-hidden="true">
-          <rect x="4" y="8" width="12" height="9" rx="2" />
-          <path d="M6.5 8V5a3.5 3.5 0 0 1 7 0v3M10 12v2" />
-        </svg>
-        <span>No photo uploads</span>
-      </div>
-    </header>
-
-    <main id="workspace" class="workspace" tabindex="-1">
-      <input id="file-input" type="file" accept="image/jpeg,image/png,image/webp" hidden />
-      <div id="file-toolbar" class="file-toolbar" hidden>
-        <div class="document-label">
-          <span id="filename"></span>
-          <span id="sample-label" hidden>Synthetic sample</span>
-        </div>
-        <button id="choose" class="button secondary" type="button">Change photo</button>
-      </div>
-
-      <div id="drop-area" class="stage">
-        <div id="empty" class="empty-state">
-          <svg class="page-diagram" viewBox="0 0 220 140" aria-hidden="true">
-            <path class="diagram-page" d="M16 20q36-13 70 5v100q-34-14-70-3Z" />
-            <path
-              class="diagram-lines"
-              d="M29 43q21-5 44 2M29 61q21-5 44 2M29 79q21-5 44 2M29 97q21-5 29-1"
-            />
-            <path class="diagram-arrow" d="M98 73h24m-6-6 6 6-6 6" />
-            <path class="diagram-page" d="M146 18h58v108h-58Z" />
-            <path class="diagram-lines" d="M159 42h32M159 60h32M159 78h32M159 96h22" />
+    <div class="app-shell">
+      <header class="app-header">
+        <a class="brand" href="./" aria-label="Flattener home">
+          <svg viewBox="0 0 32 32" aria-hidden="true">
+            <path d="M5 8c6-6 16 6 22 0M5 16c6-3 16 3 22 0M5 24h22" />
           </svg>
-          <h1>From photo to flat scan.</h1>
-          <p class="intro">Straighten curved or tilted document photos.</p>
-          <button id="drop-choose" type="button" class="button primary">Choose a photo</button>
-          <p class="file-hint">Or drop or paste a JPEG, PNG or WebP.<br />Up to 40 MB.</p>
-          <button id="sample" class="text-button" type="button">
-            Try a sample document
-            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 10h10M11 6l4 4-4 4" /></svg>
-          </button>
+          flattener<span class="brand-dot">.</span>
+        </a>
+        <div class="privacy">
+          <svg viewBox="0 0 20 20" aria-hidden="true">
+            <rect x="4" y="8" width="12" height="9" rx="2" />
+            <path d="M6.5 8V5a3.5 3.5 0 0 1 7 0v3M10 12v2" />
+          </svg>
+          <span>No photo uploads</span>
+        </div>
+      </header>
+
+      <main id="workspace" class="workspace" tabindex="-1">
+        <input id="file-input" type="file" accept="image/jpeg,image/png,image/webp" hidden />
+        <div id="file-toolbar" class="file-toolbar" hidden>
+          <div class="document-label">
+            <span id="filename"></span>
+            <span id="sample-label" hidden>Synthetic sample</span>
+          </div>
+          <div class="source-actions">
+            <button
+              id="camera-new"
+              class="button secondary"
+              type="button"
+              aria-label="Take a new photo"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path
+                  d="M8 5l1-2h6l1 2h4a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2Z"
+                />
+                <circle cx="12" cy="12" r="4" />
+              </svg>
+              <span>Camera</span>
+            </button>
+            <button id="choose" class="button secondary" type="button">Change photo</button>
+          </div>
         </div>
 
-        <div id="view-controls" class="view-controls" role="group" aria-label="Preview view" hidden>
-          <button id="show-original" type="button" aria-pressed="true">Original</button>
-          <button id="show-scan" type="button" aria-pressed="false" disabled>Scan</button>
-          <button id="show-compare" type="button" aria-pressed="false" disabled>Compare</button>
-        </div>
-        <div id="images" class="images" hidden>
-          <figure id="original-pane">
-            <figcaption>Original</figcaption>
-            <div class="image-mount">
-              <img id="original-image" alt="Original document photograph" hidden />
-            </div>
-          </figure>
-          <figure id="scan-pane" hidden>
-            <figcaption>Flattened</figcaption>
-            <div class="image-mount">
-              <img id="scan-image" alt="Flattened document scan" hidden />
-            </div>
-          </figure>
-        </div>
-        <figure id="process-view" class="process-view" hidden>
-          <div class="image-mount"><img id="process-image" alt="" hidden /></div>
-          <figcaption>
-            <strong id="process-title"></strong>
-            <p id="process-detail"></p>
-          </figcaption>
-          <button id="process-back" class="button secondary" type="button" hidden>
-            Back to scan
-          </button>
-        </figure>
-        <div id="finger-editor" class="finger-editor" hidden>
-          <div class="editor-heading">
-            <h2>Remove fingers</h2>
-            <p>Check the red selection, then paint to add or erase.</p>
-          </div>
-          <div class="brush-tools" role="group" aria-label="Removal brush">
-            <button id="brush-add" class="button secondary" type="button" aria-pressed="true">
-              Add
-            </button>
-            <button id="brush-erase" class="button secondary" type="button" aria-pressed="false">
-              Erase
-            </button>
-            <label for="brush-size">Brush size</label>
-            <input id="brush-size" type="range" min="1" max="16" value="6" />
-            <button id="mask-undo" class="button secondary" type="button" disabled>
-              Undo stroke
-            </button>
-          </div>
-          <div class="mask-mount">
-            <canvas
-              id="mask-canvas"
-              tabindex="0"
-              aria-label="Paint the removal area"
-              aria-describedby="mask-keyboard"
-            ></canvas>
-          </div>
-          <p id="mask-status" class="help" role="status"></p>
-          <div class="mask-choices">
-            <button id="mask-auto" class="text-button" type="button">Use detection</button>
-            <button id="mask-clear" class="text-button" type="button">Clear selection</button>
-          </div>
-          <p class="removal-note">
-            Selected areas are filled with paper color. Covered text cannot be recovered.
-          </p>
-          <details class="keyboard-help">
-            <summary>Keyboard controls</summary>
-            <p id="mask-keyboard">
-              Focus the image. Arrow keys move the brush; hold Space to paint. Hold Shift for
-              smaller steps. Select Erase to undo part of the selection.
-            </p>
-          </details>
-          <div class="editor-actions">
-            <button id="mask-cancel" class="button secondary" type="button">Cancel</button>
-            <button id="mask-apply" class="button primary" type="button">Apply removal</button>
-          </div>
-        </div>
-        <div class="drop-overlay" aria-hidden="true">Drop your photo here</div>
-      </div>
-
-      <div id="adjustments" class="adjustments" hidden>
-        <label for="color-mode">Color</label>
-        <select id="color-mode">
-          <option value="clean">Clean color</option>
-          <option value="original">Original color</option>
-        </select>
-        <button id="remove-fingers" class="button secondary" type="button">Remove fingers</button>
-        <button id="undo-edit" class="text-button" type="button" disabled>Undo edit</button>
-        <button id="reset-edits" class="text-button" type="button" disabled>Reset edits</button>
-      </div>
-      <div id="work-controls" hidden>
-        <div class="action-bar">
-          <div id="feedback" class="feedback" role="status" aria-live="polite">
-            <strong id="stage-title"></strong>
-            <p id="stage-detail" hidden></p>
-          </div>
-          <div class="action-group">
-            <div id="edit-controls" class="edit-controls" hidden>
-              <button id="rotate" class="button secondary" type="button">Rotate</button>
-              <button id="zoom" class="button secondary" type="button" aria-pressed="false">
-                100% view
+        <div id="drop-area" class="stage">
+          <div id="empty" class="empty-state">
+            <svg class="page-diagram" viewBox="0 0 220 140" aria-hidden="true">
+              <path class="diagram-page" d="M16 20q36-13 70 5v100q-34-14-70-3Z" />
+              <path
+                class="diagram-lines"
+                d="M29 43q21-5 44 2M29 61q21-5 44 2M29 79q21-5 44 2M29 97q21-5 29-1"
+              />
+              <path class="diagram-arrow" d="M98 73h24m-6-6 6 6-6 6" />
+              <path class="diagram-page" d="M146 18h58v108h-58Z" />
+              <path class="diagram-lines" d="M159 42h32M159 60h32M159 78h32M159 96h22" />
+            </svg>
+            <h1>From photo to flat scan.</h1>
+            <p class="intro">Straighten curved or tilted document photos.</p>
+            <div class="source-picker">
+              <button id="open-camera" type="button" class="button camera-choice">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path
+                    d="M8 5l1-2h6l1 2h4a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2Z"
+                  />
+                  <circle cx="12" cy="12" r="4" />
+                </svg>
+                Open camera
+              </button>
+              <button id="drop-choose" type="button" class="button photo-choice">
+                Choose a photo
               </button>
             </div>
-            <button id="scan" class="button primary" type="button" disabled>Flatten photo</button>
-            <button id="cancel" class="button secondary" type="button" hidden>Cancel scan</button>
-            <div id="result-actions" hidden>
-              <a id="download" class="button primary" download="scan.png"
-                >Save PNG
-                <svg viewBox="0 0 20 20" aria-hidden="true">
-                  <path d="M10 3v10M6 9l4 4 4-4M4 14v3h12v-3" />
-                </svg>
-              </a>
+            <div class="scanner-preparation" data-state="loading">
+              <span data-scanner-status role="status">Preparing scanner…</span>
+              <button type="button" data-prepare-retry hidden>Retry</button>
             </div>
+            <p class="file-hint">Or drop or paste a JPEG, PNG or WebP.<br />Up to 40 MB.</p>
+            <button id="sample" class="text-button" type="button">
+              Try a sample document
+              <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 10h10M11 6l4 4-4 4" /></svg>
+            </button>
+          </div>
+
+          <div
+            id="view-controls"
+            class="view-controls"
+            role="group"
+            aria-label="Preview view"
+            hidden
+          >
+            <button id="show-original" type="button" aria-pressed="true">Original</button>
+            <button id="show-scan" type="button" aria-pressed="false" disabled>Scan</button>
+            <button id="show-compare" type="button" aria-pressed="false" disabled>Compare</button>
+          </div>
+          <div id="images" class="images" hidden>
+            <figure id="original-pane">
+              <figcaption>Original</figcaption>
+              <div class="image-mount">
+                <img id="original-image" alt="Original document photograph" hidden />
+              </div>
+            </figure>
+            <figure id="scan-pane" hidden>
+              <figcaption>Flattened</figcaption>
+              <div class="image-mount">
+                <img id="scan-image" alt="Flattened document scan" hidden />
+              </div>
+            </figure>
+          </div>
+          <figure id="process-view" class="process-view" hidden>
+            <div class="image-mount"><img id="process-image" alt="" hidden /></div>
+            <figcaption>
+              <strong id="process-title"></strong>
+              <p id="process-detail"></p>
+            </figcaption>
+            <button id="process-back" class="button secondary" type="button" hidden>
+              Back to scan
+            </button>
+          </figure>
+          <div id="finger-editor" class="finger-editor" hidden>
+            <div class="editor-heading">
+              <h2>Remove fingers</h2>
+              <p>Check the red selection, then paint to add or erase.</p>
+            </div>
+            <div class="brush-tools" role="group" aria-label="Removal brush">
+              <button id="brush-add" class="button secondary" type="button" aria-pressed="true">
+                Add
+              </button>
+              <button id="brush-erase" class="button secondary" type="button" aria-pressed="false">
+                Erase
+              </button>
+              <label for="brush-size">Brush size</label>
+              <input id="brush-size" type="range" min="1" max="16" value="6" />
+              <button id="mask-undo" class="button secondary" type="button" disabled>
+                Undo stroke
+              </button>
+            </div>
+            <div class="mask-mount">
+              <canvas
+                id="mask-canvas"
+                tabindex="0"
+                aria-label="Paint the removal area"
+                aria-describedby="mask-keyboard"
+              ></canvas>
+            </div>
+            <p id="mask-status" class="help" role="status"></p>
+            <div class="mask-choices">
+              <button id="mask-auto" class="text-button" type="button">Use detection</button>
+              <button id="mask-clear" class="text-button" type="button">Clear selection</button>
+            </div>
+            <p class="removal-note">
+              Selected areas are filled with paper color. Covered text cannot be recovered.
+            </p>
+            <details class="keyboard-help">
+              <summary>Keyboard controls</summary>
+              <p id="mask-keyboard">
+                Focus the image. Arrow keys move the brush; hold Space to paint. Hold Shift for
+                smaller steps. Select Erase to undo part of the selection.
+              </p>
+            </details>
+            <div class="editor-actions">
+              <button id="mask-cancel" class="button secondary" type="button">Cancel</button>
+              <button id="mask-apply" class="button primary" type="button">Apply removal</button>
+            </div>
+          </div>
+          <div class="drop-overlay" aria-hidden="true">Drop your photo here</div>
+        </div>
+
+        <div id="refine-controls" class="refine-controls" hidden>
+          <button id="refine" class="button secondary" type="button" aria-describedby="refine-help">
+            Refine scan
+          </button>
+          <p id="refine-help" class="help">Take more time to refine the page shape.</p>
+        </div>
+        <div id="adjustments" class="adjustments" hidden>
+          <label for="color-mode">Color</label>
+          <select id="color-mode">
+            <option value="clean">Clean color</option>
+            <option value="original">Original color</option>
+          </select>
+          <button id="remove-fingers" class="button secondary" type="button">Remove fingers</button>
+          <button id="undo-edit" class="text-button" type="button" disabled>Undo edit</button>
+          <button id="reset-edits" class="text-button" type="button" disabled>Reset edits</button>
+        </div>
+        <div id="work-controls" hidden>
+          <div class="action-bar">
+            <div id="feedback" class="feedback" role="status" aria-live="polite">
+              <strong id="stage-title"></strong>
+              <p id="stage-detail" hidden></p>
+            </div>
+            <div class="action-group">
+              <div id="edit-controls" class="edit-controls" hidden>
+                <button id="rotate" class="button secondary" type="button">Rotate</button>
+                <button id="zoom" class="button secondary" type="button" aria-pressed="false">
+                  100% view
+                </button>
+              </div>
+              <button id="scan" class="button primary" type="button" disabled>Flatten photo</button>
+              <button id="cancel" class="button secondary" type="button" hidden>Cancel scan</button>
+              <div id="result-actions" hidden>
+                <a id="download" class="button primary" download="scan.png"
+                  >Save PNG
+                  <svg viewBox="0 0 20 20" aria-hidden="true">
+                    <path d="M10 3v10M6 9l4 4 4-4M4 14v3h12v-3" />
+                  </svg>
+                </a>
+              </div>
+            </div>
+          </div>
+          <progress id="progress" aria-label="Scanner progress" hidden></progress>
+        </div>
+        <p id="error" class="error" role="alert" hidden></p>
+        <p id="warnings" class="warnings" hidden></p>
+
+        <details id="process-history" class="process-history" hidden>
+          <summary>See processing steps</summary>
+          <p class="help">Actual intermediate results from this scan, before your edits.</p>
+          <ol id="process-steps"></ol>
+        </details>
+
+        <div id="settings-container" hidden>
+          <details id="scan-settings" class="scan-settings">
+            <summary>Scan settings</summary>
+            <fieldset id="settings-fields">
+              <legend class="visually-hidden">Scan settings</legend>
+              <div class="setting">
+                <label for="resolution">Longest edge</label>
+                <select id="resolution">
+                  <option value="2560">Up to 2560 px</option>
+                  <option value="1600">Up to 1600 px</option>
+                  <option value="1024">Up to 1024 px</option>
+                </select>
+              </div>
+              <label class="check-setting"
+                ><input id="orient" type="checkbox" checked /><span>Auto-rotate text</span></label
+              >
+            </fieldset>
+            <div id="rescan-controls" hidden>
+              <button id="rescan" class="button secondary" type="button">Scan again</button>
+            </div>
+            <dl id="scan-details" class="scan-details" hidden>
+              <div>
+                <dt>Original</dt>
+                <dd id="source-size"></dd>
+              </div>
+              <div>
+                <dt>Scan</dt>
+                <dd id="result-size"></dd>
+              </div>
+              <div>
+                <dt>Processing time</dt>
+                <dd id="result-info"></dd>
+              </div>
+              <div>
+                <dt>Processing device</dt>
+                <dd id="engine">This device</dd>
+              </div>
+            </dl>
+          </details>
+        </div>
+
+        <footer class="workspace-footer">
+          <details class="about">
+            <summary>About Flattener</summary>
+            <div class="about-content">
+              <p>
+                Flattener corrects the perspective and curvature of a single document page. Photos
+                stay in your browser.
+              </p>
+              <p>
+                The first scan downloads about 36 MB of models, plus the browser runtime. Processing
+                uses WebGPU when available, or your CPU.
+              </p>
+              <p>
+                Book splitting and PDF export are not available yet. Browser results have not been
+                benchmarked against the Python release.
+              </p>
+            </div>
+          </details>
+          <a href="./LICENSE">Licenses</a>
+        </footer>
+      </main>
+    </div>
+    <dialog
+      id="camera"
+      class="camera"
+      aria-labelledby="camera-title"
+      aria-describedby="camera-hint"
+    >
+      <div class="camera-layout">
+        <header class="camera-header">
+          <h2 id="camera-title">Scan a document</h2>
+          <button
+            id="camera-close"
+            class="camera-icon-button"
+            type="button"
+            aria-label="Close camera"
+            autofocus
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18" /></svg>
+          </button>
+        </header>
+        <div id="camera-viewfinder" class="camera-viewfinder">
+          <video
+            id="camera-video"
+            autoplay
+            muted
+            playsinline
+            aria-label="Live camera preview"
+            hidden
+          ></video>
+          <svg id="camera-outline" viewBox="0 0 1 1" preserveAspectRatio="none" aria-hidden="true">
+            <path id="camera-path" vector-effect="non-scaling-stroke" />
+          </svg>
+          <div id="camera-error" class="camera-error" hidden>
+            <p id="camera-error-message" role="alert"></p>
+            <button id="camera-retry" class="button" type="button">Try camera again</button>
           </div>
         </div>
-        <progress id="progress" aria-label="Scanner progress" hidden></progress>
-      </div>
-      <p id="error" class="error" role="alert" hidden></p>
-      <p id="warnings" class="warnings" hidden></p>
-
-      <details id="process-history" class="process-history" hidden>
-        <summary>See processing steps</summary>
-        <p class="help">Actual intermediate results from this scan, before your edits.</p>
-        <ol id="process-steps"></ol>
-      </details>
-
-      <div id="settings-container" hidden>
-        <details id="scan-settings" class="scan-settings">
-          <summary>Scan settings</summary>
-          <fieldset id="settings-fields">
-            <legend class="visually-hidden">Scan settings</legend>
-            <div class="setting">
-              <label for="quality">Correction</label>
-              <select id="quality" aria-describedby="quality-help">
-                <option value="refined">Refined</option>
-                <option value="fast">Quick</option>
-              </select>
-              <p id="quality-help" class="help">A closer fit to the page.</p>
-            </div>
-            <div class="setting">
-              <label for="resolution">Longest edge</label>
-              <select id="resolution">
-                <option value="2560">Up to 2560 px</option>
-                <option value="1600">Up to 1600 px</option>
-                <option value="1024">Up to 1024 px</option>
-              </select>
-            </div>
-            <label class="check-setting"
-              ><input id="orient" type="checkbox" checked /><span>Auto-rotate text</span></label
+        <footer class="camera-footer">
+          <p id="camera-status" class="camera-status" role="status">Opening camera…</p>
+          <p id="camera-hint">Keep the whole page in view.</p>
+          <div class="scanner-preparation" data-state="loading">
+            <span data-scanner-status role="status">Preparing scanner…</span>
+            <button type="button" data-prepare-retry hidden>Retry</button>
+          </div>
+          <div class="camera-controls">
+            <button id="camera-gallery" class="camera-icon-button" type="button">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <rect x="3" y="3" width="18" height="18" rx="2" />
+                <circle cx="8" cy="8" r="1.5" />
+                <path d="m3 17 5-5 4 4 4-6 5 7" />
+              </svg>
+              <span>Photos</span>
+            </button>
+            <button
+              id="camera-shutter"
+              class="camera-shutter"
+              type="button"
+              aria-label="Take photo"
+              disabled
             >
-          </fieldset>
-          <div id="rescan-controls" hidden>
-            <button id="rescan" class="button secondary" type="button">Scan again</button>
+              <span></span>
+            </button>
+            <button
+              id="camera-flip"
+              class="camera-icon-button"
+              type="button"
+              aria-label="Switch camera"
+              hidden
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M4 9a8 8 0 0 1 14-3l2 3M20 4v5h-5M20 15a8 8 0 0 1-14 3l-2-3M4 20v-5h5" />
+              </svg>
+              <span>Flip</span>
+            </button>
           </div>
-          <dl id="scan-details" class="scan-details" hidden>
-            <div>
-              <dt>Original</dt>
-              <dd id="source-size"></dd>
-            </div>
-            <div>
-              <dt>Scan</dt>
-              <dd id="result-size"></dd>
-            </div>
-            <div>
-              <dt>Processing time</dt>
-              <dd id="result-info"></dd>
-            </div>
-            <div>
-              <dt>Processing device</dt>
-              <dd id="engine">This device</dd>
-            </div>
-          </dl>
-        </details>
+        </footer>
       </div>
-
-      <footer class="workspace-footer">
-        <details class="about">
-          <summary>About Flattener</summary>
-          <div class="about-content">
-            <p>
-              Flattener corrects the perspective and curvature of a single document page. Photos
-              stay in your browser.
-            </p>
-            <p>
-              The first scan downloads about 36 MB of models, plus the browser runtime. Processing
-              uses WebGPU when available, or your CPU.
-            </p>
-            <p>
-              Book splitting and PDF export are not available yet. Browser results have not been
-              benchmarked against the Python release.
-            </p>
-          </div>
-        </details>
-        <a href="./LICENSE">Licenses</a>
-      </footer>
-    </main>
+    </dialog>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

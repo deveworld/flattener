@@ -35,7 +35,6 @@ SOFTWARE.
 
 from __future__ import annotations
 
-import hashlib
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -47,7 +46,6 @@ from torch.nn import functional as F
 ARCHITECTURE = "uvdocnet"
 GRID_CONVENTIONS = ("flattener", "uvdoc")
 UVDOC_REVISION = "4c9b82b537057aff2526e6dd118a847cdd072e82"
-UVDOC_WEIGHTS_SHA256 = "7e90861b8a516eb4bc51f84bd889cb77275743d2d1d3ca8091951ec9f2b7da23"
 _BRIDGE_DILATIONS = ((1,), (2,), (5,), (8, 3, 2), (12, 7, 4), (18, 12, 6))
 
 
@@ -264,11 +262,6 @@ def count_parameters(model: nn.Module) -> dict[str, int]:
     }
 
 
-def sha256_file(path: str | Path) -> str:
-    with Path(path).open("rb") as stream:
-        return hashlib.file_digest(stream, "sha256").hexdigest()
-
-
 def load_uvdoc_state_dict(path: str | Path) -> dict[str, torch.Tensor]:
     """Read upstream ``best_model.pkl`` safely: exactly ``{"model_state": state_dict}``.
 
@@ -287,29 +280,12 @@ def load_uvdoc_state_dict(path: str | Path) -> dict[str, torch.Tensor]:
 
 
 def load_uvdoc_weights(model: UVDocNet, path: str | Path) -> dict[str, Any]:
-    """Load upstream-format weights into ``model``; return a lineage record.
-
-    Every upstream tensor must be consumed, except the 3-D head when the model
-    has none. Any input and grid size works: the convolutions are size-agnostic.
-    Only the published file (``UVDOC_WEIGHTS_SHA256``) is recorded as MIT;
-    any other upstream-format file has license ``"unverified"``.
-    """
+    """Load weights in the upstream UVDoc format."""
     state = load_uvdoc_state_dict(path)
     if model.out_point_positions3D is None:
         state = {k: v for k, v in state.items() if not k.startswith("out_point_positions3D.")}
     model.load_state_dict(state, strict=True)
-    digest = sha256_file(path)
-    upstream = digest == UVDOC_WEIGHTS_SHA256
-    return {
-        "kind": "uvdoc",
-        "path": str(path),
-        "sha256": digest,
-        "expected_sha256": UVDOC_WEIGHTS_SHA256,
-        "sha256_matches_upstream": upstream,
-        "license": "MIT" if upstream else "unverified",
-        "source": f"https://github.com/tanguymagne/UVDoc@{UVDOC_REVISION}",
-        "note": "weights MIT; upstream training data (Doc3D, UVDoc) has non-commercial parts",
-    }
+    return {"kind": "uvdoc", "path": str(path)}
 
 
 def uvdoc_model(path: str | Path) -> tuple[UVDocNet, dict[str, Any]]:

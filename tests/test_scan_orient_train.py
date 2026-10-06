@@ -1,4 +1,4 @@
-"""OrientNet-1 data builder (tools/orient) and trainer (flattener.scan.orient_train)."""
+"""OrientNet-1 data builder (tools/data/orientation) and trainer (flattener.scan.orient_train)."""
 
 import json
 import sys
@@ -11,7 +11,6 @@ import torch
 from PIL import Image
 
 from flattener import FlattenerError
-from flattener.dewarp.data import DataSpec
 from flattener.scan import orient
 from flattener.scan.orient import SourceSampler, ViewGeometry, clockwise, quantize
 from flattener.scan.orient_train import (
@@ -25,9 +24,8 @@ from flattener.scan.orient_train import (
     soft_targets,
     train,
 )
-from flattener.scan.shippable import gate_file
 
-TOOLS = Path(__file__).resolve().parents[1] / "tools" / "orient"
+TOOLS = Path(__file__).resolve().parents[1] / "tools" / "data" / "orientation"
 sys.path.insert(0, str(TOOLS))
 
 import build_data  # noqa: E402
@@ -243,21 +241,23 @@ def test_training_smoke_records_a_release_lineage(built, tmp_path, monkeypatch):
     )
     summary = train(config, resume="none")
     assert summary["state"] == "completed" and summary["step"] == 3
-    assert summary["evidence"]["training"] == "smoke_training"
+    assert summary["evidence"]["measurement"] == "gt_crop_validation"
+    assert summary["evidence"]["checkpoint_step"] == 3
     checkpoints = tmp_path / "run" / "checkpoints"
     best = json.loads((checkpoints / "best.json").read_text())
-    sidecar = json.loads((checkpoints / f"{best['file']}.json").read_text())
-    assert sidecar["track"] == "release" and sidecar["lineage"][0] == {"kind": "scratch", "seed": 0}
-    assert sidecar["lineage"][1]["kind"] == "train" and sidecar["lineage"][1]["track"] == "release"
-    assert orient.release_problems(sidecar) == []
-    assert sidecar["data_spec_sha256"] == sidecar["lineage"][1]["data_spec_sha256"]
-    assert gate_file(checkpoints / best["file"]).shippable
-    assert sidecar["calibration"]["source"] == "synthetic_val"
-    assert sidecar["metrics"]["samples"] == 8 and sidecar["metrics"]["text_free_samples"] == 1
-    orienter = orient.Orienter.load(checkpoints / best["file"])
+    checkpoint = orient.load_checkpoint(checkpoints / best["file"])
+    assert checkpoint["track"] == "release" and checkpoint["lineage"][0] == {
+        "kind": "scratch",
+        "seed": 0,
+    }
     assert (
-        orienter.info["shippable"] and orienter.temperature == sidecar["calibration"]["temperature"]
+        checkpoint["lineage"][1]["kind"] == "train"
+        and checkpoint["lineage"][1]["track"] == "release"
     )
+    assert checkpoint["calibration"]["source"] == "synthetic_val"
+    assert checkpoint["metrics"]["samples"] == 8 and checkpoint["metrics"]["text_free_samples"] == 1
+    orienter = orient.Orienter.load(checkpoints / best["file"])
+    assert orienter.temperature == checkpoint["calibration"]["temperature"]
     log = [
         json.loads(line) for line in (tmp_path / "run" / "train_log.jsonl").read_text().splitlines()
     ]
@@ -285,31 +285,8 @@ def test_training_smoke_records_a_release_lineage(built, tmp_path, monkeypatch):
         assert torch.equal(value, actual["model_state"][key]), key
 
 
-def test_a_fine_tune_start_carries_the_parent_data_spec(tmp_path):
-    def spec(name):
-        source = {"name": name, "kind": "converted", "root": "files", "track": "release"}
-        source.update(split="train", license="Apache-2.0")
-        return {
-            "schema": "flattener-dewarp-data-1",
-            "name": name,
-            "track": "release",
-            "sources": [source],
-        }
-
-    def record(data_spec, lineage):
-        digest = DataSpec.from_dict(data_spec).sha256
-        sources = {"train": [{"name": "own", "track": "release", "license_classes": {"own": 1}}]}
-        steps = [{"kind": "train", "track": "release", "data_spec_sha256": digest}]
-        return {
-            "track": "release",
-            "lineage": [*lineage, *steps],
-            "data_spec": data_spec,
-            "data_spec_sha256": digest,
-            "data_sources": sources,
-        }
-
+def test_a_fine_tune_loads_parent_weights(tmp_path):
     model = orient.OrientNet()
-    parent = record(spec("parent"), [{"kind": "scratch", "seed": 0}])
     path = tmp_path / "parent.pt"
     orient.save_checkpoint(
         path,
@@ -317,21 +294,14 @@ def test_a_fine_tune_start_carries_the_parent_data_spec(tmp_path):
             "schema": orient.CHECKPOINT_SCHEMA,
             "step": 5,
             "model_config": model.config.to_dict(),
-            "code": orient.code_record(),
             "model_state": model.state_dict(),
-            **parent,
         },
     )
+    target = orient.OrientNet()
     config = TrainConfig(data=".", output_dir=".", init="checkpoint", init_path=str(path))
-    start = _initialize(orient.OrientNet(), config)
-    assert start["data_spec"] == parent["data_spec"]
-    path.unlink()
-    (tmp_path / "parent.pt.json").unlink()  # only the lineage entry is left
-    assert orient.release_problems(record(spec("child"), [start])) == []
-    bare = {key: value for key, value in start.items() if key != "data_spec"}
-    assert orient.release_problems(record(spec("child"), [bare])) == [
-        "ship gate: unverified_data_spec"
-    ]
+    assert _initialize(target, config) == {"kind": "checkpoint", "path": str(path), "step": 5}
+    for key, value in model.state_dict().items():
+        assert torch.equal(value, target.state_dict()[key])
 
 
 def _pages_source(tmp_path, rows, license_class="own"):
@@ -349,7 +319,7 @@ def _pages_source(tmp_path, rows, license_class="own"):
     return root, tmp_path / "pages.json"
 
 
-def test_the_data_build_reads_pages_upright_and_refuses_research_and_changed_sources(tmp_path):
+def test_data_build_reads_pages_upright_and_rebuilds_changed_sources(tmp_path):
     _write_syntheticdoc(tmp_path / "sd", track="research")
     with pytest.raises(FlattenerError) as caught:
         build_data.build(_build_spec(tmp_path), tmp_path / "out", workers=1)
@@ -375,10 +345,12 @@ def test_the_data_build_reads_pages_upright_and_refuses_research_and_changed_sou
 
     Image.fromarray(upright).save(root / "b.png")
     build_data.build(spec, tmp_path / "pages", workers=1)
-    build_data.build(spec, tmp_path / "pages", workers=1)  # an unchanged source resumes
+    build_data.build(
+        spec, tmp_path / "pages", workers=1
+    )  # rebuilding preserves the same sample list
     _pages_source(tmp_path, ["a.jpg", "b.png"])
-    with pytest.raises(SystemExit, match="other input data"):
-        build_data.build(spec, tmp_path / "pages", workers=1)
+    rebuilt = build_data.build(spec, tmp_path / "pages", workers=1)
+    assert rebuilt["records"] == 2
 
 
 def test_own_pages_can_be_forms_prints_nearly_empty_or_spreads():

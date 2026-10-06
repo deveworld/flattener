@@ -214,12 +214,12 @@ OARDoc -- Apache-2.0
 Copyright the OARDoc authors.
 Source: https://github.com/GreatV/oardoc/tree/9c45c0e783748554a83abea482924a2443294bef
 
-src/flattener/benchmark/matlab.py and siftflow.py are derived from
+tools/benchmark/matlab.py and siftflow.py are derived from
 OARDoc's oardoc/metrics/uvdoc.py and siftflow.py. The Apache-2.0 text above
 applies. Modification notices are retained in the source file headers.
 
 SIFT-flow provenance: SiftFlow._coarse_to_fine and _level_offset in
-src/flattener/benchmark/siftflow.py follow SIFTflowc2f.m by Ce Liu.
+tools/benchmark/siftflow.py follow SIFTflowc2f.m by Ce Liu.
 Source: https://people.csail.mit.edu/celiu/SIFTflow/
 The Python implementation is adapted from OARDoc as identified above. The
 original SIFT-flow archive has no package-wide redistribution license;
@@ -234,7 +234,7 @@ pytesseract 0.3.8 -- Apache-2.0
 Copyright the pytesseract authors.
 Source: https://github.com/madmaze/pytesseract/tree/v0.3.8
 
-prepare_like_pytesseract in src/flattener/benchmark/ocr.py is adapted from
+prepare_like_pytesseract in tools/benchmark/ocr.py is adapted from
 pytesseract's prepare(). The Apache-2.0 text above applies. The modification
 notice is retained beside the function.
 
@@ -242,7 +242,7 @@ UVDoc -- MIT
 ------------
 Source: https://github.com/tanguymagne/UVDoc/tree/4c9b82b537057aff2526e6dd118a847cdd072e82
 Applies to derived portions of src/flattener/dewarp/model.py and
-src/flattener/benchmark/uvdoc.py.
+tools/benchmark/uvdoc.py.
 
 MIT License
 
