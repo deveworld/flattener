@@ -247,7 +247,6 @@ export const ko: Record<string, string> = {
   'Opening camera…': '카메라 여는 중…',
   'Allow camera access to frame your page.': '페이지를 비추려면 카메라 접근을 허용하세요.',
   'Keep the whole page in view.': '페이지 전체가 화면에 들어오게 하세요.',
-  Photos: '사진',
   'Take photo': '촬영',
   'Switch camera': '카메라 전환',
   Flip: '전환',
@@ -265,7 +264,7 @@ export const ko: Record<string, string> = {
   'The photo could not be saved. Try taking it again.':
     '사진을 저장하지 못했습니다. 다시 찍어 보세요.',
   'Camera unavailable': '카메라를 쓸 수 없음',
-  'You can also choose a photo from your library.': '앨범에서 사진을 골라도 됩니다.',
+  'Or close the camera and choose a photo.': '카메라를 닫고 사진을 골라도 됩니다.',
   'Open this page over HTTPS to use the camera, or choose a photo.':
     '카메라를 쓰려면 HTTPS로 여세요. 사진을 골라도 됩니다.',
   'This browser cannot open the camera. Choose a photo to continue.':
@@ -296,22 +295,13 @@ export const ko: Record<string, string> = {
   'The page could not be added. Try again.': '페이지를 추가하지 못했습니다. 다시 시도하세요.',
 
   // Capture
-  'Auto capture': '자동 촬영',
-  'Auto capture takes each page when it is steady, with quick processing.':
-    '페이지가 멈춰 있으면 자동으로 찍고 빠르게 처리합니다.',
   'Point the camera at a page': '페이지를 비춰 주세요',
   'Point the camera at one page': '한 페이지만 비춰 주세요',
   'Move back a little': '조금 뒤로 물러나세요',
   'Move closer to the page': '페이지에 더 가까이 가세요',
   'Hold the camera straight over the page': '카메라를 페이지와 나란하게 들어 주세요',
-  'Hold still': '그대로 멈춰 주세요',
-  'Turn to the next page': '다음 페이지로 넘겨 주세요',
-  'Auto capture needs the live outline, which is unavailable. Take photos with the shutter.':
-    '실시간 윤곽을 쓸 수 없어 자동 촬영이 멈췄습니다. 셔터로 찍어 주세요.',
-  'Page taken': '찍었습니다',
   'Sharpen text in Original color': '원래 색에서 글자 선명하게',
   Capture: '촬영',
-  'Waiting for the pages in progress…': '처리 중인 페이지를 기다리는 중…',
 
   // Crop
   Crop: '자르기',
@@ -334,9 +324,6 @@ export const ko: Record<string, string> = {
 export const koPatterns: [RegExp, string][] = [
   [/^([\d.]+) seconds$/, '$1초'],
   [/^(\d+) pages?$/, '$1쪽'],
-  [/^(\d+) pages? added$/, '$1쪽 추가됨'],
-  [/^(\d+) in progress$/, '$1쪽 처리 중'],
-  [/^(\d+) not scanned$/, '$1쪽 실패'],
   [
     /^Video frame · (.+) · preview (.+) · photo view ([\d.]+)× the preview, not used · ([\d.]+) s$/,
     '영상 프레임 · $1 · 미리보기 $2 · 사진 화각이 미리보기의 $3배라 쓰지 않음 · $4초',

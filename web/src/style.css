@@ -349,6 +349,60 @@ h1 {
   text-align: center;
   padding: 48px 24px;
 }
+/* The start screen fits the window exactly: the stage takes the height that is left. Only
+   when the window is too short for its content (a phone held sideways with PDF pages) does
+   the area under the header scroll. */
+body:not(.has-photo) .app-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  height: 100dvh;
+  min-height: 0;
+  overflow: hidden;
+}
+body:not(.has-photo) .workspace {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
+}
+body:not(.has-photo) .stage {
+  display: flex;
+  flex: 1 0 auto;
+  flex-direction: column;
+}
+body:not(.has-photo) .empty-state {
+  flex: 1 0 auto;
+  min-height: 0;
+}
+body:not(.has-photo) .workspace-footer {
+  margin-top: 0;
+  padding: 0 0 max(4px, env(safe-area-inset-bottom));
+}
+/* With PDF pages below, the start screen drops the drawing and the larger margins. */
+body:not(.has-photo):has(#pages:not([hidden])) .page-diagram {
+  display: none;
+}
+body:not(.has-photo):has(#pages:not([hidden])) .empty-state {
+  padding-block: 16px;
+}
+/* So do short windows (a phone held sideways). */
+@media (max-height: 560px) {
+  body:not(.has-photo) .app-header {
+    min-height: 56px;
+    padding-block: 8px;
+  }
+  body:not(.has-photo) .workspace {
+    margin-top: 8px;
+  }
+  body:not(.has-photo) .page-diagram {
+    display: none;
+  }
+  body:not(.has-photo) .empty-state {
+    padding-block: 16px;
+  }
+}
 .page-diagram {
   width: 150px;
   height: 96px;
@@ -691,11 +745,6 @@ h1 {
 }
 .pages-count {
   color: var(--muted);
-  font-variant-numeric: tabular-nums;
-}
-.pages-progress {
-  color: var(--green);
-  font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
 .pages-actions {
@@ -1142,64 +1191,9 @@ body.camera-open {
   padding: 12px 20px;
 }
 .camera-header h2 {
-  margin: 0 auto 0 0;
+  margin: 0;
   font-size: 18px;
   font-weight: 600;
-}
-.camera-auto {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  min-height: 40px;
-  padding: 6px 14px 6px 10px;
-  border: 1px solid #4a6354;
-  border-radius: 20px;
-  background: transparent;
-  color: #d4e3d9;
-  font-size: 14px;
-  font-weight: 700;
-  transition:
-    background 150ms ease,
-    color 150ms ease,
-    border-color 150ms ease;
-}
-.camera-auto svg {
-  width: 18px;
-  height: 18px;
-}
-.camera-auto:hover {
-  background: #2b3e32;
-}
-.camera-auto[aria-pressed='true'] {
-  background: #a7ecc1;
-  border-color: #a7ecc1;
-  color: #102419;
-}
-.camera-batch {
-  margin-top: 6px;
-  color: #a7ecc1;
-  font-size: 14px;
-  font-weight: 700;
-  font-variant-numeric: tabular-nums;
-}
-.camera-viewfinder::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  background: #fff;
-  opacity: 0;
-  pointer-events: none;
-}
-.camera-viewfinder.flash::after {
-  animation: flash 420ms cubic-bezier(0.16, 1, 0.3, 1);
-}
-@keyframes flash {
-  from {
-    opacity: 0.75;
-  }
-  to {
-    opacity: 0;
-  }
 }
 .camera-icon-button {
   display: flex;
@@ -1327,23 +1321,6 @@ body.camera-open {
 }
 .camera-shutter:disabled {
   opacity: 0.35;
-}
-/* Auto capture: a ring around the shutter fills during the countdown. */
-.camera-shutter {
-  position: relative;
-}
-.camera-shutter::before {
-  content: '';
-  position: absolute;
-  inset: -7px;
-  border-radius: 50%;
-  background: conic-gradient(#a7ecc1 calc(var(--countdown, 0) * 360deg), transparent 0);
-  mask: radial-gradient(farthest-side, transparent calc(100% - 4px), #000 calc(100% - 3px));
-  opacity: 0;
-  transition: opacity 150ms ease;
-}
-.camera-shutter.counting::before {
-  opacity: 1;
 }
 #camera-flip {
   grid-column: 3;
@@ -1561,22 +1538,18 @@ body.camera-open {
     padding: 12px 16px;
   }
   .camera-controls {
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: 1fr;
     gap: 8px;
     margin-top: 12px;
   }
   .camera-shutter {
-    grid-column: 1 / -1;
+    grid-column: 1;
     grid-row: 1;
     width: 64px;
     height: 64px;
   }
-  #camera-gallery {
-    grid-column: 1;
-    grid-row: 2;
-  }
   #camera-flip {
-    grid-column: 2;
+    grid-column: 1;
     grid-row: 2;
   }
 }

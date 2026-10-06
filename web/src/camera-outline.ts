@@ -186,24 +186,6 @@ export function containVideo(
   return { width: w, height: h, left: (width - w) / 2, top: (height - h) / 2 };
 }
 
-/** Root-mean-square move of the outline points between two frames, after matching the
- * starting point, as a share of the page size (the square root of its frame area). */
-export function outlineMotion(previous: PageOutline, next: PageOutline): number {
-  if (previous.points.length !== next.points.length) return Infinity;
-  const count = next.points.length;
-  let best = Infinity;
-  for (let shift = 0; shift < count; shift++) {
-    let sum = 0;
-    for (let i = 0; i < count; i++) {
-      const p = previous.points[i],
-        q = next.points[(i + shift) % count];
-      sum += (p[0] - q[0]) ** 2 + (p[1] - q[1]) ** 2;
-    }
-    best = Math.min(best, sum);
-  }
-  return Math.sqrt(best / count) / Math.sqrt(Math.max(next.area, 1e-6));
-}
-
 export type Guidance = 'none' | 'shape' | 'clipped' | 'close' | 'small' | 'tilted' | 'ok';
 
 /** Starting values, to be tuned on phones. */
@@ -241,76 +223,6 @@ export function guidance(outline: PageOutline | null, aspect: number): Guidance 
   const ratio = (a: number, b: number) => Math.max(a, b) / Math.max(Math.min(a, b), 1e-6);
   if (Math.max(ratio(top, bottom), ratio(left, right)) > GUIDANCE.maxSideRatio) return 'tilted';
   return 'ok';
-}
-
-/** Auto capture: a steady, well-framed page starts a countdown; after a photo the next one
- * waits until the page changes, so one page is not taken twice. */
-export const AUTO = {
-  steady: 0.02, // outline motion per frame below this share of the page size is steady
-  change: 0.12, // motion above this is a page change (a turned page, a hand)
-  lostMs: 500, // no page for this long is a page change too; shorter gaps are detector misses
-  steadyMs: 700, // steady time before the countdown
-  countdownMs: 1300,
-};
-
-/**
- * The auto-capture decision, fed only with fresh detector replies. Replies that arrive
- * while a photo is taken are not fed (the preview can freeze or go dark then), so the
- * first outline after the photo is compared with the last one before it. A shown outline
- * that expires because replies are late is ``stale``, which is not a page change.
- */
-export class AutoCapture {
-  private armed = true;
-  private steadySince: number | null = null;
-  private lostSince: number | null = null;
-  /** The last outline the detector found, kept through gaps and through a photo. */
-  private seen: PageOutline | null = null;
-
-  /** A photo was taken and the page has not changed since. */
-  get waiting() {
-    return !this.armed;
-  }
-
-  reset() {
-    this.armed = true;
-    this.steadySince = this.lostSince = null;
-    this.seen = null;
-  }
-
-  /** A detector reply (``outline`` null: no page) at ``now`` ms; ``ok``: the framing hint is
-   * clear. Returns the countdown progress, 0..1; 1 takes the photo. */
-  frame(outline: PageOutline | null, ok: boolean, now: number): number {
-    if (!outline) {
-      this.steadySince = null;
-      this.lostSince ??= now;
-      if (now - this.lostSince >= AUTO.lostMs) this.armed = true;
-      return 0;
-    }
-    this.lostSince = null;
-    const motion = this.seen ? outlineMotion(this.seen, outline) : Infinity;
-    this.seen = outline;
-    if (!this.armed) {
-      this.armed = motion > AUTO.change;
-      return 0;
-    }
-    if (!ok || motion > AUTO.steady) {
-      this.steadySince = null;
-      return 0;
-    }
-    this.steadySince ??= now;
-    return Math.min(1, Math.max(0, (now - this.steadySince - AUTO.steadyMs) / AUTO.countdownMs));
-  }
-
-  /** The shown outline is out of date: no countdown until fresh replies come. */
-  stale() {
-    this.steadySince = null;
-  }
-
-  /** A photo was taken; the next waits for a page change. */
-  taken() {
-    this.armed = false;
-    this.steadySince = this.lostSince = null;
-  }
 }
 
 /** A small grayscale copy of an image. */

@@ -1,5 +1,4 @@
 import {
-  AutoCapture,
   containVideo,
   guidance,
   previewInPhoto,
@@ -74,9 +73,6 @@ async function fitShot(blob: Blob, method: CaptureInfo['method']) {
  * the view of the last photo that was not used. */
 const photoModes = new Map<string, { mode: 'largest' | 'default' | 'off'; view?: number }>();
 
-const AUTO_UNAVAILABLE =
-  'Auto capture needs the live outline, which is unavailable. Take photos with the shutter.';
-
 const HINTS: Record<Guidance, string> = {
   none: 'Point the camera at a page',
   shape: 'Point the camera at one page',
@@ -109,19 +105,11 @@ export class Camera {
   private capturedClose = false;
   private permission?: PermissionStatus;
   private nativeCapture = $<HTMLInputElement>('camera-capture');
-  private autoButton = $<HTMLButtonElement>('camera-auto');
-  private auto = false;
-  private autoCapture = new AutoCapture();
-  private unavailable: () => void = () => {};
   /** A frame is with the detector; one frame at a time keeps a single loop. */
   private inFlight = false;
-  /** The live outline failed for this camera session. */
-  private outlineFailed = false;
 
   constructor(
-    /** A taken photo; ``continuous`` keeps the camera open for the next page. */
-    private captured: (file: File, info?: CaptureInfo, continuous?: boolean) => void,
-    private choosePhoto: () => void,
+    private captured: (file: File, info?: CaptureInfo) => void,
     /** After the camera closes; ``dismissed`` is false when it closed for a taken photo. */
     private closed: (dismissed: boolean) => void = () => {},
   ) {
@@ -138,28 +126,7 @@ export class Camera {
       this.nativeCapture.value = '';
       if (file) this.captured(file);
     };
-    $('camera-gallery').onclick = () => {
-      this.close();
-      this.choosePhoto();
-    };
     this.shutter.onclick = () => void this.capture();
-    try {
-      this.auto = localStorage.getItem('flattener-auto') === 'on';
-    } catch {
-      /* Storage can be unavailable; auto capture starts off. */
-    }
-    this.showAuto();
-    this.autoButton.onclick = () => {
-      this.auto = !this.auto;
-      try {
-        localStorage.setItem('flattener-auto', this.auto ? 'on' : 'off');
-      } catch {
-        /* The choice still applies to this visit. */
-      }
-      this.autoCapture.reset();
-      this.showAuto();
-      this.setCountdown(0);
-    };
     this.flip.onclick = () => {
       this.facing = this.facing === 'environment' ? 'user' : 'environment';
       void this.start();
@@ -188,27 +155,6 @@ export class Camera {
     return this.dialog.open;
   }
 
-  /** Progress of pages taken in auto mode, shown under the viewfinder. */
-  setPages(text: string) {
-    $('camera-batch').textContent = text;
-    $('camera-batch').hidden = !text;
-  }
-
-  private showAuto() {
-    this.autoButton.setAttribute('aria-pressed', String(this.auto));
-    this.dialog.classList.toggle('auto', this.auto);
-    $('camera-hint').textContent = !this.auto
-      ? 'Keep the whole page in view.'
-      : this.outlineFailed
-        ? AUTO_UNAVAILABLE
-        : 'Auto capture takes each page when it is steady, with quick processing.';
-  }
-
-  private setCountdown(progress: number) {
-    this.shutter.style.setProperty('--countdown', String(progress));
-    this.shutter.classList.toggle('counting', progress > 0);
-  }
-
   open(trigger: HTMLElement) {
     if (this.dialog.open) return;
     this.trigger = trigger;
@@ -234,7 +180,6 @@ export class Camera {
   private stop() {
     ++this.generation;
     this.inFlight = false;
-    this.outlineFailed = false;
     window.clearTimeout(this.timer);
     window.clearTimeout(this.watchdog);
     this.detector?.terminate();
@@ -316,8 +261,7 @@ export class Camera {
       this.shutter.disabled = false;
       this.resize();
       this.status('Finding the page…');
-      this.autoCapture.reset();
-      this.showAuto();
+      $('camera-hint').textContent = 'Keep the whole page in view.';
       stream.getVideoTracks()[0].addEventListener('ended', () => {
         if (generation === this.generation)
           this.fail('The camera disconnected. Try opening it again.');
@@ -360,26 +304,21 @@ export class Camera {
     $('camera-error').hidden = false;
     $('camera-error-message').textContent = message;
     this.status('Camera unavailable');
-    $('camera-hint').textContent = 'You can also choose a photo from your library.';
+    $('camera-hint').textContent = 'Or close the camera and choose a photo.';
   }
 
   private loadDetector(generation: number) {
     this.inFlight = false;
-    this.outlineFailed = false;
     const unavailable = () => {
       if (generation !== this.generation) return;
-      this.outlineFailed = true;
       window.clearTimeout(this.watchdog);
       window.clearTimeout(this.timer);
       this.detector?.terminate();
       this.detector = undefined;
       this.clearOutline();
       this.status('Camera ready');
-      $('camera-hint').textContent = this.auto
-        ? AUTO_UNAVAILABLE
-        : 'Live outline unavailable. You can still take a photo.';
+      $('camera-hint').textContent = 'Live outline unavailable. You can still take a photo.';
     };
-    this.unavailable = unavailable;
     try {
       this.detector = new Worker(new URL('./camera.worker.ts', import.meta.url), {
         type: 'module',
@@ -390,8 +329,7 @@ export class Camera {
         if (generation !== this.generation) return;
         if (data.type === 'outline') this.inFlight = false;
         if (this.capturing && (data.type === 'outline' || data.type === 'progress')) {
-          // The loop pauses while a photo is taken; a frame from just before is dropped, as
-          // the preview can freeze or go dark meanwhile. The capture restarts the loop.
+          // The loop pauses while a photo is taken; a reply that comes meanwhile is dropped.
           return;
         }
         if (data.type === 'progress') {
@@ -443,7 +381,6 @@ export class Camera {
   private clearOutline() {
     window.clearTimeout(this.expiry);
     this.outline = null;
-    this.setCountdown(0);
     this.path.setAttribute('d', '');
     this.dialog.classList.remove('page-found', 'page-clipped');
   }
@@ -462,20 +399,12 @@ export class Camera {
       this.dialog.classList.toggle('page-clipped', hint !== 'ok');
       this.expiry = window.setTimeout(() => this.expire(), 1200);
     }
-    let text = HINTS[hint];
-    if (this.auto) {
-      const progress = this.autoCapture.frame(outline, hint === 'ok', performance.now());
-      this.setCountdown(progress);
-      if (hint === 'ok') text = this.autoCapture.waiting ? 'Turn to the next page' : 'Hold still';
-      if (progress >= 1) void this.capture();
-    }
-    this.status(text);
+    this.status(HINTS[hint]);
   }
 
-  /** No reply for a while (a slow device): hide the outline without calling it a change. */
+  /** No reply for a while (a slow device): hide the outline until fresh replies come. */
   private expire() {
     this.clearOutline();
-    this.autoCapture.stale();
     this.status('Finding the page…');
   }
 
@@ -566,7 +495,6 @@ export class Camera {
     this.capturing = true;
     this.shutter.disabled = true;
     this.flip.disabled = true;
-    this.setCountdown(0);
     this.status('Taking photo…');
     window.clearTimeout(this.expiry);
     window.clearTimeout(this.timer);
@@ -585,28 +513,9 @@ export class Camera {
       };
       if (still.view !== undefined) info.view = still.view;
       const file = new File([shot.blob], `document-${Date.now()}.jpg`, { type: 'image/jpeg' });
-      if (!this.auto) {
-        this.capturedClose = true;
-        this.close();
-        this.captured(file, info);
-        return;
-      }
-      // Auto mode keeps the camera open; the next page needs a page change first.
-      this.captured(file, info, true);
-      this.autoCapture.taken();
-      this.capturing = false;
-      this.shutter.disabled = false;
-      this.flip.disabled = this.flip.hidden;
-      const viewfinder = $('camera-viewfinder');
-      viewfinder.classList.remove('flash');
-      void viewfinder.offsetWidth;
-      viewfinder.classList.add('flash');
-      this.status('Page taken');
-      if (this.outlineFailed) this.showAuto();
-      else if (this.inFlight)
-        // A frame sent before the photo is still out; its reply restarts the loop.
-        this.watchdog = window.setTimeout(this.unavailable, 15000);
-      else this.timer = window.setTimeout(() => this.sendFrame(generation, this.unavailable), 160);
+      this.capturedClose = true;
+      this.close();
+      this.captured(file, info);
     } catch {
       if (generation !== this.generation) return;
       this.capturing = false;

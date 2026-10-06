@@ -74,14 +74,7 @@ Browsers without cross-origin isolation or WASM thread support use one thread.
   Camera access requires HTTPS or localhost and browser permission.
   If the live camera cannot open, **Use the camera app** takes the photo with the device's camera app, which needs no site permission.
   After the camera is allowed in the site settings, the live camera reopens by itself.
-  The camera closes after capture (unless auto capture is on), on leaving the page, or when the tab is hidden.
-- **Auto capture** in the camera is for scanning a book page by page.
-  When the outline holds still and the framing hint is clear, a countdown runs on the shutter and the photo is taken.
-  Movement restarts the countdown. After a photo, the next one waits for the page to change: a large outline change (turning the page, a hand in the frame) or no page for half a second.
-  Outlines the detector misses briefly or reports late do not count, and neither do frames from while the photo is taken, as the preview can freeze then.
-  The camera stays open; each photo is flattened in turn with quick processing, the current settings and the last chosen color, and added to the PDF pages.
-  If the live outline fails, the camera says that auto capture has stopped; the shutter still works.
-  The choice is remembered on the device.
+  The camera closes after capture, on leaving the page, or when the tab is hidden.
 - Open a JPEG, PNG or WebP by file picker, drop or paste. Flattening starts as soon as the photo opens.
 - Scans start with Quick processing and automatic orientation.
   Choose **Refine scan** on the result to run flip averaging and two crop refinement passes.
@@ -141,7 +134,7 @@ npm test
 npm run build
 ```
 
-Tests cover geometry against Python fixtures, color correction, sharpening, removal masks, rotations, capture guidance and auto capture.
+Tests cover geometry against Python fixtures, color correction, sharpening, removal masks, rotations, capture guidance and the photo view check.
 Regenerate the fixtures with `uv run python tools/web/generate_fixtures.py`.
 
 Browser checks used Chromium on Linux with WASM.

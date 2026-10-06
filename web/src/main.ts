@@ -18,7 +18,7 @@ import type {
   WorkerReply,
   WorkerRequest,
 } from './types';
-import { localize, translate } from './i18n';
+import { localize } from './i18n';
 
 localize();
 
@@ -39,7 +39,7 @@ let busy = false,
 let focusAction = false;
 let refining = false;
 let activeOptions: Options | undefined, resultOptions: Options | undefined;
-/** The color mode last chosen; new scans and auto-captured pages start in it. */
+/** The color mode last chosen; new scans start in it. */
 let colorChoice = true;
 let preparationState: PreparationState = 'idle';
 let rawBlob: Blob | undefined, suggestion: Mask | undefined, settings: EditSettings | undefined;
@@ -52,8 +52,7 @@ const steps = new Map<string, ProcessingStep & { url: string; button: HTMLButton
 const maskEditor = new MaskEditor();
 const cropEditor = new CropEditor();
 const camera = new Camera(
-  (file, info, continuous) => (continuous ? queuePage(file) : chooseFile(file, info)),
-  () => fileInput.click(),
+  (file, info) => chooseFile(file, info),
   (dismissed) => {
     if (dismissed && !selected && !followingHistory) leaveAway();
   },
@@ -289,7 +288,6 @@ function showStart() {
   }
   clearResult();
   selected = undefined;
-  waitingForBatch = false;
   document.body.classList.remove('has-photo');
   photoReady = false;
   retryable = false;
@@ -404,10 +402,7 @@ originalImage.onload = () => {
   photoReady = true;
   originalImage.hidden = false;
   $('source-size').textContent = `${width} × ${height}`;
-  if (batchActive()) {
-    waitingForBatch = true;
-    message('Waiting for the pages in progress…');
-  } else startScan();
+  startScan();
 };
 originalImage.onerror = () =>
   rejectPhoto('This image could not be opened. Save it as JPEG or PNG and try again.');
@@ -612,9 +607,6 @@ $('add-page').onclick = async () => {
 $('pages-clear').onclick = () => {
   for (const page of pages) URL.revokeObjectURL(page.url);
   pages.length = 0;
-  batchDone = 0;
-  batchFailed = 0;
-  batchStatus();
   pageAdded = false;
   $('add-page-label').textContent = 'Add to PDF';
   renderPages();
@@ -630,8 +622,6 @@ function scannerWorker(): Worker {
       const data = event.data;
       if (data.type === 'preparation') {
         preparationStatus(data.state);
-      } else if (batchJob) {
-        if (data.type === 'result' || data.type === 'error') void finishPage(data);
       } else if (data.type === 'progress') {
         message(data.stage, data.detail);
         const progress = $<HTMLProgressElement>('progress');
@@ -692,13 +682,6 @@ function scannerWorker(): Worker {
     };
     worker.onerror = () => {
       if (worker !== active) return;
-      if (batchJob) {
-        active.terminate();
-        worker = undefined;
-        preparationStatus('idle');
-        void finishPage({ type: 'error', message: 'The scanner stopped unexpectedly.' });
-        return;
-      }
       if (!busy) {
         active.terminate();
         worker = undefined;
@@ -713,78 +696,8 @@ function scannerWorker(): Worker {
   return worker;
 }
 
-// Auto capture: pages taken while the camera stays open are scanned one by one with the
-// current settings and added to the PDF. A photo opened meanwhile waits for them.
-const batch: File[] = [];
-let batchJob: File | undefined,
-  batchDone = 0,
-  batchFailed = 0,
-  waitingForBatch = false;
-function batchActive() {
-  return !!batchJob || batch.length > 0;
-}
-function batchStatus() {
-  const pending = batch.length + (batchJob ? 1 : 0);
-  const parts = [];
-  if (batchDone) parts.push(batchDone === 1 ? '1 page added' : `${batchDone} pages added`);
-  if (pending) parts.push(`${pending} in progress`);
-  if (batchFailed) parts.push(batchFailed === 1 ? '1 not scanned' : `${batchFailed} not scanned`);
-  camera.setPages(parts.map(translate).join(' · '));
-  $('pages-progress').textContent = pending ? `${pending} in progress` : '';
-  $('pages-progress').hidden = !pending;
-  if (pending) $('pages').hidden = false;
-}
-function queuePage(file: File) {
-  batch.push(file);
-  prepareScanner();
-  batchStatus();
-  runBatch();
-}
-function runBatch() {
-  if (batchJob || busy || editing || !batch.length) return;
-  batchJob = batch.shift();
-  batchStatus();
-  try {
-    scannerWorker().postMessage({
-      type: 'scan',
-      file: batchJob!,
-      options: {
-        quality: 'fast',
-        orient: $<HTMLInputElement>('orient').checked,
-        maxSide: Number($<HTMLSelectElement>('resolution').value),
-        sharpen: $<HTMLInputElement>('sharpen').checked,
-        cleanColor: colorChoice,
-      },
-      base: new URL('.', document.baseURI).href,
-    } satisfies WorkerRequest);
-  } catch {
-    void finishPage({ type: 'error', message: 'The scanner could not start.' });
-  }
-}
-async function finishPage(
-  data: { type: 'result'; blob: Blob } | { type: 'error'; message: string },
-) {
-  if (data.type === 'result') {
-    try {
-      const page = await jpegPage(data.blob);
-      pages.push({ ...page, url: URL.createObjectURL(page.blob) });
-      batchDone++;
-      renderPages();
-    } catch {
-      batchFailed++;
-    }
-  } else batchFailed++;
-  batchJob = undefined;
-  batchStatus();
-  if (batch.length) runBatch();
-  else if (waitingForBatch) {
-    waitingForBatch = false;
-    startScan();
-  }
-}
-
 function startScan(quality: Options['quality'] = 'fast') {
-  if (!selected || !photoReady || busy || editing || editorOpen || batchActive()) return;
+  if (!selected || !photoReady || busy || editing || editorOpen) return;
   if (quality === 'refined' && (!resultBlob || !resultOptions)) return;
   if (!window.isSecureContext) {
     showError('Open this app over HTTPS or localhost so the scanner can load securely.');
