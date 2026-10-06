@@ -206,7 +206,7 @@ export function outlineMotion(previous: PageOutline, next: PageOutline): number 
 
 export type Guidance = 'none' | 'shape' | 'clipped' | 'close' | 'small' | 'tilted' | 'ok';
 
-/** Starting values; they are tuned on phones (RESEARCH.md, capture guidance). */
+/** Starting values, to be tuned on phones. */
 export const GUIDANCE = {
   maxAspect: 4, // a page outline longer than this many times its width is not one page
   maxArea: 0.85, // share of the frame above which the page is too close
@@ -243,31 +243,72 @@ export function guidance(outline: PageOutline | null, aspect: number): Guidance 
   return 'ok';
 }
 
-/** Auto capture: a steady, well-framed page starts a countdown; a capture needs the page
- * to change a lot first (a turned page, a hand), so one page is not taken twice. */
+/** Auto capture: a steady, well-framed page starts a countdown; after a photo the next one
+ * waits until the page changes, so one page is not taken twice. */
 export const AUTO = {
   steady: 0.02, // outline motion per frame below this share of the page size is steady
-  change: 0.12, // motion above this, or a lost outline, re-arms after a capture
+  change: 0.12, // motion above this is a page change (a turned page, a hand)
+  lostMs: 500, // no page for this long is a page change too; shorter gaps are detector misses
   steadyMs: 700, // steady time before the countdown
   countdownMs: 1300,
 };
 
-export type AutoState = { armed: boolean; steadySince: number | null };
+/**
+ * The auto-capture decision, fed only with fresh detector replies. Replies that arrive
+ * while a photo is taken are not fed (the preview can freeze or go dark then), so the
+ * first outline after the photo is compared with the last one before it. A shown outline
+ * that expires because replies are late is ``stale``, which is not a page change.
+ */
+export class AutoCapture {
+  private armed = true;
+  private steadySince: number | null = null;
+  private lostSince: number | null = null;
+  /** The last outline the detector found, kept through gaps and through a photo. */
+  private seen: PageOutline | null = null;
 
-/** The next auto-capture state and the countdown progress (0..1, 1 = take the photo). */
-export function autoStep(
-  state: AutoState,
-  motion: number | null,
-  ok: boolean,
-  now: number,
-): { state: AutoState; progress: number } {
-  if (!state.armed) {
-    const changed = motion === null || motion > AUTO.change;
-    return { state: { armed: changed, steadySince: null }, progress: 0 };
+  /** A photo was taken and the page has not changed since. */
+  get waiting() {
+    return !this.armed;
   }
-  if (!ok || motion === null || motion > AUTO.steady)
-    return { state: { armed: true, steadySince: null }, progress: 0 };
-  const since = state.steadySince ?? now;
-  const progress = Math.max(0, (now - since - AUTO.steadyMs) / AUTO.countdownMs);
-  return { state: { armed: true, steadySince: since }, progress: Math.min(1, progress) };
+
+  reset() {
+    this.armed = true;
+    this.steadySince = this.lostSince = null;
+    this.seen = null;
+  }
+
+  /** A detector reply (``outline`` null: no page) at ``now`` ms; ``ok``: the framing hint is
+   * clear. Returns the countdown progress, 0..1; 1 takes the photo. */
+  frame(outline: PageOutline | null, ok: boolean, now: number): number {
+    if (!outline) {
+      this.steadySince = null;
+      this.lostSince ??= now;
+      if (now - this.lostSince >= AUTO.lostMs) this.armed = true;
+      return 0;
+    }
+    this.lostSince = null;
+    const motion = this.seen ? outlineMotion(this.seen, outline) : Infinity;
+    this.seen = outline;
+    if (!this.armed) {
+      this.armed = motion > AUTO.change;
+      return 0;
+    }
+    if (!ok || motion > AUTO.steady) {
+      this.steadySince = null;
+      return 0;
+    }
+    this.steadySince ??= now;
+    return Math.min(1, Math.max(0, (now - this.steadySince - AUTO.steadyMs) / AUTO.countdownMs));
+  }
+
+  /** The shown outline is out of date: no countdown until fresh replies come. */
+  stale() {
+    this.steadySince = null;
+  }
+
+  /** A photo was taken; the next waits for a page change. */
+  taken() {
+    this.armed = false;
+    this.steadySince = this.lostSince = null;
+  }
 }

@@ -36,6 +36,23 @@ function selected(mask: Mask | undefined, x: number, y: number, w: number, h: nu
   return !!mask.data[my * mask.width + mx];
 }
 
+/** How much of pixel (x, y) of a ``w`` x ``h`` image the mask covers, bilinear (0..1). */
+function coverage(mask: Mask, x: number, y: number, w: number, h: number) {
+  const mx = clamp(((x + 0.5) * mask.width) / w - 0.5, 0, mask.width - 1),
+    my = clamp(((y + 0.5) * mask.height) / h - 0.5, 0, mask.height - 1);
+  const x0 = Math.floor(mx),
+    y0 = Math.floor(my),
+    x1 = Math.min(x0 + 1, mask.width - 1),
+    y1 = Math.min(y0 + 1, mask.height - 1),
+    dx = mx - x0,
+    dy = my - y0;
+  const at = (xx: number, yy: number) => (mask.data[yy * mask.width + xx] ? 1 : 0);
+  return (
+    (at(x0, y0) * (1 - dx) + at(x1, y0) * dx) * (1 - dy) +
+    (at(x0, y1) * (1 - dx) + at(x1, y1) * dx) * dy
+  );
+}
+
 /** The actual gate probability, resampled through the final dewarp map. */
 export function pageConfidence(
   grid: Grid,
@@ -284,24 +301,11 @@ export function estimatePaper(image: Pixels, excluded?: Mask): PaperField {
     for (let c = 0; c < 3; c++) data[cell * 3 + c] /= count;
     valid[cell] = 1;
   }
-  const known = Array.from(valid.keys()).filter((i) => valid[i]);
-  if (!known.length) {
+  if (!fillCells(data, valid, cols, 3)) {
     // Low confidence: retain dark/graphic pages rather than amplify noise.
     data.fill(248);
     return { width: cols, height: rows, data };
   }
-  for (let i = 0; i < valid.length; i++)
-    if (!valid[i]) {
-      let total = 0;
-      for (const j of known) {
-        const d =
-          ((i % cols) - (j % cols)) ** 2 + (Math.floor(i / cols) - Math.floor(j / cols)) ** 2;
-        const w = 1 / (d * d + 0.01);
-        total += w;
-        for (let c = 0; c < 3; c++) data[i * 3 + c] += data[j * 3 + c] * w;
-      }
-      for (let c = 0; c < 3; c++) data[i * 3 + c] /= total;
-    }
   // A small spatial filter suppresses tile transitions without blurring the document.
   const smooth = data.slice();
   for (let y = 0; y < rows; y++)
@@ -319,6 +323,27 @@ export function estimatePaper(image: Pixels, excluded?: Mask): PaperField {
         smooth[(y * cols + x) * 3 + c] = sum / weight;
       }
   return { width: cols, height: rows, data: smooth };
+}
+
+/** Cells without enough samples (``valid`` 0) take the inverse-distance weighted mean of the
+ * valid cells. False when no cell is valid. */
+function fillCells(data: Float32Array, valid: Uint8Array, cols: number, channels: number) {
+  const known = Array.from(valid.keys()).filter((i) => valid[i]);
+  if (!known.length) return false;
+  for (let i = 0; i < valid.length; i++)
+    if (!valid[i]) {
+      let total = 0;
+      for (let c = 0; c < channels; c++) data[i * channels + c] = 0;
+      for (const j of known) {
+        const d =
+          ((i % cols) - (j % cols)) ** 2 + (Math.floor(i / cols) - Math.floor(j / cols)) ** 2;
+        const w = 1 / (d * d + 0.01);
+        total += w;
+        for (let c = 0; c < channels; c++) data[i * channels + c] += data[j * channels + c] * w;
+      }
+      for (let c = 0; c < channels; c++) data[i * channels + c] /= total;
+    }
+  return true;
 }
 
 const ease = (x: number, from: number, to: number) => {
@@ -395,15 +420,15 @@ export function estimateInk(image: Pixels, paper: PaperField, excluded?: Mask): 
         Math.min(cols - 1, Math.floor((x * cols) / sw));
       ratios[cell].push(luma / Math.max(paperLuma, 1));
     }
-  const data = new Float32Array(cols * rows * 3);
+  const data = new Float32Array(cols * rows * 3),
+    valid = new Uint8Array(cols * rows);
   let content = 0,
     text = 0;
   for (let cell = 0; cell < ratios.length; cell++) {
     const values = ratios[cell];
-    if (values.length < 16) {
-      data.set([1, 0, 1], cell * 3);
-      continue;
-    }
+    // Cells left out (fingers) take their neighbors' values below.
+    if (values.length < 16) continue;
+    valid[cell] = 1;
     values.sort((a, b) => a - b);
     const ink = values[Math.floor(values.length * INK.percentile)];
     let inked = 0,
@@ -423,6 +448,8 @@ export function estimateInk(image: Pixels, paper: PaperField, excluded?: Mask): 
     }
   }
   const page = content ? clamp(0.35 + (0.65 * (text / content)) / 0.4, 0.35, 1) : 1;
+  if (!fillCells(data, valid, cols, 3))
+    for (let cell = 0; cell < ratios.length; cell++) data.set([1, 0, 1], cell * 3);
   for (let cell = 0; cell < ratios.length; cell++) data[cell * 3 + 1] *= page;
   return { width: cols, height: rows, data: smoothCells(data, cols, rows, 3) };
 }
@@ -470,21 +497,27 @@ export function paperAt(
 /** Non-destructive edits: every invocation starts with the same uncorrected scan.
  * Clean color divides out the paper's light and color, stretches ink in text areas and
  * eases near-paper levels to white (``estimateInk``); ``contrast: false`` keeps only the
- * division. */
+ * division. ``excluded`` (default ``mask``) is left out of the ink estimate, as it should be
+ * left out of ``field``: suggested fingers, whose midtones would weaken the stretch. */
 export function cleanDocument(
   image: Pixels,
   mask: Mask,
   cleanColor: boolean,
   field?: PaperField,
-  { contrast = true, ink }: { contrast?: boolean; ink?: InkField } = {},
+  {
+    contrast = true,
+    ink,
+    excluded = mask,
+  }: { contrast?: boolean; ink?: InkField; excluded?: Mask } = {},
 ): Pixels {
   validateMask(mask);
   const data = image.data.slice(),
     { width, height } = image;
-  const hasMask = maskCount(mask) > 0;
+  const hasMask = maskCount(mask) > 0,
+    hasExcluded = excluded !== mask && maskCount(excluded) > 0;
   if (!cleanColor && !hasMask) return { width, height, data };
   field ??= estimatePaper(image, mask);
-  if (cleanColor && contrast) ink ??= estimateInk(image, field, mask);
+  if (cleanColor && contrast) ink ??= estimateInk(image, field, excluded);
   // Cache horizontal interpolation across the much smaller lighting grids.
   const paperRows = fieldRows(field, 3, width);
   const inkRows = cleanColor && contrast && ink ? fieldRows(ink, 3, width) : undefined;
@@ -523,6 +556,8 @@ export function cleanDocument(
         whiten = lerp(inkRows, k0, k1, ky, x, 2);
         const target = inkIn * (1 - stretch) + INK.target * stretch;
         gain = clamp((white - target) / (white - inkIn), 1, INK.maxGain);
+        // Left-out areas (suggested fingers) are not stretched, with a soft edge.
+        if (hasExcluded) gain = 1 + (gain - 1) * (1 - coverage(excluded, x, y, width, height));
       }
       for (let c = 0; c < 3; c++) {
         const paper = lerp(paperRows, y0, y1, dy, x, c);

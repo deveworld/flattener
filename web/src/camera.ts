@@ -1,11 +1,8 @@
 import {
-  AUTO,
-  autoStep,
+  AutoCapture,
   containVideo,
   guidance,
-  outlineMotion,
   smoothOutline,
-  type AutoState,
   type Guidance,
 } from './camera-outline';
 import type { CameraReply, CameraRequest, CaptureInfo, PageOutline } from './types';
@@ -52,6 +49,9 @@ async function fitShot(blob: Blob, method: CaptureInfo['method']) {
   }
 }
 
+const AUTO_UNAVAILABLE =
+  'Auto capture needs the live outline, which is unavailable. Take photos with the shutter.';
+
 const HINTS: Record<Guidance, string> = {
   none: 'Point the camera at a page',
   shape: 'Point the camera at one page',
@@ -86,13 +86,12 @@ export class Camera {
   private nativeCapture = $<HTMLInputElement>('camera-capture');
   private autoButton = $<HTMLButtonElement>('camera-auto');
   private auto = false;
-  private autoState: AutoState = { armed: true, steadySince: null };
-  private previous: PageOutline | null = null;
+  private autoCapture = new AutoCapture();
   private unavailable: () => void = () => {};
   /** A frame is with the detector; one frame at a time keeps a single loop. */
   private inFlight = false;
-  /** Auto mode: the page changed (turned, moved) while the last photo was taken. */
-  private changedWhileCapturing = false;
+  /** The live outline failed for this camera session. */
+  private outlineFailed = false;
 
   constructor(
     /** A taken photo; ``continuous`` keeps the camera open for the next page. */
@@ -132,7 +131,7 @@ export class Camera {
       } catch {
         /* The choice still applies to this visit. */
       }
-      this.autoState = { armed: true, steadySince: null };
+      this.autoCapture.reset();
       this.showAuto();
       this.setCountdown(0);
     };
@@ -173,9 +172,11 @@ export class Camera {
   private showAuto() {
     this.autoButton.setAttribute('aria-pressed', String(this.auto));
     this.dialog.classList.toggle('auto', this.auto);
-    $('camera-hint').textContent = this.auto
-      ? 'Auto capture takes each page when it is steady.'
-      : 'Keep the whole page in view.';
+    $('camera-hint').textContent = !this.auto
+      ? 'Keep the whole page in view.'
+      : this.outlineFailed
+        ? AUTO_UNAVAILABLE
+        : 'Auto capture takes each page when it is steady, with quick processing.';
   }
 
   private setCountdown(progress: number) {
@@ -208,6 +209,7 @@ export class Camera {
   private stop() {
     ++this.generation;
     this.inFlight = false;
+    this.outlineFailed = false;
     window.clearTimeout(this.timer);
     window.clearTimeout(this.watchdog);
     this.detector?.terminate();
@@ -289,8 +291,7 @@ export class Camera {
       this.shutter.disabled = false;
       this.resize();
       this.status('Finding the page…');
-      this.autoState = { armed: true, steadySince: null };
-      this.previous = null;
+      this.autoCapture.reset();
       this.showAuto();
       stream.getVideoTracks()[0].addEventListener('ended', () => {
         if (generation === this.generation)
@@ -339,15 +340,19 @@ export class Camera {
 
   private loadDetector(generation: number) {
     this.inFlight = false;
+    this.outlineFailed = false;
     const unavailable = () => {
       if (generation !== this.generation) return;
+      this.outlineFailed = true;
       window.clearTimeout(this.watchdog);
       window.clearTimeout(this.timer);
       this.detector?.terminate();
       this.detector = undefined;
       this.clearOutline();
       this.status('Camera ready');
-      $('camera-hint').textContent = 'Live outline unavailable. You can still take a photo.';
+      $('camera-hint').textContent = this.auto
+        ? AUTO_UNAVAILABLE
+        : 'Live outline unavailable. You can still take a photo.';
     };
     this.unavailable = unavailable;
     try {
@@ -359,16 +364,9 @@ export class Camera {
       this.detector.onmessage = ({ data }: MessageEvent<CameraReply>) => {
         if (generation !== this.generation) return;
         if (data.type === 'outline') this.inFlight = false;
-        if (this.capturing) {
-          // Auto mode keeps watching while a photo is taken, so a page turned meanwhile
-          // still counts as a change; otherwise the loop pauses until the capture ends.
-          if (data.type === 'outline' && this.auto) {
-            const motion =
-              data.outline && this.previous ? outlineMotion(this.previous, data.outline) : null;
-            if (motion === null || motion > AUTO.change) this.changedWhileCapturing = true;
-            this.previous = data.outline;
-            this.timer = window.setTimeout(() => this.sendFrame(generation, unavailable), 160);
-          }
+        if (this.capturing && (data.type === 'outline' || data.type === 'progress')) {
+          // The loop pauses while a photo is taken; a frame from just before is dropped, as
+          // the preview can freeze or go dark meanwhile. The capture restarts the loop.
           return;
         }
         if (data.type === 'progress') {
@@ -393,13 +391,7 @@ export class Camera {
   }
 
   private sendFrame(generation: number, unavailable: () => void) {
-    if (
-      generation !== this.generation ||
-      !this.detector ||
-      (this.capturing && !this.auto) ||
-      this.inFlight
-    )
-      return;
+    if (generation !== this.generation || !this.detector || this.capturing || this.inFlight) return;
     if (this.video.readyState < 2 || !this.video.videoWidth) {
       this.timer = window.setTimeout(() => this.sendFrame(generation, unavailable), 100);
       return;
@@ -433,8 +425,6 @@ export class Camera {
 
   private drawOutline(outline: PageOutline | null) {
     window.clearTimeout(this.expiry);
-    const motion = outline && this.previous ? outlineMotion(this.previous, outline) : null;
-    this.previous = outline;
     const hint = guidance(outline, this.video.videoWidth / Math.max(1, this.video.videoHeight));
     if (!outline) this.clearOutline();
     else {
@@ -445,17 +435,23 @@ export class Camera {
       );
       this.dialog.classList.toggle('page-found', hint === 'ok');
       this.dialog.classList.toggle('page-clipped', hint !== 'ok');
-      this.expiry = window.setTimeout(() => this.drawOutline(null), 1200);
+      this.expiry = window.setTimeout(() => this.expire(), 1200);
     }
     let text = HINTS[hint];
     if (this.auto) {
-      const step = autoStep(this.autoState, motion, hint === 'ok', performance.now());
-      this.autoState = step.state;
-      this.setCountdown(step.progress);
-      if (hint === 'ok') text = this.autoState.armed ? 'Hold still' : 'Turn to the next page';
-      if (step.progress >= 1) void this.capture();
+      const progress = this.autoCapture.frame(outline, hint === 'ok', performance.now());
+      this.setCountdown(progress);
+      if (hint === 'ok') text = this.autoCapture.waiting ? 'Turn to the next page' : 'Hold still';
+      if (progress >= 1) void this.capture();
     }
     this.status(text);
+  }
+
+  /** No reply for a while (a slow device): hide the outline without calling it a change. */
+  private expire() {
+    this.clearOutline();
+    this.autoCapture.stale();
+    this.status('Finding the page…');
   }
 
   private resize() {
@@ -515,17 +511,15 @@ export class Camera {
     if (!this.stream || this.shutter.disabled || this.capturing) return;
     const generation = this.generation;
     const started = performance.now();
+    const preview = { width: this.video.videoWidth, height: this.video.videoHeight };
     this.capturing = true;
-    this.changedWhileCapturing = false;
     this.shutter.disabled = true;
     this.flip.disabled = true;
     this.setCountdown(0);
     this.status('Taking photo…');
     window.clearTimeout(this.expiry);
-    if (!this.auto) {
-      window.clearTimeout(this.timer);
-      window.clearTimeout(this.watchdog);
-    }
+    window.clearTimeout(this.timer);
+    window.clearTimeout(this.watchdog);
     try {
       const shot = (await this.takeStill()) ?? (await this.grabFrame());
       if (generation !== this.generation) return;
@@ -533,6 +527,7 @@ export class Camera {
         method: shot.method,
         width: shot.width,
         height: shot.height,
+        preview,
         seconds: (performance.now() - started) / 1000,
       };
       const file = new File([shot.blob], `document-${Date.now()}.jpg`, { type: 'image/jpeg' });
@@ -542,9 +537,9 @@ export class Camera {
         this.captured(file, info);
         return;
       }
-      // Auto mode keeps the camera open; the next page needs a big change first.
+      // Auto mode keeps the camera open; the next page needs a page change first.
       this.captured(file, info, true);
-      this.autoState = { armed: this.changedWhileCapturing, steadySince: null };
+      this.autoCapture.taken();
       this.capturing = false;
       this.shutter.disabled = false;
       this.flip.disabled = this.flip.hidden;
@@ -553,7 +548,11 @@ export class Camera {
       void viewfinder.offsetWidth;
       viewfinder.classList.add('flash');
       this.status('Page taken');
-      this.timer = window.setTimeout(() => this.sendFrame(generation, this.unavailable), 160);
+      if (this.outlineFailed) this.showAuto();
+      else if (this.inFlight)
+        // A frame sent before the photo is still out; its reply restarts the loop.
+        this.watchdog = window.setTimeout(this.unavailable, 15000);
+      else this.timer = window.setTimeout(() => this.sendFrame(generation, this.unavailable), 160);
     } catch {
       if (generation !== this.generation) return;
       this.capturing = false;

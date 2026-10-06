@@ -125,6 +125,44 @@ test('light tints and photo midtones keep their color under the ink stretch', ()
   assert.ok(change / (count * 3) < 6, `photo change ${change / (count * 3)}`);
 });
 
+test('suggested fingers are left out of the ink estimate and are not stretched', () => {
+  const width = 256,
+    height = 320,
+    data = new Uint8ClampedArray(width * height * 4);
+  for (let y = 0; y < height; y++)
+    for (let x = 0; x < width; x++) {
+      const ink = x > 20 && x < width - 20 && y % 12 > 6 && y % 12 < 9 && x % 5 !== 0;
+      data.set([...(ink ? [120, 118, 112] : [236, 230, 218]), 255], (y * width + x) * 4);
+    }
+  // A finger from the right edge over gray text lines, as the page gate suggests it.
+  const finger = emptyMask(width, height);
+  for (let y = 100; y < 220; y++)
+    for (let x = 170; x < width; x++) {
+      data.set([200, 150, 120, 255], (y * width + x) * 4);
+      finger.data[
+        Math.floor((y * finger.height) / height) * finger.width +
+          Math.floor((x * finger.width) / width)
+      ] = 1;
+    }
+  const source = { width, height, data },
+    none = emptyMask(width, height),
+    field = estimatePaper(source, finger);
+  const before = cleanDocument(source, none, true, field, { excluded: none }),
+    after = cleanDocument(source, none, true, field, { excluded: finger }),
+    divided = cleanDocument(source, none, true, field, { contrast: false });
+  const at = (image: Pixels, x: number, y: number) => image.data[(y * width + x) * 4 + 1];
+  // Text next to the finger is as dark as text far from it.
+  assert.ok(at(before, 168, 163) > at(before, 61, 163) + 5);
+  assert.equal(at(after, 168, 163), at(after, 61, 163));
+  // The finger keeps the plain division (no darker, more saturated skin).
+  for (const [x, y] of [
+    [220, 160],
+    [240, 200],
+  ])
+    assert.equal(at(after, x, y), at(divided, x, y));
+  assert.ok(at(before, 240, 200) < at(divided, 240, 200) - 5);
+});
+
 test('removal fills selected pixels from paper and leaves all other pixels unchanged', () => {
   const source = paper(),
     mask = emptyMask(source.width, source.height);

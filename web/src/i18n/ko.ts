@@ -297,7 +297,8 @@ export const ko: Record<string, string> = {
 
   // Capture
   'Auto capture': '자동 촬영',
-  'Auto capture takes each page when it is steady.': '페이지가 멈춰 있으면 자동으로 찍습니다.',
+  'Auto capture takes each page when it is steady, with quick processing.':
+    '페이지가 멈춰 있으면 자동으로 찍고 빠르게 처리합니다.',
   'Point the camera at a page': '페이지를 비춰 주세요',
   'Point the camera at one page': '한 페이지만 비춰 주세요',
   'Move back a little': '조금 뒤로 물러나세요',
@@ -305,6 +306,8 @@ export const ko: Record<string, string> = {
   'Hold the camera straight over the page': '카메라를 페이지와 나란하게 들어 주세요',
   'Hold still': '그대로 멈춰 주세요',
   'Turn to the next page': '다음 페이지로 넘겨 주세요',
+  'Auto capture needs the live outline, which is unavailable. Take photos with the shutter.':
+    '실시간 윤곽을 쓸 수 없어 자동 촬영이 멈췄습니다. 셔터로 찍어 주세요.',
   'Page taken': '찍었습니다',
   'Sharpen text in Original color': '원래 색에서 글자 선명하게',
   Capture: '촬영',
@@ -334,8 +337,8 @@ export const koPatterns: [RegExp, string][] = [
   [/^(\d+) pages? added$/, '$1쪽 추가됨'],
   [/^(\d+) in progress$/, '$1쪽 처리 중'],
   [/^(\d+) not scanned$/, '$1쪽 실패'],
-  [/^Camera photo · (.+) · ([\d.]+) s$/, '카메라 사진 · $1 · $2초'],
-  [/^Video frame · (.+) · ([\d.]+) s$/, '영상 프레임 · $1 · $2초'],
+  [/^Camera photo · (.+) · preview (.+) · ([\d.]+) s$/, '카메라 사진 · $1 · 미리보기 $2 · $3초'],
+  [/^Video frame · (.+) · preview (.+) · ([\d.]+) s$/, '영상 프레임 · $1 · 미리보기 $2 · $3초'],
   [/^Remove page (\d+)$/, '$1쪽 빼기'],
   [/^Added as page (\d+)\.$/, '$1쪽으로 추가했습니다.'],
   [/^Edges refined · (\d+)$/, '가장자리 보정 · $1'],

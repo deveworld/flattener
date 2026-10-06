@@ -139,25 +139,85 @@ test('capture guidance names one problem at a time, in priority order', async ()
   assert.equal(guidance(quad(square(0.15, 0.1, 0.85, 0.9), 0.56), 0.75), 'ok');
 });
 
-test('auto capture waits for a steady page and re-arms only after a big change', async () => {
-  const { AUTO, autoStep } = await import('../src/camera-outline');
-  let state = { armed: true, steadySince: null as number | null };
-  let step = autoStep(state, 0.005, true, 0);
-  state = step.state;
-  step = autoStep(state, 0.005, true, AUTO.steadyMs + AUTO.countdownMs / 2);
-  assert.ok(step.progress > 0.4 && step.progress < 0.6);
-  step = autoStep(step.state, 0.05, true, AUTO.steadyMs + AUTO.countdownMs); // a shake
-  assert.equal(step.progress, 0);
-  step = autoStep(step.state, 0.005, false, 5000); // badly framed
-  assert.equal(step.progress, 0);
-  // After a capture nothing happens until the page changes a lot.
-  state = { armed: false, steadySince: null };
-  for (const motion of [0.005, 0.03, 0.08]) {
-    step = autoStep(state, motion, true, 10_000);
-    assert.equal(step.state.armed, false);
+/** A page outline: a rectangle in normalized frame coordinates, moved by (dx, dy). */
+function page(dx = 0, dy = 0): PageOutline {
+  const points: Point[] = [
+    [0.2 + dx, 0.15 + dy],
+    [0.8 + dx, 0.15 + dy],
+    [0.8 + dx, 0.85 + dy],
+    [0.2 + dx, 0.85 + dy],
+  ];
+  return { points, area: 0.42, clipped: false };
+}
+
+/** Feeds ``outline`` every 200 ms from ``from`` to ``to`` ms; returns the largest progress. */
+function feed(
+  auto: InstanceType<typeof import('../src/camera-outline').AutoCapture>,
+  outline: (t: number) => PageOutline | null,
+  from: number,
+  to: number,
+) {
+  let most = 0;
+  for (let t = from; t < to; t += 200) most = Math.max(most, auto.frame(outline(t), true, t));
+  return most;
+}
+
+test('auto capture counts down on a steady page and stops on a shake or bad framing', async () => {
+  const { AUTO, AutoCapture } = await import('../src/camera-outline');
+  const auto = new AutoCapture();
+  auto.frame(page(), true, 0);
+  auto.frame(page(), true, 100);
+  const half = auto.frame(page(), true, 100 + AUTO.steadyMs + AUTO.countdownMs / 2);
+  assert.ok(half > 0.4 && half < 0.6, `${half}`);
+  assert.equal(auto.frame(page(0.03), true, 3000), 0, 'a shake restarts the wait');
+  assert.equal(auto.frame(page(0.03), false, 5000), 0, 'badly framed');
+  assert.equal(
+    feed(auto, () => page(0.03), 6000, 6000 + AUTO.steadyMs + AUTO.countdownMs + 400),
+    1,
+  );
+});
+
+test('after a photo, gaps, late replies and a frozen preview do not take the page again', async () => {
+  const { AUTO, AutoCapture } = await import('../src/camera-outline');
+  const auto = new AutoCapture();
+  feed(auto, () => page(), 0, 3000);
+  auto.taken();
+  // The preview froze while the photo was taken: those replies are not fed. Afterwards the
+  // same page comes back with a little hand shake.
+  const jitter = (t: number) => page(0.004 * Math.sin(t / 300), 0.004 * Math.cos(t / 500));
+  assert.equal(feed(auto, jitter, 4000, 5000), 0);
+  // Single missed frames and gaps shorter than AUTO.lostMs are detector misses.
+  for (let t = 5000; t < 65_000; t += 1000) {
+    auto.frame(null, true, t);
+    auto.frame(null, true, t + AUTO.lostMs - 100);
+    assert.equal(feed(auto, jitter, t + AUTO.lostMs, t + 1000), 0, `gap at ${t}`);
   }
-  assert.equal(autoStep(state, 0.2, true, 10_000).state.armed, true);
-  assert.equal(autoStep(state, null, true, 10_000).state.armed, true);
+  // Late replies hide the outline (stale) without counting as a page change.
+  auto.stale();
+  assert.equal(feed(auto, jitter, 70_000, 75_000), 0);
+  assert.ok(auto.waiting);
+});
+
+test('a turned page or a page gone for a while allows the next photo', async () => {
+  const { AUTO, AutoCapture } = await import('../src/camera-outline');
+  const steady = AUTO.steadyMs + AUTO.countdownMs + 400;
+  const auto = new AutoCapture();
+  feed(auto, () => page(), 0, 3000);
+  auto.taken();
+  auto.frame(page(0.15), true, 3200); // a hand pulls the outline aside
+  assert.ok(!auto.waiting);
+  assert.equal(
+    feed(auto, () => page(), 3400, 3400 + steady),
+    1,
+  );
+  auto.taken();
+  auto.frame(null, true, 10_000);
+  auto.frame(null, true, 10_000 + AUTO.lostMs);
+  assert.ok(!auto.waiting, 'a page gone for AUTO.lostMs');
+  assert.equal(
+    feed(auto, () => page(), 11_000, 11_000 + steady),
+    1,
+  );
 });
 
 test('the live outline joins a page that a dark band split, but not a separate object', () => {

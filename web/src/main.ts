@@ -39,6 +39,8 @@ let busy = false,
 let focusAction = false;
 let refining = false;
 let activeOptions: Options | undefined, resultOptions: Options | undefined;
+/** The color mode last chosen; new scans and auto-captured pages start in it. */
+let colorChoice = true;
 let preparationState: PreparationState = 'idle';
 let rawBlob: Blob | undefined, suggestion: Mask | undefined, settings: EditSettings | undefined;
 let editWorker: Worker | undefined,
@@ -161,7 +163,7 @@ function busyState(value: boolean) {
 function edited() {
   return (
     !!settings &&
-    (!settings.cleanColor ||
+    (settings.cleanColor !== (resultOptions?.cleanColor ?? true) ||
       !!settings.rotation ||
       !!maskCount(settings.mask) ||
       !isFullCrop(settings.crop))
@@ -377,7 +379,9 @@ function chooseFile(file: File, capture?: CaptureInfo) {
   if (capture)
     $('capture-info').textContent =
       `${capture.method === 'photo' ? 'Camera photo' : 'Video frame'} · ` +
-      `${capture.width} × ${capture.height} · ${capture.seconds.toFixed(1)} s`;
+      `${capture.width} × ${capture.height} · ` +
+      `preview ${capture.preview.width} × ${capture.preview.height} · ` +
+      `${capture.seconds.toFixed(1)} s`;
   view('original');
   busyState(false);
   message('Opening your photo…');
@@ -651,11 +655,11 @@ function scannerWorker(): Worker {
         rawBlob = data.raw;
         suggestion = data.suggestion;
         settings = {
-          cleanColor: true,
+          cleanColor: resultOptions?.cleanColor ?? true,
           mask: emptyMask(metadata.width, metadata.height),
           rotation: 0,
         };
-        $<HTMLSelectElement>('color-mode').value = 'clean';
+        $<HTMLSelectElement>('color-mode').value = settings.cleanColor ? 'clean' : 'original';
         installResult(data.blob);
         busyState(false);
         $<HTMLButtonElement>('show-scan').disabled = false;
@@ -746,6 +750,7 @@ function runBatch() {
         orient: $<HTMLInputElement>('orient').checked,
         maxSide: Number($<HTMLSelectElement>('resolution').value),
         sharpen: $<HTMLInputElement>('sharpen').checked,
+        cleanColor: colorChoice,
       },
       base: new URL('.', document.baseURI).href,
     } satisfies WorkerRequest);
@@ -794,12 +799,13 @@ function startScan(quality: Options['quality'] = 'fast') {
   $('error').hidden = true;
   const options: Options =
     quality === 'refined'
-      ? { ...resultOptions!, quality }
+      ? { ...resultOptions!, quality, cleanColor: colorChoice }
       : {
           quality,
           orient: $<HTMLInputElement>('orient').checked,
           maxSide: Number($<HTMLSelectElement>('resolution').value),
           sharpen: $<HTMLInputElement>('sharpen').checked,
+          cleanColor: colorChoice,
         };
   if (quality === 'refined') {
     refining = true;
@@ -941,11 +947,8 @@ $('rotate').onclick = () => {
   if (settings) applyEdit({ ...cloneSettings(settings), rotation: (settings.rotation + 1) % 4 });
 };
 $<HTMLSelectElement>('color-mode').onchange = () => {
-  if (settings)
-    applyEdit({
-      ...cloneSettings(settings),
-      cleanColor: $<HTMLSelectElement>('color-mode').value === 'clean',
-    });
+  colorChoice = $<HTMLSelectElement>('color-mode').value === 'clean';
+  if (settings) applyEdit({ ...cloneSettings(settings), cleanColor: colorChoice });
 };
 $('undo-edit').onclick = () => {
   if (editHistory.length) applyEdit(cloneSettings(editHistory[editHistory.length - 1]), 'pop');
@@ -954,7 +957,7 @@ $('reset-edits').onclick = () => {
   if (settings)
     applyEdit(
       {
-        cleanColor: true,
+        cleanColor: resultOptions?.cleanColor ?? true,
         mask: { ...settings.mask, data: new Uint8Array(settings.mask.data.length) },
         rotation: 0,
       },

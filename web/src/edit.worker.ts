@@ -27,6 +27,7 @@ self.onmessage = async ({ data }: MessageEvent<EditRequest>) => {
       data.settings.mask,
       data.settings.cleanColor,
       estimatePaper(source, excluded),
+      { excluded },
     );
     // Sharpening only in Original color (see ``scan`` in scanner.ts).
     if (!data.settings.cleanColor) page = sharpenPixels(page, data.sharpen);

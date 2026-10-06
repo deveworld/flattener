@@ -21,8 +21,10 @@ export type Options = {
   quality: 'fast' | 'refined';
   orient: boolean;
   maxSide: number;
-  /** Unsharp masking after the render, scaled by how much the page was reduced. */
+  /** Unsharp masking in Original color, scaled by how much the page was reduced. */
   sharpen: boolean;
+  /** The color of the returned scan: Clean color, or the original color. */
+  cleanColor: boolean;
 };
 export type Backend = 'webgpu' | 'wasm';
 export type Point = [number, number];
@@ -33,6 +35,8 @@ export type CaptureInfo = {
   method: 'photo' | 'frame';
   width: number;
   height: number;
+  /** The live preview's video size, to compare its framing with the photo's. */
+  preview: { width: number; height: number };
   seconds: number;
 };
 export type CameraRequest =

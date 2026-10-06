@@ -65,7 +65,7 @@ Browsers without cross-origin isolation or WASM thread support use one thread.
 
 - Open **Camera** for a live page outline. Taking a photo starts flattening automatically.
   The shutter takes a still photo at the camera's full resolution where the browser supports it (`ImageCapture.takePhoto`), and a frame of the preview video otherwise.
-  Photos above 20 megapixels are reduced when taken. The scan details show the method, size and capture time.
+  Photos above 20 megapixels are reduced when taken. The scan details show the method, the photo and preview sizes, and the capture time.
   One hint at a time guides the framing, judged from the page outline only: no page, page cut off at the edge, too close, too small, tilted.
   The scanner loads and warms up while you frame the page, then stays ready for the next photo.
   You can take a photo while it prepares; processing starts as soon as it is ready.
@@ -75,8 +75,10 @@ Browsers without cross-origin isolation or WASM thread support use one thread.
   The camera closes after capture (unless auto capture is on), on leaving the page, or when the tab is hidden.
 - **Auto capture** in the camera is for scanning a book page by page.
   When the outline holds still and the framing hint is clear, a countdown runs on the shutter and the photo is taken.
-  A large outline change (turning the page, a hand in the frame) restarts the countdown, and the next photo waits for such a change, so a page is not taken twice.
-  The camera stays open; each photo is flattened in turn with the current settings and added to the PDF pages.
+  Movement restarts the countdown. After a photo, the next one waits for the page to change: a large outline change (turning the page, a hand in the frame) or no page for half a second.
+  Outlines the detector misses briefly or reports late do not count, and neither do frames from while the photo is taken, as the preview can freeze then.
+  The camera stays open; each photo is flattened in turn with quick processing, the current settings and the last chosen color, and added to the PDF pages.
+  If the live outline fails, the camera says that auto capture has stopped; the shutter still works.
   The choice is remembered on the device.
 - Open a JPEG, PNG or WebP by file picker, drop or paste. Flattening starts as soon as the photo opens.
 - Scans start with Quick processing and automatic orientation.
@@ -85,6 +87,7 @@ Browsers without cross-origin isolation or WASM thread support use one thread.
   Canceling or failing refinement keeps that scan and its edits; completing refinement replaces them.
 - Follow page detection, geometry and color correction under **See processing steps**.
 - Use **Clean color** to balance paper color and smooth lighting variation, darken text and whiten the paper.
+  New scans start in the color mode you chose last.
 - Review suggested fingers near page edges, then adjust the selection with the brush.
 - Crop by dragging the frame's corners, edges or inside; rotate, undo edits, compare with the source and inspect at 100%.
 - Save the scan as PNG, JPG or PDF. **Add to PDF** collects scans as pages, kept while you go back (**<**) to scan the next one, and **Save PDF** writes them into one file.
@@ -122,6 +125,7 @@ Filling replaces selected pixels with surrounding paper color, including any wri
 Color correction estimates paper brightness and color from local patches, then adjusts the image toward that estimate.
 In the same patches it estimates the ink level (a low percentile of brightness relative to the paper) and stretches the range between ink and paper so that text turns dark; levels near the paper ease to white.
 Patches with many midtones (photos, colored print, dark pages) are stretched and whitened less, a page with few text patches is stretched less overall, and light tints keep their color.
+Suggested fingers are left out of both estimates and are not stretched, so text beside a finger is corrected like the rest of the page.
 For strong shadow boundaries, textured or colored paper and large illustrations, compare with **Original color**.
 See [Bako et al., Removing Shadows from Images of Documents](https://civc.ucsb.edu/graphics/Papers/ACCV2016_DocShadow/) for background-estimation methods.
 

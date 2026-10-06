@@ -9,6 +9,7 @@ import {
   suggestFingers,
 } from './cleanup';
 import { createSteps, encode } from './previews';
+import { sharpenPixels } from './sharpen';
 import type { Backend, Pixels, WorkerReply, WorkerRequest } from './types';
 
 let models: Models | undefined;
@@ -155,15 +156,16 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
     });
     const field = estimatePaper(result, suggestion);
     await steps.paper(result, field);
-    const corrected = cleanDocument(result, size, true, field);
+    const corrected = cleanDocument(result, size, true, field, { excluded: suggestion });
     await steps.image(
       corrected,
       'color',
       'Color corrected',
       'Paper lighting and color balanced. You can switch back to Original color.',
     );
+    // The scan is returned in the chosen color; edits recalculate from ``raw``.
     const raw = await encode(result),
-      blob = await encode(corrected);
+      blob = await encode(options.cleanColor ? corrected : sharpenPixels(result, output.sharpen));
     report({
       type: 'result',
       blob,
