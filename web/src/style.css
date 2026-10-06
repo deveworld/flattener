@@ -587,14 +587,15 @@ body:not(.has-photo):has(#pages:not([hidden])) .empty-state {
   font-weight: 600;
 }
 .refine-controls {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px 16px;
   padding-top: 20px;
 }
-.refine-controls .help {
-  margin: 0;
+#refine {
+  border: 1px solid #a9b7ad;
+  background: var(--white);
+  color: var(--ink);
+}
+#refine:hover {
+  background: #e4ebe5;
 }
 .adjustments {
   display: flex;
@@ -1411,6 +1412,9 @@ body.camera-open {
   #add-page,
   #edit-open {
     flex: 1;
+  }
+  #refine {
+    width: 100%;
   }
   .crop-editor {
     padding: 20px 16px;

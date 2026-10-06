@@ -42,8 +42,6 @@ export const ko: Record<string, string> = {
   'Apply removal': '지우기 적용',
   'Drop your photo here': '여기에 사진을 놓으세요',
   'Refine scan': '정밀 스캔',
-  'Take more time to refine the page shape.': '시간을 더 들여 페이지 모양을 다듬습니다.',
-  'Takes longer and replaces your edits.': '시간이 더 걸리고, 편집한 내용이 초기화됩니다.',
   Color: '색',
   'Clean color': '색 보정',
   'Original color': '원래 색',

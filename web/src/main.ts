@@ -152,9 +152,6 @@ function busyState(value: boolean) {
   $('result-actions').hidden = !resultBlob || editing || editorOpen || editMode;
   $('refine-controls').hidden =
     !resultBlob || resultOptions?.quality !== 'fast' || locked || editMode;
-  $('refine-help').textContent = editHistory.length
-    ? 'Takes longer and replaces your edits.'
-    : 'Take more time to refine the page shape.';
   const tools = !resultBlob || busy || editorOpen || !editMode;
   $('edit-controls').hidden = tools;
   $('adjustments').hidden = tools;
