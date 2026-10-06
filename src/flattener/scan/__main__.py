@@ -129,7 +129,7 @@ def _aspect(text: str) -> str | float:
 
 def parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="python -m flattener.scan",
+        prog="flattener",
         description="Scan photos of single pages into flat page images.",
     )
     parser.add_argument("images", nargs="+", type=Path, help="JPEG or PNG photos")

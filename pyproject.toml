@@ -3,19 +3,42 @@ requires = ["hatchling>=1.27,<2"]
 build-backend = "hatchling.build"
 
 [project]
-name = "flattener"
+name = "flattener-scan"
 version = "1.0.0"
 description = "Document photo scanner: page detection, orientation, dewarping and one render"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 license = "Apache-2.0 AND MIT AND OFL-1.1"
 license-files = ["LICENSE", "src/flattener/assets/fonts/OFL.txt"]
+authors = [{ name = "World" }]
+keywords = ["document scanner", "document dewarping", "document rectification", "page detection", "ocr preprocessing"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Image Processing",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
     "huggingface-hub>=1,<3",
     "numpy>=2.0,<3",
     "Pillow>=11,<13",
     "torch>=2.7,<3",
 ]
+
+[project.scripts]
+flattener = "flattener.scan.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/deveworld/flattener"
+Source = "https://github.com/deveworld/flattener"
+Issues = "https://github.com/deveworld/flattener/issues"
+Benchmarks = "https://github.com/deveworld/flattener/blob/main/docs/BENCHMARKS.md"
+Models = "https://huggingface.co/DevWorld/flattener"
 
 [dependency-groups]
 dev = ["pytest>=8,<10", "ruff>=0.11,<1", "build>=1.2,<2", "hatchling>=1.27,<2"]

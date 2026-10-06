@@ -61,7 +61,7 @@ wheels = [
 ]
 
 [[package]]
-name = "flattener"
+name = "flattener-scan"
 version = "1.0.0"
 source = { editable = "." }
 dependencies = [
