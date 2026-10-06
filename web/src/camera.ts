@@ -22,12 +22,15 @@ export class Camera {
   private outline: PageOutline | null = null;
   private trigger?: HTMLElement;
   private capturing = false;
+  private capturedClose = false;
   private permission?: PermissionStatus;
   private nativeCapture = $<HTMLInputElement>('camera-capture');
 
   constructor(
     private captured: (file: File) => void,
     private choosePhoto: () => void,
+    /** After the camera closes; ``dismissed`` is false when it closed for a taken photo. */
+    private closed: (dismissed: boolean) => void = () => {},
   ) {
     $('camera-close').onclick = () => this.close();
     $('camera-retry').onclick = () => void this.start();
@@ -89,7 +92,12 @@ export class Camera {
     this.stop();
     if (this.dialog.open) this.dialog.close();
     document.body.classList.remove('camera-open');
-    if (wasOpen) this.trigger?.focus({ preventScroll: true });
+    if (wasOpen) {
+      this.trigger?.focus({ preventScroll: true });
+      const dismissed = !this.capturedClose;
+      this.capturedClose = false;
+      this.closed(dismissed);
+    }
   }
 
   private stop() {
@@ -353,6 +361,7 @@ export class Camera {
       );
       if (generation !== this.generation) return;
       if (!blob) throw new Error('The photo could not be saved. Try taking it again.');
+      this.capturedClose = true;
       this.close();
       this.captured(new File([blob], `document-${Date.now()}.jpg`, { type: 'image/jpeg' }));
     } catch {

@@ -282,6 +282,7 @@ export const ko: Record<string, string> = {
   'The camera could not open. Try again.': '카메라를 열지 못했습니다. 다시 시도하세요.',
   // Start, saving and pages
   'Back to start': '처음으로',
+  'Source code on GitHub': 'GitHub 소스 코드',
   'or drop': '또는 끌어다 놓기',
   'Add to PDF': 'PDF에 추가',
   'Added to PDF': 'PDF에 추가됨',

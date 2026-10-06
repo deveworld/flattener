@@ -148,6 +148,31 @@ h1 {
 .brand-dot {
   color: var(--green);
 }
+.header-end {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+.github-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  margin-right: -10px;
+  border-radius: 50%;
+  color: var(--ink);
+  transition: background 150ms ease;
+}
+.github-link:hover {
+  background: #dfe6e0;
+}
+.github-link svg {
+  width: 24px;
+  height: 24px;
+  fill: currentColor;
+  stroke: none;
+}
 .privacy {
   display: flex;
   align-items: center;
@@ -1275,6 +1300,28 @@ body.camera-open {
     width: 28px;
     height: 28px;
     margin-right: 8px;
+  }
+  /* Past the start screen the scan takes the whole height; the back button stays. */
+  body.has-photo .app-header {
+    display: none;
+  }
+  body.has-photo .workspace {
+    margin-top: max(8px, env(safe-area-inset-top));
+  }
+  .app-header {
+    flex-wrap: nowrap;
+  }
+  .brand {
+    font-size: 24px;
+  }
+  .header-end {
+    gap: 2px;
+    font-size: 14px;
+  }
+  .github-link {
+    width: 40px;
+    height: 40px;
+    margin-right: -8px;
   }
   .workspace {
     width: calc(100% - 32px);

@@ -51,7 +51,31 @@ const cropEditor = new CropEditor();
 const camera = new Camera(
   (file) => chooseFile(file),
   () => fileInput.click(),
+  (dismissed) => {
+    if (dismissed && !selected && !followingHistory) leaveAway();
+  },
 );
+
+// History: the camera and an open photo share one entry above the start screen, so the
+// browser's back gesture returns to the start screen instead of leaving the app.
+let followingHistory = false;
+if (history.state?.flattener === 'away') history.replaceState(null, '');
+function enterAway() {
+  if (history.state?.flattener !== 'away') history.pushState({ flattener: 'away' }, '');
+}
+function leaveAway() {
+  if (history.state?.flattener === 'away') history.back();
+}
+window.addEventListener('popstate', () => {
+  if (history.state?.flattener === 'away') return;
+  followingHistory = true;
+  try {
+    if (camera.isOpen) camera.close();
+    if (selected) showStart();
+  } finally {
+    followingHistory = false;
+  }
+});
 const cloneSettings = (s: EditSettings): EditSettings => ({
   ...s,
   mask: { ...s.mask, data: s.mask.data.slice() },
@@ -262,6 +286,7 @@ function showStart() {
   }
   clearResult();
   selected = undefined;
+  document.body.classList.remove('has-photo');
   photoReady = false;
   retryable = false;
   originalImage.hidden = true;
@@ -326,7 +351,9 @@ function chooseFile(file: File) {
     return;
   }
   prepareScanner();
+  enterAway();
   selected = file;
+  document.body.classList.add('has-photo');
   photoReady = false;
   retryable = false;
   $('error').hidden = true;
@@ -371,10 +398,12 @@ $('drop-choose').onclick = () => fileInput.click();
 $('open-camera').onclick = () => {
   if (busy || editing || editorOpen) return;
   prepareScanner();
+  enterAway();
   camera.open($('open-camera'));
 };
 $('back').onclick = () => {
-  showStart();
+  if (history.state?.flattener === 'away') history.back();
+  else showStart();
   $('open-camera').focus({ preventScroll: true });
   scrollTo($('workspace'));
 };
@@ -798,12 +827,7 @@ function applyEdit(next: EditSettings, history: 'push' | 'pop' | 'reset' = 'push
         }
         busyState(false);
         view('scan');
-        message(
-          'Your changes are ready.',
-          maskCount(settings.mask)
-            ? 'Selected areas filled with paper color. Undo edit restores the previous version.'
-            : '',
-        );
+        message('');
         if (focusAction) $('download').focus({ preventScroll: true });
       };
       editWorker.onerror = () => editFailed('The image editor stopped. Try the edit again.');
